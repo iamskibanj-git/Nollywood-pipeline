@@ -1912,3 +1912,13 @@ Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 
 - Duration/lip-sync observation table being gathered (11 clips so far)
 
 **Vehicle scene identification fix:** All 3 Vision passes (1st propose, 2nd verify, 3rd reconcile) now include `SPATIAL CONTEXT: Nigerian production, LEFT-HAND DRIVE` with explicit instructions to locate the steering wheel first and use it to anchor driver/passenger identification. Previously, Vision confused driver/passenger in ch1_sc5 despite having character visual descriptions — the amber lighting and side-angle made clothing-based identification unreliable. Steering wheel anchoring provides a definitive spatial reference that doesn't depend on character appearance.
+
+**Known limitation: persistent gender bias in vehicle scenes.** Despite steering wheel anchoring, left-hand drive hints, and independent identification prompts, Sonnet consistently identifies the man as the driver in ch1_sc5's amber-lit car interior. Four separate Vision calls (2nd pass × 2, 3rd pass × 2) all made the same error. The 3rd pass's BLOCKING_MISMATCH detection worked correctly (detected the discrepancy between manual swap and Vision's assessment), but re-verification also got it wrong — creating a loop that undid the manual fix.
+
+**Fix: `manually_swapped` lock.** When `swap-scene-blocking.js` sets `manually_swapped: true` on a scene asset, the code treats the blocking as locked — `hadCorrections` is forced to `false`, preventing the 3rd pass from running and undoing the manual fix. This is the human-override escape hatch for when Vision is persistently wrong.
+
+**3rd Vision pass prompt restructured (anti-anchoring).** Changed from presenting "VERIFIED CHARACTER POSITIONS (claimed to match)" upfront (which caused confirmation bias) to a two-phase approach: STEP 1 asks Vision to independently identify characters using visual descriptions + spatial anchors (steering wheel), THEN compare with claimed positions. This eliminates anchoring bias for cases where Vision CAN correctly identify characters. Also added raw response logging (`[SHOT-RECONCILE] Raw response (first 300 chars):`) and markdown code block stripping for the response.
+
+**Utility scripts added:**
+- `scripts/clear-vision-verified.js` — clears `vision_blocking_verified` for specific scenes, forcing 2nd Vision pass re-run. Usage: `node scripts/clear-vision-verified.js --scene 1_5 --commit`
+- `scripts/swap-scene-blocking.js` — swaps character positions for a 2-character scene, splitting spatial vs visual descriptions so clothing/pronouns stay with the correct character. Sets `manually_swapped: true` lock. Usage: `node scripts/swap-scene-blocking.js --scene 1_5 --commit`

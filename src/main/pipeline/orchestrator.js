@@ -5110,10 +5110,19 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }],
       });
 
-      const resultText = (response.content?.[0]?.text || '').trim();
+      let resultText = (response.content?.[0]?.text || '').trim();
+      this.log(`[SHOT-RECONCILE] Raw response (first 300 chars): ${resultText.slice(0, 300)}`);
+
+      // Strip markdown code block wrapping if present
+      // Claude often wraps output in ```...``` or ```text...```
+      const mdBlock = resultText.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```\s*$/);
+      if (mdBlock) {
+        resultText = mdBlock[1].trim();
+        this.log('[SHOT-RECONCILE] Stripped markdown code block wrapping');
+      }
 
       // ── Check for BLOCKING_MISMATCH — 2nd Vision pass got it wrong ──
-      if (resultText.startsWith('BLOCKING_MISMATCH')) {
+      if (resultText.startsWith('BLOCKING_MISMATCH') || resultText.includes('BLOCKING_MISMATCH:')) {
         this.log(`[SHOT-RECONCILE] ⚠ BLOCKING MISMATCH DETECTED: ${resultText.slice(0, 200)}`);
         this.log('[SHOT-RECONCILE] 2nd Vision pass misidentified characters — signalling re-verification needed');
         // Return special marker so the caller can trigger re-verification
@@ -5871,11 +5880,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           item.visionRefinedChars = visionRefinedChars;
         } else if (visionBlockingVerified) {
           // Already verified in a previous run (persisted in DB) — skip Vision call
-          // Load hadCorrections flag from DB if available.
-          // DEFAULT TO TRUE when flag is missing — scenes verified before Session 25
-          // don't have this flag, and we'd rather run a cheap 3rd pass check than
-          // silently propagate wrong blocking through all clips in the scene.
+          // Load hadCorrections flag and manuallySwapped flag from DB.
+          // DEFAULT hadCorrections TO TRUE when flag is missing — scenes verified
+          // before Session 25 don't have this flag, and we'd rather run a cheap
+          // 3rd pass check than silently propagate wrong blocking.
           let hadCorr = true; // safe default: assume corrections happened
+          let manualSwap = false;
           if (sceneAssetId) {
             try {
               const sceneAssetCheck = db.getAssets(projectId, { type: 'scene_image_cinematic' })
@@ -5887,10 +5897,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                 if (pu.blocking_had_corrections === false) hadCorr = false;
                 else if (pu.blocking_had_corrections === true) hadCorr = true;
                 // undefined → stays true (safe default)
+                manualSwap = pu.manually_swapped === true;
               }
             } catch (_) {}
           }
-          verifiedBlockingCache[sceneKey] = { chars: visionRefinedChars, hadCorrections: hadCorr };
+          if (manualSwap) {
+            this.log(`[VISION-VERIFY] ${sceneKey}: manually swapped — locked, skipping all Vision re-checks`);
+            hadCorr = false; // prevent 3rd pass from running (and undoing the manual fix)
+          }
+          verifiedBlockingCache[sceneKey] = { chars: visionRefinedChars, hadCorrections: hadCorr, manuallySwapped: manualSwap };
         } else if (verifiedBlockingCache[sceneKey]) {
           // Already verified for this scene in THIS run — use cached result
           visionRefinedChars = verifiedBlockingCache[sceneKey].chars;
