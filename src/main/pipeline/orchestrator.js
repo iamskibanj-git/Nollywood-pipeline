@@ -4697,6 +4697,179 @@ Output ONLY the JSON array, no explanation.`,
   }
 
   /**
+   * Verify and correct vision-refined blocking by examining the ACTUAL scene
+   * image (start frame). The original _refineBlockingWithVision() proposes
+   * blocking based on the empty location image BEFORE the scene is rendered.
+   * Cinema Studio may place characters differently than proposed. This method
+   * reads the rendered scene image and describes where characters ACTUALLY are,
+   * correcting any mismatches.
+   *
+   * Called once per scene at video gen time, before clips are generated.
+   *
+   * @param {string} sceneImagePath - Path to the rendered scene image (start frame)
+   * @param {Array} characters - Array of { name, baseName, position } from stashed blocking
+   * @returns {Array} Corrected characters array with positions matching the scene image
+   */
+  async _verifyBlockingWithSceneImage(sceneImagePath, characters) {
+    const fs = require('fs');
+
+    if (!characters || characters.length === 0) return characters;
+
+    try {
+      const apiKey = this.store.get('claudeApiKey');
+      if (!apiKey) {
+        this.log('[VISION-VERIFY] No Claude API key — using stashed blocking as-is');
+        return characters;
+      }
+
+      if (!fs.existsSync(sceneImagePath)) {
+        this.log(`[VISION-VERIFY] Scene image not found: ${sceneImagePath} — using stashed blocking`);
+        return characters;
+      }
+
+      // ── Resize image if needed ──
+      let imageData;
+      let mimeType = 'image/jpeg';
+      const rawSize = fs.statSync(sceneImagePath).size;
+
+      if (rawSize > 3 * 1024 * 1024) {
+        const path = require('path');
+        const { execSync } = require('child_process');
+        let ffmpegPath = null;
+        for (const cmd of ['ffmpeg', 'C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe']) {
+          try { execSync(`"${cmd}" -version`, { stdio: 'ignore' }); ffmpegPath = cmd; break; } catch (_) {}
+        }
+        if (ffmpegPath) {
+          const tmpJpeg = path.join(path.dirname(sceneImagePath), `_verify_tmp_${Date.now()}.jpg`);
+          try {
+            execSync(`"${ffmpegPath}" -i "${sceneImagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpJpeg}"`, { timeout: 15000, stdio: 'pipe' });
+            imageData = fs.readFileSync(tmpJpeg);
+            try { fs.unlinkSync(tmpJpeg); } catch (_) {}
+          } catch (resizeErr) {
+            imageData = fs.readFileSync(sceneImagePath);
+            mimeType = sceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+          }
+        } else {
+          imageData = fs.readFileSync(sceneImagePath);
+          mimeType = sceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+        }
+      } else {
+        imageData = fs.readFileSync(sceneImagePath);
+        mimeType = sceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+      }
+
+      const base64Image = imageData.toString('base64');
+      if (base64Image.length > 5 * 1024 * 1024) {
+        this.log('[VISION-VERIFY] Image too large — using stashed blocking');
+        return characters;
+      }
+
+      // Build character list with base names for the prompt
+      const charList = characters.map(c => `@${c.baseName || c.name}`).join(', ');
+
+      const Anthropic = require('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey });
+
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 600,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mimeType, data: base64Image },
+            },
+            {
+              type: 'text',
+              text: `You are verifying character positions in a scene image for an AI video generation pipeline.
+
+CHARACTERS IN THIS SCENE: ${charList}
+
+TASK: Look at this scene image and describe WHERE each character is ACTUALLY positioned. Focus on:
+- Distance from camera (closest, middle, furthest)
+- Left/right/center placement in the frame
+- Physical relationship to visible objects (cars, trees, furniture, doorways, etc.)
+- Body orientation and gaze direction
+
+RULES:
+- Describe what you SEE, not what you think should be there.
+- Be spatially precise — "closest to camera", "further back", "on the left side of frame near the silver car".
+- Reference actual objects visible in the image.
+- One concise sentence per character.
+- Characters must NEVER be described as looking at the camera.
+
+OUTPUT FORMAT (JSON array, same order as input character list):
+[
+  { "name": "character_name", "blocking": "spatial description of actual position in the image" }
+]
+
+Output ONLY the JSON array.`,
+            },
+          ],
+        }],
+      });
+
+      const text = response.content?.[0]?.text || '';
+      this.log(`[VISION-VERIFY] Raw response: ${text.slice(0, 300)}`);
+
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) {
+        this.log('[VISION-VERIFY] Could not parse JSON — using stashed blocking');
+        return characters;
+      }
+
+      const verified = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(verified) || verified.length === 0) {
+        this.log('[VISION-VERIFY] Empty result — using stashed blocking');
+        return characters;
+      }
+
+      // Map verified positions back to characters
+      const correctedChars = [];
+      let corrections = 0;
+      for (const origChar of characters) {
+        const origBase = (origChar.baseName || origChar.name).toLowerCase();
+        const match = verified.find(r => {
+          if (!r.name) return false;
+          const rName = r.name.toLowerCase().replace(/^@/, '');
+          return rName === origChar.name.toLowerCase() || rName === origBase;
+        });
+        if (match && match.blocking) {
+          // Post-process: replace bare names with @suffixed names
+          let cleanedBlocking = match.blocking;
+          for (const c of characters) {
+            const cBase = (c.baseName || c.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            cleanedBlocking = cleanedBlocking.replace(new RegExp(`@${cBase}\\b`, 'gi'), `@${c.name}`);
+            cleanedBlocking = cleanedBlocking.replace(new RegExp(`(?<!@)\\b${cBase}\\b`, 'gi'), `@${c.name}`);
+          }
+          // Check if position changed meaningfully
+          if (cleanedBlocking !== origChar.position) {
+            corrections++;
+            this.log(`[VISION-VERIFY] @${origChar.name}: CORRECTED "${origChar.position?.slice(0, 60)}..." → "${cleanedBlocking.slice(0, 60)}..."`);
+          }
+          correctedChars.push({ name: origChar.name, baseName: origChar.baseName, position: cleanedBlocking });
+        } else {
+          correctedChars.push(origChar);
+          this.log(`[VISION-VERIFY] @${origChar.name}: no match — keeping stashed blocking`);
+        }
+      }
+
+      if (corrections > 0) {
+        this.log(`[VISION-VERIFY] ✓ Corrected ${corrections}/${characters.length} character position(s) to match scene image`);
+      } else {
+        this.log(`[VISION-VERIFY] ✓ All ${characters.length} positions verified — no corrections needed`);
+      }
+
+      return correctedChars;
+
+    } catch (e) {
+      this.log(`[VISION-VERIFY] Verification failed: ${e.message} — using stashed blocking`);
+      return characters;
+    }
+  }
+
+  /**
    * Generate ALL scene images for a cinematic-mode project via Cinema Studio 3.5.
    * Replaces the standard scene-image generation when generator_mode = 'cinematic'.
    *
@@ -5236,6 +5409,19 @@ Output ONLY the JSON array, no explanation.`,
           }
         } catch (parseErr) {
           this.log(`[CINEMATIC] Ch${ch.chapter_number} Sc${sc.scene_number}: could not parse stashed blocking — using original multi_shot_prompt`, 'warn');
+        }
+
+        // ── VERIFY BLOCKING AGAINST ACTUAL SCENE IMAGE ──
+        // The stashed blocking was proposed by Vision looking at the EMPTY location
+        // image before the scene was rendered. Cinema Studio may have placed characters
+        // differently. Verify/correct positions by reading the actual scene image.
+        // This runs once per scene (shared by all clips in the scene).
+        if (visionRefinedChars && visionRefinedChars.length > 0) {
+          this.log(`[CINEMATIC] Ch${ch.chapter_number} Sc${sc.scene_number}: verifying blocking against rendered scene image...`);
+          visionRefinedChars = await this._verifyBlockingWithSceneImage(
+            sceneImageAsset.file_path,
+            visionRefinedChars
+          );
         }
 
         for (const clipDef of klingClips) {

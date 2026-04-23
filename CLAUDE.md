@@ -1775,27 +1775,56 @@ Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.
 | ch1_sc1_c2 | 20 | 7/7/6 | 3 | 10s | 12s | ✓ Perfect lip sync | S1: "You see? Always an excuse. Always." S2: "A good wife wakes before the children." S3: "Exactly. My mother understands these things." |
 | ch1_sc1_c3 | 20 | 8/5/7 | 3 | 10s | 12s | ⚠ Lip sync wonky on Shot 3 (5 words + heavy action: "prayer beads clicking, eyes cold and satisfied" + slow push-in). Voice delivered but lips didn't match well. Short dialogue competing with dense action. | S1: "You are right. I will do better." S2: "She says that every Sunday." S3: "Prayer will help her remember her place." |
 | ch1_sc2_c1 | 21 | 8/11/7 | 3 | 10s | 13s | ⚡ Shots 1-2 lip-synced, Shot 3 narrated over action (jaw tightens, push-in). Dramatically works as inner monologue — "He humiliated you in front of everyone" felt like unspoken thought. Acceptable. | S1: "Ada. Ada, stop walking. Talk to me." S2: "I know exactly how he is. That is the problem." S3: "He humiliated you in front of everyone." |
-| ch1_sc2_c2 | 25 | 9/6/10 | 3 | 10s | 14s | (pending) | S1: "He was joking. You know how he is." S2: "I am fine, Ngozi. Leave it." S3: "Every marriage has its difficulties." |
-| ch1_sc2_c3 | 25 | 9/6/10 | 3 | 10s | 15s | (pending) | S1: "Ada. When last did you laugh? Real laugh?" S2: "Do not start this today. Please." S3: "Something is wrong. I can see it on your face." |
+| ch1_sc2_c2 | 25 | 9/6/10 | 3 | 10s | 14s | ⚠ Shots 1-2 lip-synced. Shot 3 (5 words): voice delivered but lip sync didn't match. Short dialogue line in final shot. | S1: "He was joking. You know how he is." S2: "I am fine, Ngozi. Leave it." S3: "Every marriage has its difficulties." |
+| ch1_sc2_c3 | 26 | 8/7/11 | 3 | 10s | 15s | ⚠ Shots 1-2 perfect (static camera). Shot 3 (11 words, ECU + slow push-in): transition/expression/camera perfect, lip sync broken. Camera movement + dialogue = split attention. | S1: "Ada. When last did you laugh? Real laugh?" S2: "Do not start this today. Please." S3: "Something is wrong. I can see it on your face." |
+| ch1_sc3_c1 | 21 | 8/6/7 | 3 | 10s | 14s | ⚠ S1 ✓ perfect, S3 ✓ perfect. S2 WRONG CHARACTER — Ngozi's line delivered by Ada. All static camera. 3-char scene. Blocking conflict: text says Ngozi closest to camera but scene image shows Ada closest. Double @ref in S3 (@emeka + @adaeze) worked fine — visually distinct (male vs female). | S1: "Ngozi! You are still here. Good to see you." S2: "Emeka. We were just talking." S3: "Ada, the car is ready. Let us go." |
 
 **Emerging patterns:**
-- **Short dialogue + heavy action = lip sync issues.** ch1_sc1_c3 Shot 3 had only 5 words with dense action (prayer beads, eyes cold, push-in) → wonky lip sync. Kling seems to prioritize animating the action over matching lip movement on short lines.
+- **Camera movement + dialogue = lip sync breaks.** Every shot with a push-in, dolly, or dynamic camera AND dialogue has lip sync issues. Every static shot with dialogue lip-syncs correctly. This is the strongest signal so far. (ch1_sc1_c3 S3: push-in + 5 words = wonky. ch1_sc2_c1 S3: push-in + action + 7 words = narrated. ch1_sc2_c3 S3: push-in + 11 words = broken. ch1_sc1_c1/c2: all static = perfect.)
+- **Short dialogue (≤5 words) amplifies the problem.** ch1_sc1_c3 S3 (5 words + push-in) and ch1_sc2_c2 S3 (5 words) both had lip sync issues. Kling may not invest lip animation effort for very short lines.
+- **EXTREME CLOSE-UP amplifies visibility.** ch1_sc2_c3 S3 was ECU — at that zoom, any desync is glaringly obvious. A medium shot with the same desync might pass.
+- **Shot 3 is most vulnerable** — final shot has the least remaining time budget + often gets the dramatic camera movement.
 - **Narration-as-inner-monologue.** ch1_sc2_c1 Shot 3 (7 words, push-in + jaw tightens + fury) → narrated instead of lip-synced. Worked dramatically but may not always be desirable.
-- **Both issues occurred on Shot 3** — the final shot where remaining time is most constrained.
+- **Blocking text ↔ scene image mismatch = wrong character speaks.** ch1_sc3_c1 S2: blocking text said Ngozi closest to camera, but the scene image had Ada closest. Kling used the IMAGE to determine who's who and gave Ada the line meant for Ngozi. **The image always wins over text.** The `_injectVisionBlocking()` step that writes CHARACTER POSITIONS must accurately describe what the scene image actually shows, not what the script intended.
+- **Double @ref is safe when characters are visually distinct.** ch1_sc3_c1 S3 referenced @emeka (speaking) and @adaeze (glance target) — delivered perfectly. Male vs. female = no confusion. The risk is with same-gender pairs where Kling relies on position/clothing.
+
+**Actionable rules emerging:**
+> 1. If a shot has dialogue, keep the camera STATIC. Reserve camera movements for non-dialogue moments.
+> 2. CHARACTER POSITIONS must describe the scene image as-rendered, not as-intended. Vision blocking must read the actual image and report real positions.
+> 3. Double @ref per shot is acceptable for visually distinct characters (different gender). Avoid for same-gender pairs.
 
 **Open questions for later analysis:**
-- Does Kling prioritize camera movement + action over lip sync when time is tight?
-- Would 14-15s have forced lip sync on Shot 3, or would it still narrate?
+- Would splitting "dialogue + push-in" into two sub-beats (dialogue static → then push-in silent) fix it, or does multi-shot Auto not support that granularity?
+- Is there a word count threshold below which Kling skips lip animation entirely (≤5 words)?
 - Is the narration-as-inner-monologue pattern reliable enough to be intentional?
 - Buffer tuning: current 1.5s may need to go to 2.5-3.0 if more clips show narrated last shots
 - Consider per-shot action density scoring (camera movement + character action + dialogue = more time needed)
 - **Dynamic shot count:** Could reduce to 2 shots per clip when dialogue is sparse (≤15 words total). Script engine currently hard-enforces 3 shots. Would require touching script prompt, review rubric, and gen logic — defer until more data.
+- Does `_injectVisionBlocking()` accurately read character positions from the scene image, or does it sometimes guess/inherit from the script? If it's guessing, that's the root cause of blocking mismatches.
 
-### Current Project State (Session 23)
+### Session 24 — Vision Blocking Verification, Resolution Enforcement
 
-- Video generation in progress — clip 4 of 150 done
-- Smart duration working (12-13s bumps confirmed)
-- Credit cost inflation gate added (4K → 720p protection)
-- Cinematic verify redo wired to _runCinematicVideoStage
-- Early SEO fires after script approval
+**Problem: Blocking text ↔ scene image mismatch.** `_refineBlockingWithVision()` proposes character positions based on the empty location image, BEFORE the scene is rendered. Cinema Studio then renders characters wherever it decides — which may not match the proposed positions. The stashed blocking text is injected into Kling prompts verbatim, leading to conflicts: text says "Ngozi closest to camera" but start frame shows Ada closest. Kling trusts the image → wrong character delivers dialogue.
+
+**Root cause:** One-shot blocking. Vision proposes positions → scene renders → no verification step → blocking text may be stale by the time Kling reads it.
+
+**Fix: `_verifyBlockingWithSceneImage()`** — A new lightweight Vision call that runs once per scene at video gen time. It reads the actual rendered scene image (same image Kling uses as start frame) and describes where characters ACTUALLY are. This corrected blocking replaces the stashed blocking before injection into Kling prompts.
+
+Flow change:
+1. `_refineBlockingWithVision(locationImage)` → proposes blocking (unchanged)
+2. Cinema Studio renders scene image (unchanged)
+3. **NEW:** `_verifyBlockingWithSceneImage(sceneImage)` → corrects blocking to match rendered image
+4. `_injectVisionBlocking(prompt, correctedChars)` → injects into Kling prompt
+
+Cost: ~1 additional Sonnet call per scene (not per clip). Scenes share blocking across all their clips.
+
+**Also added: `_ensureResolution720p()`** in kling-automation.js. Before every clip generation, Playwright actively reads the resolution chip, and if it's 4K/1080p/2K, clicks it back to 720p. This is Layer 1 of the 4-layer resolution protection (active fix → pre-gen gate → credit cost gate → pipeline pause).
+
+### Current Project State (Session 24)
+
+- Video generation in progress — clip 7 of 150 done
+- Vision blocking verification added (prevents wrong-character dialogue)
+- Active 720p resolution enforcement added
+- Smart duration working (12-15s bumps confirmed)
+- Credit cost inflation gate + pipeline pause on cost inflation
 - All changes in working tree, pending commit from Windows PowerShell
