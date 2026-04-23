@@ -445,6 +445,118 @@ class KlingAutomation {
   }
 
   /**
+   * Ensure resolution is set to 720p. Kling sometimes reverts to 4K/1080p
+   * after page reloads or session changes. Since 4K costs ~6× more credits,
+   * we actively check and fix the resolution before every generation.
+   *
+   * DOM (inferred from pre-gen gate + screenshots 2026-04-22):
+   *   A chip/button in the sidebar shows the current resolution (e.g. "720p",
+   *   "1080p", "4K"). Clicking it opens a dropdown/panel with resolution
+   *   options. We click "720p" in that panel to force it.
+   */
+  async _ensureResolution720p() {
+    const page = this.automation.page;
+
+    try {
+      // Step 1: Find the current resolution chip.
+      // Resolution buttons contain text like "720p", "1080p", "2K", "4K".
+      // They sit in the same toolbar area as the duration chip.
+      const currentRes = await page.evaluate(() => {
+        const allEls = document.querySelectorAll('button, [role="button"], span, div');
+        for (const el of allEls) {
+          const t = (el.textContent || '').trim();
+          if (/^(720p?|1080p?|2K|4K)$/i.test(t)) {
+            return t;
+          }
+        }
+        return null;
+      });
+
+      if (!currentRes) {
+        this.log('Resolution chip not found — skipping resolution check');
+        return;
+      }
+
+      if (/^720p?$/i.test(currentRes)) {
+        this.log(`Resolution already 720p — no change needed`);
+        return;
+      }
+
+      // Resolution is NOT 720p — need to fix it
+      this.log(`Resolution is ${currentRes} — switching to 720p`);
+
+      // Step 2: Click the resolution chip to open the dropdown
+      const resChip = page.locator('button, [role="button"]').filter({
+        hasText: new RegExp(`^${currentRes.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+      }).first();
+      await resChip.click({ timeout: 5000 });
+      await page.waitForTimeout(500);
+
+      // Step 3: Click "720p" in the dropdown/panel
+      // Look for a clickable element containing "720p" that appeared after
+      // opening the dropdown.
+      const found720 = await page.evaluate(() => {
+        // Look in any visible dropdown/panel/popover for a 720p option
+        const candidates = document.querySelectorAll(
+          '[role="option"], [role="menuitem"], [role="listbox"] *, ' +
+          'li, button, div[class*="option"], div[class*="item"], span'
+        );
+        for (const el of candidates) {
+          const t = (el.textContent || '').trim();
+          if (/^720p?$/i.test(t) && el.offsetParent !== null) {
+            el.click();
+            return true;
+          }
+        }
+        // Fallback: try any visible element with "720p"
+        const all = document.querySelectorAll('*');
+        for (const el of all) {
+          if (el.children.length > 0) continue; // leaf nodes only
+          const t = (el.textContent || '').trim();
+          if (/^720p?$/i.test(t) && el.offsetParent !== null) {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      });
+
+      if (!found720) {
+        // Close whatever we opened and throw — pre-gen gate will catch this
+        await page.keyboard.press('Escape');
+        throw new Error('Could not find 720p option in resolution dropdown');
+      }
+
+      await page.waitForTimeout(500);
+
+      // Close dropdown if still open
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(300);
+
+      // Verify the resolution changed
+      const newRes = await page.evaluate(() => {
+        const allEls = document.querySelectorAll('button, [role="button"], span, div');
+        for (const el of allEls) {
+          const t = (el.textContent || '').trim();
+          if (/^(720p?|1080p?|2K|4K)$/i.test(t)) {
+            return t;
+          }
+        }
+        return null;
+      });
+
+      if (newRes && /^720p?$/i.test(newRes)) {
+        this.log(`Resolution successfully set to 720p`);
+      } else {
+        this.log(`Resolution may not have changed (now showing: ${newRes || 'unknown'}) — pre-gen gate will catch this`, 'warn');
+      }
+    } catch (e) {
+      // Don't swallow — this is a [PRE-GEN] level issue
+      throw new Error(`Resolution fix failed: ${e.message}. Manual fix needed in Kling UI.`);
+    }
+  }
+
+  /**
    * Type the multi_shot_prompt into Kling's prompt textbox. The prompt is
    * Claude-authored and contains @element references that need autocomplete-
    * triggered insertion (typing @claire as plain text won't bind it to the
@@ -1279,6 +1391,7 @@ class KlingAutomation {
       await this._enableMultiShotAuto();
       await this._ensureSoundOn();
       await this._setDuration(durationSeconds);
+      await this._ensureResolution720p();
       await this._typeMultiShotPrompt(multiShotPrompt, validElements);
       await this.automation.page.waitForTimeout(800);
     } catch (setupErr) {

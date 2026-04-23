@@ -1769,12 +1769,19 @@ Changes: strict exact file basename matching in `regenerateLocations()`, safety 
 
 Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.5) + 1.5`
 
-| Clip | Words | Shots | Script | Effective | Result |
-|------|-------|-------|--------|-----------|--------|
-| ch1_sc1_c1 | 19 | 3 | 10s | 12s | ✓ Perfect lip sync, all dialogue delivered |
-| ch1_sc1_c2 | 20 | 3 | 10s | 12s | ✓ Perfect lip sync |
-| ch1_sc1_c3 | 20 | 3 | 10s | 12s | ✓ Perfect lip sync |
-| ch1_sc2_c1 | 21 | 3 | 10s | 13s | ⚡ Shots 1-2 lip-synced, Shot 3 narrated over action (jaw tightens, push-in). Dramatically works as inner monologue — "He humiliated you in front of everyone" felt like unspoken thought. Acceptable. |
+| Clip | Words | Per-Shot Words | Shots | Script | Effective | Result | Prompt Snippet |
+|------|-------|----------------|-------|--------|-----------|--------|----------------|
+| ch1_sc1_c1 | 19 | 9/6/7 | 3 | 10s | 12s | ✓ Perfect lip sync, all dialogue delivered | S1: "She burned the rice again this morning." S2: "Twelve years married. Still burning rice." S3: "I was rushing. The children needed—" |
+| ch1_sc1_c2 | 20 | 7/7/6 | 3 | 10s | 12s | ✓ Perfect lip sync | S1: "You see? Always an excuse. Always." S2: "A good wife wakes before the children." S3: "Exactly. My mother understands these things." |
+| ch1_sc1_c3 | 20 | 8/5/7 | 3 | 10s | 12s | ⚠ Lip sync wonky on Shot 3 (5 words + heavy action: "prayer beads clicking, eyes cold and satisfied" + slow push-in). Voice delivered but lips didn't match well. Short dialogue competing with dense action. | S1: "You are right. I will do better." S2: "She says that every Sunday." S3: "Prayer will help her remember her place." |
+| ch1_sc2_c1 | 21 | 8/11/7 | 3 | 10s | 13s | ⚡ Shots 1-2 lip-synced, Shot 3 narrated over action (jaw tightens, push-in). Dramatically works as inner monologue — "He humiliated you in front of everyone" felt like unspoken thought. Acceptable. | S1: "Ada. Ada, stop walking. Talk to me." S2: "I know exactly how he is. That is the problem." S3: "He humiliated you in front of everyone." |
+| ch1_sc2_c2 | 25 | 9/6/10 | 3 | 10s | 14s | (pending) | S1: "He was joking. You know how he is." S2: "I am fine, Ngozi. Leave it." S3: "Every marriage has its difficulties." |
+| ch1_sc2_c3 | 25 | 9/6/10 | 3 | 10s | 15s | (pending) | S1: "Ada. When last did you laugh? Real laugh?" S2: "Do not start this today. Please." S3: "Something is wrong. I can see it on your face." |
+
+**Emerging patterns:**
+- **Short dialogue + heavy action = lip sync issues.** ch1_sc1_c3 Shot 3 had only 5 words with dense action (prayer beads, eyes cold, push-in) → wonky lip sync. Kling seems to prioritize animating the action over matching lip movement on short lines.
+- **Narration-as-inner-monologue.** ch1_sc2_c1 Shot 3 (7 words, push-in + jaw tightens + fury) → narrated instead of lip-synced. Worked dramatically but may not always be desirable.
+- **Both issues occurred on Shot 3** — the final shot where remaining time is most constrained.
 
 **Open questions for later analysis:**
 - Does Kling prioritize camera movement + action over lip sync when time is tight?
@@ -1782,6 +1789,7 @@ Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.
 - Is the narration-as-inner-monologue pattern reliable enough to be intentional?
 - Buffer tuning: current 1.5s may need to go to 2.5-3.0 if more clips show narrated last shots
 - Consider per-shot action density scoring (camera movement + character action + dialogue = more time needed)
+- **Dynamic shot count:** Could reduce to 2 shots per clip when dialogue is sparse (≤15 words total). Script engine currently hard-enforces 3 shots. Would require touching script prompt, review rubric, and gen logic — defer until more data.
 
 ### Current Project State (Session 23)
 
