@@ -602,12 +602,30 @@ class KlingAutomation {
         issues.push('Start frame not detected');
       }
 
+      // 5. Resolution check — look for quality indicator text.
+      //    Kling shows a chip/button with the resolution (e.g. "720p", "1080p", "4K").
+      //    We want 720p for cost efficiency. If 4K is detected, flag it.
+      let detectedResolution = null;
+      const allBtns = document.querySelectorAll('button, [role="button"], span, div');
+      for (const el of allBtns) {
+        const t = (el.textContent || '').trim();
+        // Match standalone resolution labels: "720p", "1080p", "2K", "4K"
+        if (/^(720p?|1080p?|2K|4K)$/i.test(t)) {
+          detectedResolution = t;
+          break;
+        }
+      }
+      if (detectedResolution && /4K|2K|1080/i.test(detectedResolution)) {
+        issues.push(`Resolution is ${detectedResolution} (expected 720p) — credit cost will be inflated`);
+      }
+
       return {
         ok: issues.length === 0,
         issues,
         promptLength: promptText.length,
         promptPreview: promptText.slice(0, 80),
         soundOn: soundCheckbox ? soundCheckbox.checked : null,
+        resolution: detectedResolution,
       };
     });
 
@@ -615,7 +633,7 @@ class KlingAutomation {
       const msg = preGenCheck.issues.join('; ');
       throw new Error(`[PRE-GEN] Pre-generation check failed: ${msg}`);
     }
-    this.log(`Pre-gen gate passed: prompt=${preGenCheck.promptLength} chars, multi-shot ON, sound=${preGenCheck.soundOn ? 'ON' : 'OFF'}, start frame OK`);
+    this.log(`Pre-gen gate passed: prompt=${preGenCheck.promptLength} chars, multi-shot ON, sound=${preGenCheck.soundOn ? 'ON' : 'OFF'}, start frame OK, resolution=${preGenCheck.resolution || 'unknown'}`);
 
     // Click Generate — CREDITS BURNED FROM THIS POINT
     // Use coordinate-based Playwright click (real mouse events) to avoid
@@ -646,6 +664,23 @@ class KlingAutomation {
       }
     }
     this.log(`Clicking GENERATE at (${Math.round(genBtnBox.x)}, ${Math.round(genBtnBox.y)}) — "${genBtnBox.text}" (cost: ${creditCost ?? 'unknown'})`);
+
+    // ── CREDIT COST GATE ──
+    // 720p clips cost ~1.5-2 credits/sec. 4K clips cost ~6 credits/sec.
+    // If the cost exceeds 3 credits/sec, the resolution is probably wrong
+    // (4K instead of 720p). Abort BEFORE clicking Generate to avoid
+    // burning inflated credits. This is a [PRE-GEN] error so the
+    // orchestrator won't attempt recovery (no credits were burned).
+    if (creditCost !== null && durationSeconds > 0) {
+      const maxExpectedCost = durationSeconds * 3; // generous 720p ceiling
+      if (creditCost > maxExpectedCost) {
+        throw new Error(
+          `[PRE-GEN] Credit cost inflated: ${creditCost} credits for ${durationSeconds}s ` +
+          `(expected ≤${maxExpectedCost}). Resolution is likely 4K instead of 720p. ` +
+          `Fix resolution in Kling UI and retry.`
+        );
+      }
+    }
 
     // ── SINGLE CLICK ONLY ──
     // CRITICAL: We click GENERATE exactly ONCE. The old 3-attempt escalation pattern

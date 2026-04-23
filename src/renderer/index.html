@@ -3192,6 +3192,11 @@
           addLog('Session expired — log into Higgsfield in the browser, then click Resume.', 'warn');
           break;
 
+        case 'cost-inflation-pause':
+          updateStatusBadge('paused');
+          addLog(`⚠ CREDIT COST INFLATED: ${event.message || 'Resolution is likely 4K instead of 720p.'}. Fix resolution in Kling UI, then click Resume.`, 'error');
+          break;
+
         case 'paused':
           updateStatusBadge('paused');
           break;

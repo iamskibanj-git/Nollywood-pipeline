@@ -5805,7 +5805,34 @@ Output ONLY the JSON array, no explanation.`,
             shouldRetry = true;
           }
         } else if (isPreGen || isBrowserDead) {
-          // Setup failures or dead browser — safe to retry (no credits burned)
+          // Credit cost inflation = resolution is wrong. Pausing the pipeline
+          // is the only safe move — retrying will hit the same 4K setting.
+          // User must fix resolution in Kling's UI, then resume.
+          const isCostInflation = e.message.includes('Credit cost inflated');
+          if (isCostInflation) {
+            this.log(`[CINEMATIC] ${clipId}: CREDIT COST INFLATED — pausing pipeline. Fix resolution in Kling UI, then resume.`, 'error');
+            if (clipAsset) db.markAssetFailed(clipAsset.id, e.message);
+            // Reset to pending so resume picks it up
+            if (clipAsset) {
+              db.resetAsset(clipAsset.id);
+            }
+            this.emit({
+              type: 'cost-inflation-pause',
+              clipId,
+              message: e.message,
+            });
+            // Pause — user resumes after fixing resolution
+            this.paused = true;
+            this.state.status = 'paused';
+            this.emit({ type: 'paused', reason: 'cost-inflation' });
+            this.log('[CINEMATIC] Pipeline paused — waiting for resume...');
+            await this.checkPause();
+            if (this.cancelled) return;
+            // After resume, retry this clip (don't increment i)
+            i--;
+            continue;
+          }
+          // Other setup failures or dead browser — safe to retry (no credits burned)
           shouldRetry = true;
           this.log(`[CINEMATIC] ${clipId}: ${isPreGen ? 'pre-gen failure' : 'browser dead'} — will re-generate`);
         }
