@@ -4330,7 +4330,7 @@ class PipelineOrchestrator {
       if (rewritten !== beforeReplace) {
         this.log(`[VISION-BLOCKING] Replaced frame-position for @${vc.name}`);
       } else {
-        this.log(`[VISION-BLOCKING] No frame-position match for @${vc.name} — trying broader pattern`);
+        this.log(`[VISION-BLOCKING] No frame-position for @${vc.name} — trying broader pattern`);
         // Broader fallback: match @name followed by any posture verb + description until period/newline
         // This catches cases where "frame-left/center/right" was already removed by a prior fix
         const broadPattern = new RegExp(
@@ -4341,7 +4341,10 @@ class PipelineOrchestrator {
         if (rewritten !== beforeReplace) {
           this.log(`[VISION-BLOCKING] Replaced via broad pattern for @${vc.name}`);
         } else {
-          this.log(`[VISION-BLOCKING] WARNING: Could not replace position for @${vc.name} in prompt`);
+          // Expected for cinematic prompts where character positions are in a
+          // separate CHARACTER POSITIONS block (stripped below), not inline in
+          // shot directions. The preamble injection still works correctly.
+          this.log(`[VISION-BLOCKING] No inline position to replace for @${vc.name} (preamble will override)`);
         }
       }
     }
@@ -4708,9 +4711,10 @@ Output ONLY the JSON array, no explanation.`,
    *
    * @param {string} sceneImagePath - Path to the rendered scene image (start frame)
    * @param {Array} characters - Array of { name, baseName, position } from stashed blocking
+   * @param {Array} [characterDescs] - Optional array of { name, description } for visual identification
    * @returns {Array} Corrected characters array with positions matching the scene image
    */
-  async _verifyBlockingWithSceneImage(sceneImagePath, characters) {
+  async _verifyBlockingWithSceneImage(sceneImagePath, characters, characterDescs = []) {
     const fs = require('fs');
 
     if (!characters || characters.length === 0) return characters;
@@ -4727,19 +4731,34 @@ Output ONLY the JSON array, no explanation.`,
         return characters;
       }
 
-      // ── Detect mime type from extension ──
-      const _detectMime = (p) => {
-        const ext = (p || '').split('.').pop().toLowerCase();
+      // ── Detect ACTUAL mime type from file magic bytes (not extension!) ──
+      // Cinema Studio saves scene images with .png extension but webp content.
+      const _detectMimeFromBytes = (buf) => {
+        if (buf.length >= 4) {
+          // PNG: 89 50 4E 47
+          if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+          // JPEG: FF D8 FF
+          if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+          // WEBP: RIFF....WEBP
+          if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+              && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'image/webp';
+          // GIF: GIF8
+          if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+        }
+        // Fallback to extension
+        const ext = (sceneImagePath || '').split('.').pop().toLowerCase();
         if (ext === 'png') return 'image/png';
         if (ext === 'webp') return 'image/webp';
-        return 'image/jpeg'; // default for jpg/jpeg and unknown
+        return 'image/jpeg';
       };
 
-      // ── Resize image if needed (also converts webp → jpeg for API compat) ──
-      let imageData;
-      let mimeType = 'image/jpeg';
-      const rawSize = fs.statSync(sceneImagePath).size;
-      const needsConversion = sceneImagePath.toLowerCase().endsWith('.webp');
+      // ── Read image and convert webp → jpeg if needed ──
+      let imageData = fs.readFileSync(sceneImagePath);
+      let mimeType = _detectMimeFromBytes(imageData);
+      const rawSize = imageData.length;
+      const needsConversion = mimeType === 'image/webp';
+
+      this.log(`[VISION-VERIFY] Image: ${(rawSize / 1024).toFixed(0)}KB, detected format: ${mimeType}${needsConversion ? ' (will convert to JPEG)' : ''}`);
 
       if (rawSize > 3 * 1024 * 1024 || needsConversion) {
         const path = require('path');
@@ -4754,19 +4773,23 @@ Output ONLY the JSON array, no explanation.`,
             execSync(`"${ffmpegPath}" -i "${sceneImagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpJpeg}"`, { timeout: 15000, stdio: 'pipe' });
             imageData = fs.readFileSync(tmpJpeg);
             mimeType = 'image/jpeg';
-            this.log(`[VISION-VERIFY] Converted ${needsConversion ? 'webp' : 'large image'} → JPEG (${(imageData.length / 1024).toFixed(0)}KB)`);
+            this.log(`[VISION-VERIFY] Converted → JPEG (${(imageData.length / 1024).toFixed(0)}KB)`);
             try { fs.unlinkSync(tmpJpeg); } catch (_) {}
           } catch (resizeErr) {
-            imageData = fs.readFileSync(sceneImagePath);
-            mimeType = _detectMime(sceneImagePath);
+            this.log(`[VISION-VERIFY] FFmpeg conversion failed: ${resizeErr.message}`);
+            // If webp and ffmpeg failed, we can't send it — Claude won't accept webp
+            if (needsConversion) {
+              this.log('[VISION-VERIFY] Cannot convert webp without ffmpeg — using stashed blocking');
+              return characters;
+            }
           }
         } else {
-          imageData = fs.readFileSync(sceneImagePath);
-          mimeType = _detectMime(sceneImagePath);
+          this.log('[VISION-VERIFY] FFmpeg not found');
+          if (needsConversion) {
+            this.log('[VISION-VERIFY] Cannot convert webp without ffmpeg — using stashed blocking');
+            return characters;
+          }
         }
-      } else {
-        imageData = fs.readFileSync(sceneImagePath);
-        mimeType = _detectMime(sceneImagePath);
       }
 
       const base64Image = imageData.toString('base64');
@@ -4775,8 +4798,19 @@ Output ONLY the JSON array, no explanation.`,
         return characters;
       }
 
-      // Build character list with base names for the prompt
-      const charList = characters.map(c => `@${c.baseName || c.name}`).join(', ');
+      // Build character identification list with visual descriptions
+      // so Vision can actually tell WHO is who in the scene image
+      const charIdentLines = characters.map(c => {
+        const baseName = c.baseName || c.name;
+        const desc = characterDescs.find(d =>
+          d.name.toLowerCase() === baseName.toLowerCase() ||
+          d.name.toLowerCase() === c.name.toLowerCase()
+        );
+        if (desc && desc.description) {
+          return `- @${baseName}: ${desc.description}`;
+        }
+        return `- @${baseName}`;
+      }).join('\n');
 
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey });
@@ -4795,15 +4829,17 @@ Output ONLY the JSON array, no explanation.`,
               type: 'text',
               text: `You are verifying character positions in a scene image for an AI video generation pipeline.
 
-CHARACTERS IN THIS SCENE: ${charList}
+CHARACTERS IN THIS SCENE (use visual descriptions to identify each person):
+${charIdentLines}
 
-TASK: Look at this scene image and describe WHERE each character is ACTUALLY positioned. Focus on:
+TASK: Look at this scene image, IDENTIFY each character by their visual description (clothing, hair, body type, gender), and describe WHERE they are ACTUALLY positioned. Focus on:
 - Distance from camera (closest, middle, furthest)
 - Left/right/center placement in the frame
 - Physical relationship to visible objects (cars, trees, furniture, doorways, etc.)
 - Body orientation and gaze direction
 
 RULES:
+- FIRST identify which person in the image matches each character description. This is critical — do not guess.
 - Describe what you SEE, not what you think should be there.
 - Be spatially precise — "closest to camera", "further back", "on the left side of frame near the silver car".
 - Reference actual objects visible in the image.
@@ -5409,13 +5445,17 @@ Output ONLY the JSON array.`,
         // positions that were used to generate the start frame. We inject these
         // into the Kling multi_shot_prompt so the animation matches the image.
         let visionRefinedChars = null;
+        let visionBlockingVerified = false;
         try {
           const stashed = sceneImageAsset.prompt_used;
           if (stashed) {
             const parsed = typeof stashed === 'string' ? JSON.parse(stashed) : stashed;
             if (parsed.vision_refined_characters && Array.isArray(parsed.vision_refined_characters)) {
               visionRefinedChars = parsed.vision_refined_characters;
-              this.log(`[CINEMATIC] Ch${ch.chapter_number} Sc${sc.scene_number}: loaded ${visionRefinedChars.length} vision-refined blocking(s) for Kling prompt injection`);
+              // Check if this blocking was already verified against the scene image
+              visionBlockingVerified = parsed.vision_blocking_verified === true;
+              const verifiedTag = visionBlockingVerified ? ' (already verified)' : '';
+              this.log(`[CINEMATIC] Ch${ch.chapter_number} Sc${sc.scene_number}: loaded ${visionRefinedChars.length} vision-refined blocking(s)${verifiedTag}`);
             }
           }
         } catch (parseErr) {
@@ -5434,7 +5474,9 @@ Output ONLY the JSON array.`,
             clipDef,
             startFramePath: sceneImageAsset.file_path,
             startFrameGenId: sceneImageAsset.source_gen_id,
+            sceneAssetId: sceneImageAsset.id,
             visionRefinedChars,
+            visionBlockingVerified,
           });
         }
       }
@@ -5474,7 +5516,7 @@ Output ONLY the JSON array.`,
 
     for (let i = 0; i < allKlingClips.length; i++) {
       const item = allKlingClips[i];
-      let { chapter, scene, clipDef, startFramePath, startFrameGenId, visionRefinedChars } = item;
+      let { chapter, scene, clipDef, startFramePath, startFrameGenId, sceneAssetId, visionRefinedChars, visionBlockingVerified } = item;
       const clipId = clipDef.clip_id || `ch${chapter}_sc${scene}_c${i + 1}`;
       const label = `${clipId} (Ch${chapter} Sc${scene}, ${clipDef.duration_seconds || 10}s, ${(clipDef.line_refs || []).length} line(s))`;
 
@@ -5519,21 +5561,79 @@ Output ONLY the JSON array.`,
       // Only runs once per scene, when the first pending clip is encountered.
       // Sends the rendered scene image to Claude Vision to verify/correct
       // character positions so Kling prompts match the actual start frame.
+      // Once verified, the corrected blocking is persisted to DB so subsequent
+      // runs skip the Vision call entirely.
       if (visionRefinedChars && visionRefinedChars.length > 0) {
         const sceneKey = `ch${chapter}_sc${scene}`;
-        if (verifiedBlockingCache[sceneKey]) {
-          // Already verified for this scene — use cached result
+
+        if (visionBlockingVerified) {
+          // Already verified in a previous run (persisted in DB) — skip Vision call
+          verifiedBlockingCache[sceneKey] = visionRefinedChars;
+        } else if (verifiedBlockingCache[sceneKey]) {
+          // Already verified for this scene in THIS run — use cached result
           visionRefinedChars = verifiedBlockingCache[sceneKey];
           item.visionRefinedChars = visionRefinedChars;
         } else {
           // First pending clip for this scene — verify now
           this.log(`[VISION-VERIFY] ${sceneKey}: verifying blocking against rendered scene image...`);
-          visionRefinedChars = await this._verifyBlockingWithSceneImage(
+
+          // Build character visual descriptions from character_bible
+          // so Vision can identify WHO is who in the scene image
+          const characterDescs = [];
+          const bible = this.state.script?.character_bible || [];
+          for (const vc of visionRefinedChars) {
+            const baseName = (vc.baseName || vc.name).toLowerCase();
+            const char = bible.find(c => {
+              const hint = (c.element_name_hint || '').toLowerCase().replace(/^@/, '');
+              const charId = (c.id || '').toLowerCase();
+              return hint === baseName || charId === baseName ||
+                hint === vc.name.toLowerCase() || charId === vc.name.toLowerCase();
+            });
+            if (char) {
+              // Use description_label (short) + key visual details from full_prompt_description
+              const shortDesc = char.description_label || char.name || baseName;
+              const fullDesc = char.full_prompt_description || '';
+              // Extract just the visual identifiers (clothing, hair, body type)
+              // from full_prompt_description — first 150 chars is usually enough
+              const visualSnippet = fullDesc.length > 150 ? fullDesc.slice(0, 150) + '...' : fullDesc;
+              characterDescs.push({
+                name: baseName,
+                description: visualSnippet || shortDesc,
+              });
+              this.log(`[VISION-VERIFY] ${baseName}: "${(visualSnippet || shortDesc).slice(0, 60)}..."`);
+            } else {
+              characterDescs.push({ name: baseName, description: baseName });
+            }
+          }
+
+          const corrected = await this._verifyBlockingWithSceneImage(
             startFramePath,
-            visionRefinedChars
+            visionRefinedChars,
+            characterDescs
           );
+          visionRefinedChars = corrected;
           verifiedBlockingCache[sceneKey] = visionRefinedChars;
           item.visionRefinedChars = visionRefinedChars;
+
+          // Persist corrected blocking + verified flag to DB on the scene asset
+          // so subsequent runs skip the Vision call entirely
+          if (sceneAssetId) {
+            try {
+              const sceneAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+                .find(a => a.id === sceneAssetId);
+              if (sceneAsset) {
+                const existing = typeof sceneAsset.prompt_used === 'string'
+                  ? JSON.parse(sceneAsset.prompt_used)
+                  : (sceneAsset.prompt_used || {});
+                existing.vision_refined_characters = corrected;
+                existing.vision_blocking_verified = true;
+                db.updateAssetPromptUsed(sceneAssetId, existing);
+                this.log(`[VISION-VERIFY] ${sceneKey}: persisted corrected blocking to DB ✓`);
+              }
+            } catch (dbErr) {
+              this.log(`[VISION-VERIFY] ${sceneKey}: failed to persist to DB: ${dbErr.message}`, 'warn');
+            }
+          }
         }
       }
 

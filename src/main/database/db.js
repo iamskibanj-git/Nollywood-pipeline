@@ -699,6 +699,18 @@ function resetAsset(assetId) {
   );
 }
 
+/**
+ * Update the prompt_used field on a scene asset (e.g. to persist vision-verified
+ * blocking so it doesn't need to be re-verified on subsequent runs).
+ */
+function updateAssetPromptUsed(assetId, promptUsed) {
+  runSql(
+    `UPDATE project_assets SET prompt_used = ? WHERE id = ?`,
+    [typeof promptUsed === 'string' ? promptUsed : JSON.stringify(promptUsed), assetId]
+  );
+  save();
+}
+
 function getAssets(projectId, { type, status } = {}) {
   let sql = 'SELECT * FROM project_assets WHERE project_id = ?';
   const params = [projectId];
@@ -1361,6 +1373,7 @@ module.exports = {
   markAssetCdnUrl,
   markAssetFailed,
   resetAsset,
+  updateAssetPromptUsed,
   getAssets,
   getIncompleteAssets,
   getAssetCounts,
