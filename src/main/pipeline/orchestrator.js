@@ -5037,11 +5037,23 @@ Output ONLY the JSON array.`,
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey });
 
-      // Build character visual descriptions for cross-check
-      const charDescLines = verifiedPositions.map(c => {
+      // Build character visual descriptions for independent identification
+      const bible = this.state.script?.character_bible || [];
+      const charIdentBlock = verifiedPositions.map(c => {
         const baseName = (c.baseName || c.name).toLowerCase();
-        return `@${c.name} (${baseName})`;
-      }).join(', ');
+        const charEntry = bible.find(be => {
+          const hint = (be.element_name_hint || '').toLowerCase().replace(/^@/, '');
+          const charId = (be.id || '').toLowerCase();
+          return hint === baseName || charId === baseName ||
+            hint === c.name.toLowerCase() || charId === c.name.toLowerCase();
+        });
+        const desc = charEntry?.full_prompt_description
+          ? (charEntry.full_prompt_description.length > 150
+            ? charEntry.full_prompt_description.slice(0, 150) + '...'
+            : charEntry.full_prompt_description)
+          : (charEntry?.description_label || baseName);
+        return `- @${c.name}: ${desc}`;
+      }).join('\n');
 
       const response = await client.messages.create({
         model: 'claude-sonnet-4-6',
@@ -5055,24 +5067,28 @@ Output ONLY the JSON array.`,
             },
             {
               type: 'text',
-              text: `You are reconciling shot directions with verified character positions for an AI video generation pipeline (Kling). The scene image above shows where characters ACTUALLY are.
+              text: `You are reconciling shot directions with character positions for an AI video generation pipeline (Kling).
 
-VERIFIED CHARACTER POSITIONS (claimed to match the scene image):
+CHARACTERS IN THIS SCENE (identify by visual description):
+${charIdentBlock}
+
+SPATIAL CONTEXT: This is a Nigerian production. All vehicles are LEFT-HAND DRIVE (steering wheel on the LEFT side of the vehicle). The person behind the steering wheel is the DRIVER. In vehicle scenes, ALWAYS locate the steering wheel FIRST to determine who is the driver and who is the passenger.
+
+STEP 1 — INDEPENDENTLY IDENTIFY CHARACTER POSITIONS:
+Look at the scene image. Using ONLY the visual descriptions above (clothing, hair, body type) and spatial anchors (steering wheel position for vehicles), determine WHERE each character actually is. Do NOT read ahead to the claimed positions below — form your own assessment first.
+
+After forming your assessment, compare with these CLAIMED POSITIONS:
 ${positionsSummary}
 
-CHARACTERS IN SCENE: ${charDescLines}
+If your independent assessment CONTRADICTS the claimed positions (e.g., you see the woman in sage green behind the steering wheel but the claim says she's in the passenger seat), return ONLY:
+BLOCKING_MISMATCH: <describe what's wrong — who is actually where vs what was claimed>
+Do NOT attempt to fix shot directions if the positions are wrong.
 
-CURRENT SHOT DIRECTIONS:
+STEP 2 — IF POSITIONS ARE CORRECT, check each shot's body action directions in this prompt:
+
 ${prompt}
 
-SPATIAL CONTEXT: This is a Nigerian production. All vehicles are LEFT-HAND DRIVE (steering wheel on the LEFT side of the vehicle). The person behind the steering wheel is the DRIVER. Use the steering wheel to anchor your identification in vehicle scenes.
-
-STEP 1 — VERIFY POSITIONS FIRST:
-Before touching shot directions, CHECK whether the VERIFIED CHARACTER POSITIONS above actually match what you see in the scene image. Look at each character's described position and confirm it matches the image. In vehicle scenes, ALWAYS locate the steering wheel first — the person behind it is the driver, the other is the passenger. If characters appear SWAPPED (e.g., the positions describe character A in the driver's seat but the image shows character B there), return ONLY:
-BLOCKING_MISMATCH: <brief description of what's wrong>
-Do NOT attempt to fix shot directions if the positions themselves are wrong — that's a deeper problem.
-
-STEP 2 — IF POSITIONS ARE CORRECT, check each shot's body action directions against the scene image. If a body action is PHYSICALLY IMPOSSIBLE given where the character actually is (e.g., "turns toward the ignition" but the character isn't in the driver's seat), fix it.
+If a body action is PHYSICALLY IMPOSSIBLE given where the character actually is (e.g., "turns toward the ignition" but the character isn't in the driver's seat), fix it.
 
 CRITICAL GUARDRAILS — you MUST follow these:
 1. ONLY change actions that are physically impossible. Leave everything else EXACTLY as-is.
