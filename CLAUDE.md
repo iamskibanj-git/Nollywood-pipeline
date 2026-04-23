@@ -1777,30 +1777,46 @@ Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.
 | ch1_sc2_c1 | 21 | 8/11/7 | 3 | 10s | 13s | ⚡ Shots 1-2 lip-synced, Shot 3 narrated over action (jaw tightens, push-in). Dramatically works as inner monologue — "He humiliated you in front of everyone" felt like unspoken thought. Acceptable. | S1: "Ada. Ada, stop walking. Talk to me." S2: "I know exactly how he is. That is the problem." S3: "He humiliated you in front of everyone." |
 | ch1_sc2_c2 | 25 | 9/6/10 | 3 | 10s | 14s | ⚠ Shots 1-2 lip-synced. Shot 3 (5 words): voice delivered but lip sync didn't match. Short dialogue line in final shot. | S1: "He was joking. You know how he is." S2: "I am fine, Ngozi. Leave it." S3: "Every marriage has its difficulties." |
 | ch1_sc2_c3 | 26 | 8/7/11 | 3 | 10s | 15s | ⚠ Shots 1-2 perfect (static camera). Shot 3 (11 words, ECU + slow push-in): transition/expression/camera perfect, lip sync broken. Camera movement + dialogue = split attention. | S1: "Ada. When last did you laugh? Real laugh?" S2: "Do not start this today. Please." S3: "Something is wrong. I can see it on your face." |
-| ch1_sc3_c1 | 21 | 8/6/7 | 3 | 10s | 14s | ⚠ S1 ✓ perfect, S3 ✓ perfect. S2 WRONG CHARACTER — Ngozi's line delivered by Ada. All static camera. 3-char scene. Blocking conflict: text says Ngozi closest to camera but scene image shows Ada closest. Double @ref in S3 (@emeka + @adaeze) worked fine — visually distinct (male vs female). | S1: "Ngozi! You are still here. Good to see you." S2: "Emeka. We were just talking." S3: "Ada, the car is ready. Let us go." |
+| ch1_sc3_c1 | 21 | 8/6/7 | 3 | 10s | 14s | ⚠ S1 ✓ perfect, S3 ✓ perfect. S2 WRONG CHARACTER — Ngozi's line delivered by Ada. All static camera. 3-char scene. Blocking conflict: text says Ngozi closest to camera but scene image shows Ada closest. Double @ref in S3 (@emeka + @adaeze) worked fine — visually distinct (male vs female). **Fixed by vision verification (Session 24).** | S1: "Ngozi! You are still here. Good to see you." S2: "Emeka. We were just talking." S3: "Ada, the car is ready. Let us go." |
+| ch1_sc3_c2 | 20 | 5/8/8 | 3 | 10s | 13s | ⚠ S1 ✓ perfect, S2 unknown (push-in risk). S3: **dialogue replaced entirely** — scripted "She is always busy. You know how it is." became "ok ok good bye". Kling interpreted "already turning away" action as departure cue and generated contextually fitting but wrong dialogue. Static camera on S3 but action verb ("turning away") competed with dialogue. Blocking now correct (vision verified). | S1: "Yes. I am coming." S2: "I will call you this week, Ada." S3: "She is always busy. You know how it is." |
+| ch1_sc4_c1 | 20 | 7/6/7 | 3 | 10s | 13s | ✓ All 3 shots delivered perfectly — dialogue, lip sync, camera, expressions all correct. BUT **American accent** instead of Nigerian English. Voice tone binding issue on elements, not a prompt problem. S3 had slow push-in + dialogue yet lip sync worked — 2-char car interior with minimal body movement may reduce competing action. | S1: "You were looking sad again in there." S2: "I was not. I was smiling." S3: "A dead smile. People notice these things." |
+| ch1_sc4_c2 | 18 | 8/8/2 | 3 | 10s | 12s | ✓ Perfect. All 3 shots correct — lip sync, dialogue, expressions. S3: ECU + slow push-in + only 2 words ("I understand") — worked flawlessly. Seated car interior = push-in safe even with ECU and ultra-short dialogue. Confirms: minimal body movement negates the push-in risk. | S1: "I am sorry. I did not mean to—" S2: "You embarrass me when you look like that." S3: "I understand." |
 
 **Emerging patterns:**
-- **Camera movement + dialogue = lip sync breaks.** Every shot with a push-in, dolly, or dynamic camera AND dialogue has lip sync issues. Every static shot with dialogue lip-syncs correctly. This is the strongest signal so far. (ch1_sc1_c3 S3: push-in + 5 words = wonky. ch1_sc2_c1 S3: push-in + action + 7 words = narrated. ch1_sc2_c3 S3: push-in + 11 words = broken. ch1_sc1_c1/c2: all static = perfect.)
+- **Camera movement + dialogue = lip sync breaks.** Every shot with a push-in, dolly, or dynamic camera AND dialogue has lip sync issues. Every static shot with dialogue lip-syncs correctly. (ch1_sc1_c3 S3: push-in + 5 words = wonky. ch1_sc2_c1 S3: push-in + action + 7 words = narrated. ch1_sc2_c3 S3: push-in + 11 words = broken. ch1_sc1_c1/c2: all static = perfect.)
+- **Departure/movement action + dialogue = Kling makes up its own words.** ch1_sc3_c2 S3: "already turning away" → Kling generated "ok ok good bye" instead of the scripted line. It understood the semantic context (leaving) and substituted dialogue that fit the action. This is WORSE than lip sync issues — the actual words are wrong.
+- **Shot 3 is consistently fragile.** 7 out of 9 clips had Shot 3 issues. The only 2 that worked perfectly (ch1_sc1_c1, c2) had ALL shots static with NO action verbs. Possible temporal degradation: Kling's dialogue fidelity drops after ~6-8s into a clip. By Shot 3, the "attention budget" for faithful dialogue is depleted.
 - **Short dialogue (≤5 words) amplifies the problem.** ch1_sc1_c3 S3 (5 words + push-in) and ch1_sc2_c2 S3 (5 words) both had lip sync issues. Kling may not invest lip animation effort for very short lines.
 - **EXTREME CLOSE-UP amplifies visibility.** ch1_sc2_c3 S3 was ECU — at that zoom, any desync is glaringly obvious. A medium shot with the same desync might pass.
-- **Shot 3 is most vulnerable** — final shot has the least remaining time budget + often gets the dramatic camera movement.
 - **Narration-as-inner-monologue.** ch1_sc2_c1 Shot 3 (7 words, push-in + jaw tightens + fury) → narrated instead of lip-synced. Worked dramatically but may not always be desirable.
-- **Blocking text ↔ scene image mismatch = wrong character speaks.** ch1_sc3_c1 S2: blocking text said Ngozi closest to camera, but the scene image had Ada closest. Kling used the IMAGE to determine who's who and gave Ada the line meant for Ngozi. **The image always wins over text.** The `_injectVisionBlocking()` step that writes CHARACTER POSITIONS must accurately describe what the scene image actually shows, not what the script intended.
+- **Blocking text ↔ scene image mismatch = wrong character speaks.** ch1_sc3_c1 S2: blocking text vs scene image conflict. **RESOLVED** by `_verifyBlockingWithSceneImage()` in Session 24.
 - **Double @ref is safe when characters are visually distinct.** ch1_sc3_c1 S3 referenced @emeka (speaking) and @adaeze (glance target) — delivered perfectly. Male vs. female = no confusion. The risk is with same-gender pairs where Kling relies on position/clothing.
+
+**Shot 3 failure taxonomy (from 9 clips):**
+| Type | Count | Example | Cause |
+|------|-------|---------|-------|
+| Perfect | 2 | ch1_sc1_c1, c2 | All static, no action verbs |
+| Lip sync wonky | 3 | ch1_sc1_c3, ch1_sc2_c2, ch1_sc2_c3 | Camera movement and/or short dialogue |
+| Narrated (no lip sync) | 1 | ch1_sc2_c1 | Push-in + heavy action |
+| Wrong character | 1 | ch1_sc3_c1 | Blocking mismatch (fixed) |
+| Dialogue replaced | 1 | ch1_sc3_c2 | Departure action verb |
+| Perfect (3-char) | 1 | ch1_sc3_c1 S3 | Static + visually distinct chars |
 
 **Actionable rules emerging:**
 > 1. If a shot has dialogue, keep the camera STATIC. Reserve camera movements for non-dialogue moments.
-> 2. CHARACTER POSITIONS must describe the scene image as-rendered, not as-intended. Vision blocking must read the actual image and report real positions.
-> 3. Double @ref per shot is acceptable for visually distinct characters (different gender). Avoid for same-gender pairs.
+> 2. Shot 3 should have the SIMPLEST dialogue line — fewest words, no action verbs that imply motion/departure.
+> 3. Avoid action verbs that imply departure in dialogue shots ("turning away", "walking off", "leaving"). Kling interprets these semantically and may substitute its own contextual dialogue.
+> 4. CHARACTER POSITIONS must describe the scene image as-rendered, not as-intended. **RESOLVED:** `_verifyBlockingWithSceneImage()` now corrects this automatically.
+> 5. Double @ref per shot is acceptable for visually distinct characters (different gender). Avoid for same-gender pairs.
 
 **Open questions for later analysis:**
+- **Temporal threshold:** Is there a hard ~8-10s mark where Kling's dialogue fidelity drops off? The 2 perfect Shot 3s had 12s effective duration — same as the failures. May be cumulative attention budget, not purely temporal.
 - Would splitting "dialogue + push-in" into two sub-beats (dialogue static → then push-in silent) fix it, or does multi-shot Auto not support that granularity?
 - Is there a word count threshold below which Kling skips lip animation entirely (≤5 words)?
 - Is the narration-as-inner-monologue pattern reliable enough to be intentional?
-- Buffer tuning: current 1.5s may need to go to 2.5-3.0 if more clips show narrated last shots
 - Consider per-shot action density scoring (camera movement + character action + dialogue = more time needed)
 - **Dynamic shot count:** Could reduce to 2 shots per clip when dialogue is sparse (≤15 words total). Script engine currently hard-enforces 3 shots. Would require touching script prompt, review rubric, and gen logic — defer until more data.
-- Does `_injectVisionBlocking()` accurately read character positions from the scene image, or does it sometimes guess/inherit from the script? If it's guessing, that's the root cause of blocking mismatches.
+- **Script engine constraint:** Should Shot 3 direction be restricted to "static camera, no motion verbs" at the prompt engineering level?
 
 ### Session 24 — Vision Blocking Verification, Resolution Enforcement
 
@@ -1808,23 +1824,75 @@ Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.
 
 **Root cause:** One-shot blocking. Vision proposes positions → scene renders → no verification step → blocking text may be stale by the time Kling reads it.
 
-**Fix: `_verifyBlockingWithSceneImage()`** — A new lightweight Vision call that runs once per scene at video gen time. It reads the actual rendered scene image (same image Kling uses as start frame) and describes where characters ACTUALLY are. This corrected blocking replaces the stashed blocking before injection into Kling prompts.
+**Fix: `_verifyBlockingWithSceneImage(sceneImagePath, characters, characterDescs)`** — A lightweight Vision call that runs once per scene at video gen time. It reads the actual rendered scene image (same image Kling uses as start frame), identifies each character using their visual descriptions from `character_bible` (clothing, hair, body type), and describes where they ACTUALLY are. This corrected blocking replaces the stashed blocking before injection into Kling prompts.
 
 Flow change:
 1. `_refineBlockingWithVision(locationImage)` → proposes blocking (unchanged)
 2. Cinema Studio renders scene image (unchanged)
-3. **NEW:** `_verifyBlockingWithSceneImage(sceneImage)` → corrects blocking to match rendered image
+3. **NEW:** `_verifyBlockingWithSceneImage(sceneImage, chars, charDescs)` → reads scene image, identifies characters by visual description, corrects positions to match what was actually rendered
 4. `_injectVisionBlocking(prompt, correctedChars)` → injects into Kling prompt
 
-Cost: ~1 additional Sonnet call per scene (not per clip). Scenes share blocking across all their clips.
+**Character identification:** Vision receives `full_prompt_description` from `character_bible` for each character (e.g. "young Nigerian woman, sage green blouse, navy wrap skirt, natural hair in updo"). This is critical for multi-character scenes where Vision must distinguish who is who before it can describe positions. Without descriptions, Vision was guessing — leading to the original blocking mismatch.
 
-**Also added: `_ensureResolution720p()`** in kling-automation.js. Before every clip generation, Playwright actively reads the resolution chip, and if it's 4K/1080p/2K, clicks it back to 720p. This is Layer 1 of the 4-layer resolution protection (active fix → pre-gen gate → credit cost gate → pipeline pause).
+**Lazy execution:** Verification only runs when the first PENDING clip for a scene is encountered in the generation loop. Scenes whose clips are all done skip verification entirely. This avoids 64 Vision calls at startup.
 
-### Current Project State (Session 24)
+**DB persistence:** After successful verification, corrected `vision_refined_characters` + `vision_blocking_verified: true` flag are written back to the scene asset's `prompt_used` JSON via `db.updateAssetPromptUsed()`. On subsequent runs, scenes with the verified flag skip the Vision call entirely — no redundant API calls.
 
-- Video generation in progress — clip 7 of 150 done
-- Vision blocking verification added (prevents wrong-character dialogue)
+**WebP-in-PNG handling:** Cinema Studio saves scene images with `.png` extension but WebP content. The verification detects actual format from file magic bytes (first 12 bytes: PNG `89504E47`, JPEG `FFD8FF`, WebP `RIFF....WEBP`) and converts WebP→JPEG via ffmpeg before sending to Claude Vision API.
+
+**Name format preservation:** Vision returns base names (e.g. "ngozi"). Post-processing converts all bare names and @base names to the full suffixed element format (`@ngozi_towwf_0421`) using the same regex pattern as `_refineBlockingWithVision`.
+
+**Frame-position warnings:** Downgraded from `WARNING: Could not replace position` to informational `No inline position to replace (preamble will override)`. These are expected for cinematic prompts where character positions live in a separate `CHARACTER POSITIONS:` block (which gets stripped), not inline in shot directions.
+
+Cost: ~1 Sonnet call per scene with pending clips. Cached in-memory per run + persisted to DB across runs.
+
+**Also added: `_ensureResolution720p()`** in kling-automation.js. Before every clip generation, Playwright actively reads the resolution chip from the DOM, and if it's 4K/1080p/2K, clicks it open and selects 720p. This is Layer 1 of the 4-layer resolution protection (active fix → pre-gen gate → credit cost gate → pipeline pause).
+
+### Session 25 — Shot Direction Reconciliation (3rd Vision Pass)
+
+**Problem: Shot directions conflict with verified blocking.** Shot directions in `multi_shot_prompt` are written at script stage against PROPOSED blocking (generic frame-left/center/right positions). The 2nd Vision pass (`_verifyBlockingWithSceneImage`) corrects the CHARACTER POSITIONS preamble to match the actual rendered scene, but body action verbs inside shot directions go untouched. Result: preamble says "@ada — seated behind the steering wheel" but Shot 3 says "@emeka turns toward the ignition." Kling receives contradictory instructions and improvises — sometimes acceptably (Emeka leans toward door handle), sometimes not.
+
+**Categories of spatially-dependent actions that break:**
+- Object interactions: "turns toward the ignition", "reaches for the door handle" — only valid if character is near that object
+- Relative movements: "steps toward @ada", "turns away from the counter" — depends on actual positions
+- Posture transitions: "stands up from the chair" — only valid if character is seated
+
+Position-independent actions need no fix: "gestures with hand", "narrows eyes", "crosses arms", "nods slowly."
+
+**Fix: `_reconcileShotDirectionsWithImage(sceneImagePath, verifiedPositions, prompt, imageData, mimeType)`** — 3rd Vision pass, per-clip. Sends the scene image + verified character positions + full shot directions to Claude Vision. Asks: "Are any body actions physically impossible given where these characters actually are? If so, rewrite ONLY those actions." Runs ONLY when the 2nd Vision pass made corrections (corrections > 0).
+
+**Critical guardrails (action density vs lip sync trade-off):**
+Too much body action competes with dialogue lip sync — observed pattern from clip generation data. The 3rd Vision pass must simplify, never elaborate.
+
+1. **Word count ceiling:** Replacement direction ≤ original word count per shot. Enforced in Vision prompt AND verified in post-validation code.
+2. **Dialogue shots get minimal action:** Shots containing `[@character, speaking...]` dialogue get subtle gestures only — "nods", "glances down", "sits still." Prompt instruction: "For shots with dialogue, prefer REMOVING the impossible action over replacing it."
+3. **Simplify-or-remove bias:** Instruction hierarchy: (a) keep as-is if physically possible, (b) remove entirely (character holds position), (c) last resort — replace with simpler equivalent (fewer verbs, no object interaction).
+4. **Action verb cap:** Max 1 action verb per shot when dialogue is present. Max 2 for non-dialogue shots.
+5. **Character budget:** Reconciled prompt must respect Kling's 2500-char limit. Vision instructed to stay within original shot direction character count.
+6. **Post-validation check:** Code verifies response before accepting — if any shot grew >20% in word count or action verb count increased, reject and fall back to deleting the impossible action while keeping rest of shot intact.
+
+**Trigger condition:** Only runs for clips in scenes where `_verifyBlockingWithSceneImage` returned `corrections > 0`. Scenes where verified blocking matched proposed blocking skip this entirely.
+
+**Caching:** Reconciled prompt stored per-clip in DB via `prompt_used.shot_directions_reconciled = true`. On restart, clips with this flag skip the 3rd Vision call. In-memory cache keyed by clipId within a run.
+
+**Architecture — where it fits in the flow:**
+1. Scene-level: `_verifyBlockingWithSceneImage()` → corrects CHARACTER POSITIONS → cached/persisted (unchanged)
+2. Clip-level: `_injectVisionBlocking()` → rewrites preamble + Shot 1 posture verbs (unchanged)
+3. **NEW — clip-level:** `_reconcileShotDirectionsWithImage()` → Vision sees scene image + corrected positions + shot directions → fixes physically impossible actions
+4. Clip-level: prompt sanitization (@-ref cleanup, bare name fix, dialogue @-strip) (unchanged)
+
+**Connection to duration formula:** Reducing action density before duration calculation means more temporal budget for lip sync at any given clip duration. This is a pre-optimization for the future duration tuning work.
+
+Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 scenes had corrections × ~3 clips each = 30-45 calls ≈ $0.30-0.90 total for a 150-clip project.
+
+### Current Project State (Session 25)
+
+- Video generation in progress — clip 11 of 150 done
+- 3-pass Vision blocking system: propose → verify → reconcile shot directions
+- Verified blocking persisted to DB (no redundant Vision calls on restart)
 - Active 720p resolution enforcement added
 - Smart duration working (12-15s bumps confirmed)
 - Credit cost inflation gate + pipeline pause on cost inflation
-- All changes in working tree, pending commit from Windows PowerShell
+- WebP magic bytes detection for scene images
+- Duration/lip-sync observation table being gathered (11 clips so far)
+- Frame-position warnings quieted

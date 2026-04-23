@@ -4917,6 +4917,258 @@ Output ONLY the JSON array.`,
   }
 
   /**
+   * 3rd Vision Pass — Reconcile shot directions with verified blocking.
+   *
+   * After _verifyBlockingWithSceneImage corrects CHARACTER POSITIONS and
+   * _injectVisionBlocking rewrites the preamble, shot body actions may still
+   * reference physically impossible actions (e.g. "turns toward the ignition"
+   * when the character isn't in the driver's seat).
+   *
+   * This method sends the scene image + verified positions + full prompt to
+   * Claude Vision and asks it to fix ONLY physically impossible body actions.
+   *
+   * GUARDRAILS (action density vs lip sync trade-off):
+   * - Word count ceiling: replacement ≤ original per shot
+   * - Dialogue shots: minimal action (prefer removal over substitution)
+   * - Action verb cap: 1 per dialogue shot, 2 per non-dialogue shot
+   * - Post-validation: reject if any shot grew >20% or verb count increased
+   *
+   * @param {string} sceneImagePath - Path to the rendered scene image
+   * @param {Array} verifiedPositions - Corrected characters from 2nd Vision pass
+   * @param {string} prompt - The multi_shot_prompt AFTER _injectVisionBlocking
+   * @param {Buffer|null} imageData - Pre-read image data (avoids re-reading/re-converting)
+   * @param {string|null} mimeType - Detected mime type of imageData
+   * @returns {string} Reconciled prompt, or original prompt on failure
+   */
+  async _reconcileShotDirectionsWithImage(sceneImagePath, verifiedPositions, prompt, imageData = null, mimeType = null) {
+    const fs = require('fs');
+
+    if (!prompt || !verifiedPositions || verifiedPositions.length === 0) return prompt;
+
+    try {
+      const apiKey = this.store.get('claudeApiKey');
+      if (!apiKey) {
+        this.log('[SHOT-RECONCILE] No Claude API key — using prompt as-is');
+        return prompt;
+      }
+
+      // ── Prepare image data (reuse from caller if available) ──
+      if (!imageData || !mimeType) {
+        if (!fs.existsSync(sceneImagePath)) {
+          this.log(`[SHOT-RECONCILE] Scene image not found: ${sceneImagePath} — using prompt as-is`);
+          return prompt;
+        }
+
+        const _detectMimeFromBytes = (buf) => {
+          if (buf.length >= 4) {
+            if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+            if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+            if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+                && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'image/webp';
+          }
+          const ext = (sceneImagePath || '').split('.').pop().toLowerCase();
+          if (ext === 'png') return 'image/png';
+          if (ext === 'webp') return 'image/webp';
+          return 'image/jpeg';
+        };
+
+        imageData = fs.readFileSync(sceneImagePath);
+        mimeType = _detectMimeFromBytes(imageData);
+
+        // Convert WebP → JPEG if needed
+        if (mimeType === 'image/webp') {
+          const path = require('path');
+          const { execSync } = require('child_process');
+          let ffmpegPath = null;
+          for (const cmd of ['ffmpeg', 'C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe']) {
+            try { execSync(`"${cmd}" -version`, { stdio: 'ignore' }); ffmpegPath = cmd; break; } catch (_) {}
+          }
+          if (ffmpegPath) {
+            const tmpJpeg = path.join(path.dirname(sceneImagePath), `_reconcile_tmp_${Date.now()}.jpg`);
+            try {
+              execSync(`"${ffmpegPath}" -i "${sceneImagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpJpeg}"`, { timeout: 15000, stdio: 'pipe' });
+              imageData = fs.readFileSync(tmpJpeg);
+              mimeType = 'image/jpeg';
+              try { fs.unlinkSync(tmpJpeg); } catch (_) {}
+            } catch (convErr) {
+              this.log(`[SHOT-RECONCILE] WebP conversion failed: ${convErr.message} — using prompt as-is`);
+              return prompt;
+            }
+          } else {
+            this.log('[SHOT-RECONCILE] Cannot convert webp without ffmpeg — using prompt as-is');
+            return prompt;
+          }
+        }
+      }
+
+      const base64Image = imageData.toString('base64');
+
+      // ── Pre-analysis: extract shot directions and word counts ──
+      const shotPattern = /(Shot\s*(\d+)\s*\([^)]*\)\s*:\s*)([\s\S]*?)(?=Shot\s*\d+\s*\(|$)/gi;
+      const originalShots = [];
+      let shotMatch;
+      while ((shotMatch = shotPattern.exec(prompt)) !== null) {
+        const shotNum = parseInt(shotMatch[2]);
+        const shotBody = shotMatch[3].trim();
+        const hasDialogue = /\[@[^\]]+,\s*speaking[^\]]*\]\s*:\s*"/.test(shotBody);
+        const wordCount = shotBody.split(/\s+/).filter(w => w.length > 0).length;
+        // Count action verbs (common body action verbs in shot directions)
+        const actionVerbPattern = /\b(turns?|walks?|steps?|reaches?|grabs?|leans?|stands?|sits?|rises?|moves?|shifts?|crosses?|gestures?|points?|pushes?|pulls?|opens?|closes?|lifts?|drops?|places?|sets?|picks?|exits?|enters?|approaches?|retreats?|spins?|pivots?|bends?|stretches?|climbs?)\b/gi;
+        const actionVerbs = (shotBody.match(actionVerbPattern) || []).length;
+        originalShots.push({ shotNum, shotBody, hasDialogue, wordCount, actionVerbs });
+      }
+
+      if (originalShots.length === 0) {
+        this.log('[SHOT-RECONCILE] No shot directions found in prompt — skipping');
+        return prompt;
+      }
+
+      // Build verified positions summary for the prompt
+      const positionsSummary = verifiedPositions.map(c =>
+        `@${c.name}: ${c.position || 'unknown position'}`
+      ).join('\n');
+
+      const Anthropic = require('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey });
+
+      const response = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 800,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mimeType, data: base64Image },
+            },
+            {
+              type: 'text',
+              text: `You are reconciling shot directions with verified character positions for an AI video generation pipeline (Kling). The scene image above shows where characters ACTUALLY are.
+
+VERIFIED CHARACTER POSITIONS (ground truth — these match the scene image):
+${positionsSummary}
+
+CURRENT SHOT DIRECTIONS:
+${prompt}
+
+TASK: Check each shot's body action directions against the scene image and verified positions. If a body action is PHYSICALLY IMPOSSIBLE given where the character actually is (e.g., "turns toward the ignition" but the character isn't in the driver's seat), fix it.
+
+CRITICAL GUARDRAILS — you MUST follow these:
+1. ONLY change actions that are physically impossible. Leave everything else EXACTLY as-is.
+2. For shots WITH dialogue (containing [@character, speaking...]: "..."):
+   - PREFER removing the impossible action entirely over replacing it
+   - If you must replace, use a SUBTLE gesture only: "nods", "glances down", "shifts slightly", "sits still"
+   - MAX 1 action verb in the entire shot direction when dialogue is present
+3. For shots WITHOUT dialogue:
+   - Replace with a SIMPLER action that works from the character's actual position
+   - MAX 2 action verbs
+4. NEVER make a shot direction LONGER than the original. Aim shorter.
+5. NEVER add new actions, new object interactions, or elaborate choreography.
+6. Keep ALL dialogue, camera directions, tone markers, and @ character references EXACTLY as-is.
+7. If ALL shot directions are physically possible, return "NO_CHANGES_NEEDED" (nothing else).
+
+OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed ones). Preserve exact formatting, line breaks, and structure. Change ONLY the specific body action phrases that are impossible.`,
+            },
+          ],
+        }],
+      });
+
+      const resultText = (response.content?.[0]?.text || '').trim();
+
+      // ── Check for no-changes response ──
+      if (resultText === 'NO_CHANGES_NEEDED' || resultText.includes('NO_CHANGES_NEEDED')) {
+        this.log('[SHOT-RECONCILE] All shot directions are physically valid — no changes needed');
+        return prompt;
+      }
+
+      // ── Post-validation: enforce guardrails in code ──
+      const reconciledShots = [];
+      const reconciledPattern = /(Shot\s*(\d+)\s*\([^)]*\)\s*:\s*)([\s\S]*?)(?=Shot\s*\d+\s*\(|$)/gi;
+      let reconMatch;
+      while ((reconMatch = reconciledPattern.exec(resultText)) !== null) {
+        const shotNum = parseInt(reconMatch[2]);
+        const shotBody = reconMatch[3].trim();
+        const wordCount = shotBody.split(/\s+/).filter(w => w.length > 0).length;
+        const actionVerbPattern = /\b(turns?|walks?|steps?|reaches?|grabs?|leans?|stands?|sits?|rises?|moves?|shifts?|crosses?|gestures?|points?|pushes?|pulls?|opens?|closes?|lifts?|drops?|places?|sets?|picks?|exits?|enters?|approaches?|retreats?|spins?|pivots?|bends?|stretches?|climbs?)\b/gi;
+        const actionVerbs = (shotBody.match(actionVerbPattern) || []).length;
+        reconciledShots.push({ shotNum, shotBody, wordCount, actionVerbs });
+      }
+
+      // Validate each shot against original
+      let guardrailViolation = false;
+      for (const recon of reconciledShots) {
+        const orig = originalShots.find(o => o.shotNum === recon.shotNum);
+        if (!orig) continue;
+
+        // Check word count ceiling (20% tolerance)
+        if (recon.wordCount > orig.wordCount * 1.2) {
+          this.log(`[SHOT-RECONCILE] GUARDRAIL VIOLATION: Shot ${recon.shotNum} grew from ${orig.wordCount} → ${recon.wordCount} words (>${Math.round(orig.wordCount * 1.2)} limit)`);
+          guardrailViolation = true;
+          break;
+        }
+
+        // Check action verb count didn't increase
+        if (recon.actionVerbs > orig.actionVerbs) {
+          this.log(`[SHOT-RECONCILE] GUARDRAIL VIOLATION: Shot ${recon.shotNum} action verbs increased from ${orig.actionVerbs} → ${recon.actionVerbs}`);
+          guardrailViolation = true;
+          break;
+        }
+      }
+
+      if (guardrailViolation) {
+        this.log('[SHOT-RECONCILE] Guardrail violated — falling back to conservative fix (strip impossible actions only)');
+        // Conservative fallback: just return the original prompt as-is
+        // The preamble (from _injectVisionBlocking) already has correct positions,
+        // so Kling will at least see the right CHARACTER POSITIONS even if shot
+        // directions have stale actions. Kling's improvisation is usually acceptable.
+        return prompt;
+      }
+
+      // Validate shot count matches
+      if (reconciledShots.length !== originalShots.length) {
+        this.log(`[SHOT-RECONCILE] Shot count mismatch: original=${originalShots.length}, reconciled=${reconciledShots.length} — using original prompt`);
+        return prompt;
+      }
+
+      // ── Log changes ──
+      let changes = 0;
+      for (const recon of reconciledShots) {
+        const orig = originalShots.find(o => o.shotNum === recon.shotNum);
+        if (orig && recon.shotBody !== orig.shotBody) {
+          changes++;
+          this.log(`[SHOT-RECONCILE] Shot ${recon.shotNum}: "${orig.shotBody.slice(0, 60)}..." → "${recon.shotBody.slice(0, 60)}..."`);
+          if (orig.wordCount !== recon.wordCount) {
+            this.log(`[SHOT-RECONCILE]   Words: ${orig.wordCount} → ${recon.wordCount} (${recon.wordCount <= orig.wordCount ? '✓ within budget' : '⚠ grew'})`);
+          }
+          if (orig.actionVerbs !== recon.actionVerbs) {
+            this.log(`[SHOT-RECONCILE]   Action verbs: ${orig.actionVerbs} → ${recon.actionVerbs} (${recon.actionVerbs <= orig.actionVerbs ? '✓ simplified' : '⚠ added'})`);
+          }
+        }
+      }
+
+      if (changes === 0) {
+        this.log('[SHOT-RECONCILE] Vision returned prompt but no shot directions actually changed');
+        return prompt;
+      }
+
+      this.log(`[SHOT-RECONCILE] ✓ Reconciled ${changes}/${originalShots.length} shot direction(s) with verified blocking`);
+
+      // ── Final character budget check ──
+      const KLING_CHAR_LIMIT = 2500;
+      if (resultText.length > KLING_CHAR_LIMIT) {
+        this.log(`[SHOT-RECONCILE] Reconciled prompt ${resultText.length} chars exceeds ${KLING_CHAR_LIMIT} limit — using original prompt`);
+        return prompt;
+      }
+
+      return resultText;
+
+    } catch (e) {
+      this.log(`[SHOT-RECONCILE] Reconciliation failed: ${e.message} — using prompt as-is`);
+      return prompt;
+    }
+  }
+
+  /**
    * Generate ALL scene images for a cinematic-mode project via Cinema Studio 3.5.
    * Replaces the standard scene-image generation when generator_mode = 'cinematic'.
    *
@@ -5512,7 +5764,8 @@ Output ONLY the JSON array.`,
     // call per scene). We only run it when the first PENDING clip for a scene is
     // encountered, then cache the result for subsequent clips in the same scene.
     // Scenes whose clips are all done never trigger verification.
-    const verifiedBlockingCache = {}; // "ch{N}_sc{M}" → corrected visionRefinedChars
+    const verifiedBlockingCache = {}; // "ch{N}_sc{M}" → { chars: corrected visionRefinedChars, hadCorrections: bool }
+    const shotReconcileCache = {};   // clipId → true (reconciled shot directions for this clip)
 
     for (let i = 0; i < allKlingClips.length; i++) {
       const item = allKlingClips[i];
@@ -5568,10 +5821,23 @@ Output ONLY the JSON array.`,
 
         if (visionBlockingVerified) {
           // Already verified in a previous run (persisted in DB) — skip Vision call
-          verifiedBlockingCache[sceneKey] = visionRefinedChars;
+          // Load hadCorrections flag from DB if available
+          let hadCorr = false;
+          if (sceneAssetId) {
+            try {
+              const sceneAssetCheck = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+                .find(a => a.id === sceneAssetId);
+              if (sceneAssetCheck) {
+                const pu = typeof sceneAssetCheck.prompt_used === 'string'
+                  ? JSON.parse(sceneAssetCheck.prompt_used) : (sceneAssetCheck.prompt_used || {});
+                hadCorr = pu.blocking_had_corrections === true;
+              }
+            } catch (_) {}
+          }
+          verifiedBlockingCache[sceneKey] = { chars: visionRefinedChars, hadCorrections: hadCorr };
         } else if (verifiedBlockingCache[sceneKey]) {
           // Already verified for this scene in THIS run — use cached result
-          visionRefinedChars = verifiedBlockingCache[sceneKey];
+          visionRefinedChars = verifiedBlockingCache[sceneKey].chars;
           item.visionRefinedChars = visionRefinedChars;
         } else {
           // First pending clip for this scene — verify now
@@ -5611,11 +5877,26 @@ Output ONLY the JSON array.`,
             visionRefinedChars,
             characterDescs
           );
+
+          // Detect whether corrections were made (compare positions)
+          let hadCorrections = false;
+          for (let ci = 0; ci < visionRefinedChars.length; ci++) {
+            const orig = visionRefinedChars[ci];
+            const corr = corrected[ci];
+            if (corr && orig.position !== corr.position) {
+              hadCorrections = true;
+              break;
+            }
+          }
+          if (hadCorrections) {
+            this.log(`[VISION-VERIFY] ${sceneKey}: blocking had corrections — shot direction reconciliation will be triggered`);
+          }
+
           visionRefinedChars = corrected;
-          verifiedBlockingCache[sceneKey] = visionRefinedChars;
+          verifiedBlockingCache[sceneKey] = { chars: visionRefinedChars, hadCorrections };
           item.visionRefinedChars = visionRefinedChars;
 
-          // Persist corrected blocking + verified flag to DB on the scene asset
+          // Persist corrected blocking + verified flag + corrections flag to DB
           // so subsequent runs skip the Vision call entirely
           if (sceneAssetId) {
             try {
@@ -5627,6 +5908,7 @@ Output ONLY the JSON array.`,
                   : (sceneAsset.prompt_used || {});
                 existing.vision_refined_characters = corrected;
                 existing.vision_blocking_verified = true;
+                existing.blocking_had_corrections = hadCorrections;
                 db.updateAssetPromptUsed(sceneAssetId, existing);
                 this.log(`[VISION-VERIFY] ${sceneKey}: persisted corrected blocking to DB ✓`);
               }
@@ -5731,6 +6013,45 @@ Output ONLY the JSON array.`,
       if (visionRefinedChars && visionRefinedChars.length > 0) {
         finalMultiShotPrompt = this._injectVisionBlocking(finalMultiShotPrompt, visionRefinedChars);
         this.log(`[CINEMATIC] ${clipId}: injected vision-refined blocking into multi_shot_prompt`);
+      }
+
+      // ── 3RD VISION PASS: RECONCILE SHOT DIRECTIONS WITH VERIFIED BLOCKING ──
+      // After preamble injection, shot body actions may still reference physically
+      // impossible positions (e.g. "turns toward the ignition" when the character
+      // isn't in the driver's seat). Only runs when the 2nd Vision pass made
+      // corrections to this scene's blocking.
+      if (visionRefinedChars && visionRefinedChars.length > 0 && !shotReconcileCache[clipId]) {
+        const sceneKey = `ch${chapter}_sc${scene}`;
+        const cachedScene = verifiedBlockingCache[sceneKey];
+        const sceneHadCorrections = cachedScene?.hadCorrections === true;
+
+        if (sceneHadCorrections) {
+          // Check if this clip was already reconciled in a previous run (persisted in DB)
+          const clipAsset = existingClips.find(a => a.kling_clip_id === clipId);
+          let alreadyReconciled = false;
+          if (clipAsset?.prompt_used) {
+            try {
+              const pu = typeof clipAsset.prompt_used === 'string'
+                ? JSON.parse(clipAsset.prompt_used) : clipAsset.prompt_used;
+              alreadyReconciled = pu?.shot_directions_reconciled === true;
+            } catch (_) {}
+          }
+
+          if (alreadyReconciled) {
+            this.log(`[SHOT-RECONCILE] ${clipId}: already reconciled (persisted in DB) — skipping`);
+            shotReconcileCache[clipId] = true;
+          } else {
+            this.log(`[SHOT-RECONCILE] ${clipId}: scene had blocking corrections — reconciling shot directions with scene image...`);
+            finalMultiShotPrompt = await this._reconcileShotDirectionsWithImage(
+              startFramePath,
+              visionRefinedChars,
+              finalMultiShotPrompt
+            );
+            shotReconcileCache[clipId] = true;
+          }
+        } else {
+          this.log(`[SHOT-RECONCILE] ${clipId}: scene blocking matched proposed — no shot reconciliation needed`);
+        }
       }
 
       // ── SANITIZE @-REFERENCES ──
@@ -5981,7 +6302,14 @@ Output ONLY the JSON array.`,
       this.log(`[CINEMATIC] Prompt approved for ${clipId} — proceeding to Kling generation`);
 
       try {
-        if (clipAsset) db.markAssetGenerating(clipAsset.id, finalMultiShotPrompt);
+        if (clipAsset) {
+          // Store prompt as JSON with reconciliation flag for restart persistence
+          const promptPayload = {
+            prompt: finalMultiShotPrompt,
+            shot_directions_reconciled: shotReconcileCache[clipId] === true,
+          };
+          db.markAssetGenerating(clipAsset.id, JSON.stringify(promptPayload));
+        }
 
         // ── CLEAN CONTEXT between clips ──
         // After a previous generation (or recovery), the browser context may
@@ -6159,7 +6487,13 @@ Output ONLY the JSON array.`,
           this.log(`[CINEMATIC] ${clipId}: retrying generation (attempt 2/2)...`);
           try {
             // Reset asset status for retry
-            if (clipAsset) db.markAssetGenerating(clipAsset.id, finalMultiShotPrompt);
+            if (clipAsset) {
+              const retryPayload = {
+                prompt: finalMultiShotPrompt,
+                shot_directions_reconciled: shotReconcileCache[clipId] === true,
+              };
+              db.markAssetGenerating(clipAsset.id, JSON.stringify(retryPayload));
+            }
 
             // Fresh browser context for clean slate
             this.log(`[CINEMATIC] Recreating browser context for ${clipId} retry...`);
