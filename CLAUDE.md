@@ -1713,4 +1713,51 @@ Changes: strict exact file basename matching in `regenerateLocations()`, safety 
 - Per-clip gates (prompt-preview, clip-review) resume correctly via video loop
 - Vision blocking override strips conflicting original positions
 - Scene Verification tab has true aspect ratio, prompt viewer, local location images
-- NTFS `.git/*.lock*` files need cleanup from Windows Explorer
+- Git repo reinitialized after NTFS object corruption (fresh commit `f389ac4`)
+
+### Session 23 — Smart Duration, Cinematic Verify Redo, Early SEO
+
+#### Smart Clip Duration
+
+**Problem:** Kling clips were hard-capped at 12s. Dense dialogue clips (20+ words across 3 shots) would cut off mid-sentence because 10s wasn't enough time for accented delivery.
+
+**Solution:** `effectiveDuration` calculation per clip in `_runCinematicVideoStage()`, computed after the final prompt is built (post vision-blocking, sanitization, etc.):
+- Count dialogue words from `]: "..."` patterns in the prompt
+- Formula: `ceil(words / 2.0) + (shotTransitions × 0.5) + 1.5` (buffer)
+- Take the max of script duration vs calculated minimum
+- Cap at 15s (Kling's max), floor at 5s
+- Logs when bumped: `[DURATION] clipId: script says 10s but dialogue needs ~12s (20 words, 3 shots) → bumped to 12s`
+
+**Key detail:** Shot timings in the prompt body are NOT rewritten — they stay as authored (e.g. "Shot 3 (6-10s)"). The extra seconds act as natural breathing room for Kling to finish the last line rather than cutting hard. Tested and confirmed: lip sync lands perfectly with the buffer approach.
+
+**Kling automation timeout tiers:** 6min (<12s), 8min (12-13s), 10min (14-15s)
+
+**Guard:** Script engine already caps clips at 1-3 dialogue lines with exactly 3 shots. No single clip should need >15s — the structural split-into-multiple-clips rule prevents runaway duration.
+
+#### Cinematic Verify Redo
+
+**Problem:** The verify redo loop (line ~2309) only handled staged (`video_clip`) clips — it used `findLineAndScene()`, `buildVideoPrompt()`, and `generateVideo()` which don't exist for cinematic mode. Rejecting a cinematic clip in verify would hit a dead loop: gate detected pending `video_clip_cinematic` clips but the redo block queried `video_clip` and found nothing.
+
+**Fix:** Mode-aware fork in the redo block. For cinematic mode, calls `_runCinematicVideoStage(projectId, projectDir)` directly. This method already handles resume (skips done/skipped clips, generates only pending ones), so rejected clips (reset to 'pending' by `setVerifyHumanDecision`) get picked up naturally. All prompt building, vision blocking, smart duration, and prompt-preview gate run as normal.
+
+**Gate behavior:** Dialogue-triage gate is outside `_runCinematicVideoStage()` so it's skipped during redo. Prompt-preview gate is inside and fires for each redo clip.
+
+#### Early SEO Generation
+
+**Problem:** SEO metadata (YouTube title/description/tags, Facebook caption) was only generated at publish time — a manual button click. The script already contains everything needed for SEO.
+
+**Fix:** `_generateEarlySEO(projectId, projectDir)` fires as background promise after script approval. Non-blocking — portrait generation proceeds in parallel. Generates YouTube + Facebook metadata via Claude, persists to DB, writes output files. If it fails, publish stage can still generate on demand.
+
+**Skip logic:** Checks `youtube_metadata` column — if already populated, skips early generation (idempotent on resume).
+
+#### Prompt-Preview Counter Fix
+
+**Problem:** The `0 / 0` counter in the generation view header when prompt-preview gate fires. `showGenerationView()` resets the counter, then the prompt-preview event doesn't restore it.
+
+**Fix:** After `showGenerationView()`, immediately call `updateGenProgress(event.clipIndex, event.clipTotal)` using the clip data from the event.
+
+### Current Project State (Session 23)
+
+- First video clip generated successfully with smart duration (12s bump, perfect lip sync)
+- Video generation in progress — prompt-preview gate active per clip
+- All Session 22+23 changes in working tree, pending commit from Windows PowerShell
