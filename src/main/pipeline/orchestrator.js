@@ -1186,6 +1186,22 @@ class PipelineOrchestrator {
         if (this.cancelled) return { success: false, reason: 'cancelled' };
       }
 
+      // ── Early SEO generation (fire-and-forget after script approval) ──
+      // The script contains everything needed for SEO (title, characters,
+      // plot, themes). Generate now so it's ready at publish time. If it
+      // fails, the publish stage can still regenerate on demand.
+      if (shouldRunStage('script-done')) {
+        const project = db.getProject(projectId);
+        const hasYtMeta = project?.youtube_metadata && project.youtube_metadata !== '{}';
+        if (!hasYtMeta) {
+          this._generateEarlySEO(projectId, projectDir).catch(err => {
+            this.log(`[SEO] Early SEO generation failed (non-fatal): ${err.message}`, 'warn');
+          });
+        } else {
+          this.log(`[SEO] YouTube metadata already exists — skipping early generation`);
+        }
+      }
+
       // ── Stage 3A: Character Portraits ──
       if (shouldRunStage('script-done')) {
         await this.runStage('portraits', async () => {
@@ -7584,6 +7600,53 @@ Output ONLY the JSON array, no explanation.`,
     this.log(`[PUBLISH] SEO metadata generated — YouTube title: "${ytMeta.title}"`);
     this.emit({ type: 'seo-generated', youtube: ytMeta, facebook: fbMeta });
     return { youtube: ytMeta, facebook: fbMeta };
+  }
+
+  /**
+   * Early SEO generation — runs in background after script approval.
+   * Non-blocking: portrait generation proceeds in parallel. If this fails
+   * the publish stage can still call generateSEOMetadata() on demand.
+   */
+  async _generateEarlySEO(projectId, projectDir) {
+    const { SEOGenerator } = require('../publish/seoGenerator');
+    const apiKey = this.store.get('claudeApiKey', '');
+    if (!apiKey) {
+      this.log('[SEO] No Claude API key — skipping early SEO generation', 'warn');
+      return;
+    }
+
+    const project = db.getProject(projectId);
+    if (!project) return;
+    // Add camelCase aliases expected by SEOGenerator
+    project.scriptJson = project.script_json || null;
+    project.projectDir = project.project_dir || null;
+
+    const seoGen = new SEOGenerator(apiKey);
+    const channelName = this.store.get('channelName', '');
+    const subscribeUrl = this.store.get('subscribeUrl', '');
+
+    this.log('[SEO] Generating YouTube metadata (background)...');
+    const ytMeta = await seoGen.generateYouTubeMetadata(project, { channelName, subscribeUrl });
+
+    this.log('[SEO] Generating Facebook caption (background)...');
+    const fbMeta = await seoGen.generateFacebookCaption(project, ytMeta);
+
+    // Persist to DB
+    db.updateProject(projectId, {
+      youtube_metadata: JSON.stringify(ytMeta),
+      facebook_metadata: JSON.stringify(fbMeta),
+    });
+
+    // Write output files if project dir exists
+    if (projectDir) {
+      const fs = require('fs');
+      const outputDir = path.join(projectDir, 'output');
+      fs.mkdirSync(outputDir, { recursive: true });
+      seoGen.writeOutputFiles(outputDir, ytMeta, fbMeta);
+    }
+
+    this.log(`[SEO] Early SEO complete — YouTube title: "${ytMeta.title}"`);
+    this.emit({ type: 'seo-generated', youtube: ytMeta, facebook: fbMeta });
   }
 
   updatePlatformMetadata(platform, fields) {
