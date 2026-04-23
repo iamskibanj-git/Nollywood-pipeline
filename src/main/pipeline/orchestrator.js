@@ -4611,9 +4611,12 @@ YOUR TASK:
 2. Propose blocking for each character that references SPECIFIC objects/areas visible in the image.
 3. Consider the frame orientation — ${aspectRatio === '9:16' ? 'vertical frames work best with foreground/background depth separation, characters at different distances from camera' : 'wide frames work best with lateral separation, characters occupying different horizontal zones'}.${previousSceneImagePath ? '\n4. Study the previous scene image and maintain character positions for continuity.' : ''}
 
+SPATIAL CONTEXT: This is a Nigerian production. All vehicles are LEFT-HAND DRIVE (steering wheel on the LEFT side). If the location is a vehicle interior, the driver sits on the LEFT behind the steering wheel, the passenger on the RIGHT.
+
 RULES:
 - NEVER use "frame-left", "frame-center", "frame-right" — these produce flat, lineup compositions.
 - ALWAYS reference objects/areas visible in the image (e.g., "behind the grill", "leaning on the counter", "standing in the doorway", "approaching from the street").
+- In vehicle scenes, use the steering wheel position to determine driver vs passenger seating.
 - For ${charCount > 1 ? 'multi-character scenes: create spatial RELATIONSHIPS between characters — one closer to camera, one further; one seated, one standing; one inside, one entering' : 'single-character scenes: place the character in a way that uses the environment to frame them naturally'}.
 - Characters must NEVER look at or acknowledge the camera. They are in a candid, natural moment — interacting with each other, looking at objects, working, reacting. Describe their gaze direction explicitly (e.g., "eyes on the grill", "glancing sideways at X", "looking down at her hands").
 - Keep each character's blocking to ONE concise sentence.
@@ -4838,8 +4841,11 @@ TASK: Look at this scene image, IDENTIFY each character by their visual descript
 - Physical relationship to visible objects (cars, trees, furniture, doorways, etc.)
 - Body orientation and gaze direction
 
+SPATIAL CONTEXT: This is a Nigerian production. All vehicles are LEFT-HAND DRIVE (steering wheel on the LEFT side of the vehicle). The person sitting behind the steering wheel is the DRIVER. The person on the right side of the vehicle interior is the PASSENGER. Use the steering wheel position to anchor your identification — do NOT assume who is driving based on character names.
+
 RULES:
 - FIRST identify which person in the image matches each character description. This is critical — do not guess.
+- In vehicle scenes, ALWAYS locate the steering wheel first to determine driver vs passenger.
 - Describe what you SEE, not what you think should be there.
 - Be spatially precise — "closest to camera", "further back", "on the left side of frame near the silver car".
 - Reference actual objects visible in the image.
@@ -5059,8 +5065,10 @@ CHARACTERS IN SCENE: ${charDescLines}
 CURRENT SHOT DIRECTIONS:
 ${prompt}
 
+SPATIAL CONTEXT: This is a Nigerian production. All vehicles are LEFT-HAND DRIVE (steering wheel on the LEFT side of the vehicle). The person behind the steering wheel is the DRIVER. Use the steering wheel to anchor your identification in vehicle scenes.
+
 STEP 1 — VERIFY POSITIONS FIRST:
-Before touching shot directions, CHECK whether the VERIFIED CHARACTER POSITIONS above actually match what you see in the scene image. Look at each character's described position and confirm it matches the image. If characters appear SWAPPED (e.g., the positions describe character A in the driver's seat but the image shows character B there), return ONLY:
+Before touching shot directions, CHECK whether the VERIFIED CHARACTER POSITIONS above actually match what you see in the scene image. Look at each character's described position and confirm it matches the image. In vehicle scenes, ALWAYS locate the steering wheel first — the person behind it is the driver, the other is the passenger. If characters appear SWAPPED (e.g., the positions describe character A in the driver's seat but the image shows character B there), return ONLY:
 BLOCKING_MISMATCH: <brief description of what's wrong>
 Do NOT attempt to fix shot directions if the positions themselves are wrong — that's a deeper problem.
 

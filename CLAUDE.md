@@ -1903,9 +1903,12 @@ Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 
 - 3-pass Vision blocking system: propose → verify → reconcile shot directions
 - Self-healing: 3rd pass detects when 2nd pass misidentified characters → auto re-verifies
 - Legacy scenes (pre-Session 25) default to hadCorrections=true for safety
+- Left-hand drive spatial anchoring in all 3 Vision pass prompts (steering wheel = driver identification)
 - Verified blocking persisted to DB (no redundant Vision calls on restart)
 - Active 720p resolution enforcement added
 - Smart duration working (12-15s bumps confirmed)
 - Credit cost inflation gate + pipeline pause on cost inflation
 - WebP magic bytes detection for scene images
 - Duration/lip-sync observation table being gathered (11 clips so far)
+
+**Vehicle scene identification fix:** All 3 Vision passes (1st propose, 2nd verify, 3rd reconcile) now include `SPATIAL CONTEXT: Nigerian production, LEFT-HAND DRIVE` with explicit instructions to locate the steering wheel first and use it to anchor driver/passenger identification. Previously, Vision confused driver/passenger in ch1_sc5 despite having character visual descriptions — the amber lighting and side-angle made clothing-based identification unreliable. Steering wheel anchoring provides a definitive spatial reference that doesn't depend on character appearance.
