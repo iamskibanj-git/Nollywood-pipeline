@@ -664,7 +664,9 @@ class KlingAutomation {
       try { onGenClicked(creditCost); } catch (_) {}
     }
 
-    const maxWaitMs = durationSeconds >= 12 ? 8 * 60 * 1000 : 6 * 60 * 1000;
+    const maxWaitMs = durationSeconds >= 14 ? 10 * 60 * 1000
+                    : durationSeconds >= 12 ?  8 * 60 * 1000
+                    :                          6 * 60 * 1000;
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < maxWaitMs) {

@@ -2307,57 +2307,72 @@ class PipelineOrchestrator {
           // previous round), regenerate the now-pending clips by running the
           // video generation loop again.
           if (verifyIter > 1) {
-            this.log(`[VERIFY] Redo round ${verifyIter - 1}: regenerating rejected clips...`);
-            const pendingClips = db.getIncompleteAssets(projectId, 'video_clip');
+            const isCinematicRedo = (this.state.generatorMode || 'staged') === 'cinematic';
+            const redoClipType = isCinematicRedo ? 'video_clip_cinematic' : 'video_clip';
+            this.log(`[VERIFY] Redo round ${verifyIter - 1}: regenerating rejected ${redoClipType} clips...`);
+
+            const pendingClips = db.getIncompleteAssets(projectId, redoClipType);
             if (pendingClips.length === 0) {
               this.log('[VERIFY] Nothing to regenerate — exiting loop');
               break;
             }
-            // Re-enter video generation. We reuse the same generateVideo path
-            // by resetting stage back to scenes-done and re-running the video
-            // stage block. Simplest: inline-loop just the pending clips here,
-            // reusing generateVideo directly.
-            await this.runStage('video', async () => {
-              this.log(`[VERIFY-REDO] Regenerating ${pendingClips.length} clip(s)...`);
-              this.emit({ type: 'stage', stage: 'video' });
-              const sceneImageMap = {};
-              for (const si of this.state.sceneImages) sceneImageMap[`${si.chapter}_${si.line}`] = si.path;
-              for (const a of db.getAssets(projectId, { type: 'scene_image', status: 'done' })) {
-                sceneImageMap[`${a.chapter}_${a.line}`] = a.file_path;
-              }
-              for (let idx = 0; idx < pendingClips.length; idx++) {
-                if (this.cancelled) return;
-                await this.checkPause();
-                const asset = pendingClips[idx];
-                const startFramePath = sceneImageMap[`${asset.chapter}_${asset.line}`];
-                if (!startFramePath) {
-                  this.log(`[VERIFY-REDO] No scene image for Ch${asset.chapter} L${asset.line} — skipping`, 'warn');
-                  continue;
-                }
-                const clipFilename = `ch${String(asset.chapter).padStart(2, '0')}_line${String(asset.line).padStart(3, '0')}.mp4`;
-                const clipPath = path.join(projectDir, 'assets', 'clips', clipFilename);
-                const { line: lineObj, scene } = this.findLineAndScene(asset.chapter, asset.line);
-                const videoPrompt = this.buildVideoPrompt(lineObj, scene, this.state.project.brief.accent);
-                const clipLabel = `clip Ch${asset.chapter} L${asset.line} (redo)`;
-                this.log(`[VERIFY-REDO] ${clipLabel}`);
-                this.emit({ type: 'progress', stage: 'video', current: idx + 1, total: pendingClips.length });
-                db.markAssetGenerating(asset.id, videoPrompt);
-                try {
-                  const genMeta = await this._withSessionRetry(
-                    () => this.automation.generateVideo({ startFramePath, animationPrompt: videoPrompt, outputPath: clipPath, duration: 8, audioOn: true, aspectRatio: this.state.aspectRatio || '16:9' }),
-                    clipLabel
-                  );
-                  db.markAssetDone(asset.id, clipPath, genMeta);
-                  this.emit({ type: 'clip-complete', index: idx, path: clipPath });
-                } catch (err) {
-                  if (err.detectedCdnUrl) db.markAssetCdnUrl(asset.id, err.detectedCdnUrl);
-                  db.markAssetFailed(asset.id, err.message);
-                  this.log(`[VERIFY-REDO] Clip failed: ${clipLabel}: ${err.message}`, 'error');
-                  if (err.message.startsWith('SESSION_EXPIRED')) throw err;
-                }
-              }
+
+            if (isCinematicRedo) {
+              // ── CINEMATIC REDO ──
+              // _runCinematicVideoStage already handles resume: it skips done
+              // clips and only generates pending ones. The rejected clips were
+              // reset to 'pending' by setVerifyHumanDecision, so the stage
+              // picks them up naturally. All prompt building, vision blocking,
+              // smart duration, prompt-preview gate, etc. run as normal.
+              this.log(`[VERIFY-REDO] Cinematic mode — re-entering _runCinematicVideoStage for ${pendingClips.length} pending clip(s)`);
+              db.updateProjectStage(projectId, 'scenes-done');
+              await this._runCinematicVideoStage(projectId, projectDir);
               db.updateProjectStage(projectId, 'videos-done');
-            });
+            } else {
+              // ── STAGED REDO ──
+              // Inline loop for staged (Higgsfield) clips — simpler flow
+              await this.runStage('video', async () => {
+                this.log(`[VERIFY-REDO] Regenerating ${pendingClips.length} staged clip(s)...`);
+                this.emit({ type: 'stage', stage: 'video' });
+                const sceneImageMap = {};
+                for (const si of this.state.sceneImages) sceneImageMap[`${si.chapter}_${si.line}`] = si.path;
+                for (const a of db.getAssets(projectId, { type: 'scene_image', status: 'done' })) {
+                  sceneImageMap[`${a.chapter}_${a.line}`] = a.file_path;
+                }
+                for (let idx = 0; idx < pendingClips.length; idx++) {
+                  if (this.cancelled) return;
+                  await this.checkPause();
+                  const asset = pendingClips[idx];
+                  const startFramePath = sceneImageMap[`${asset.chapter}_${asset.line}`];
+                  if (!startFramePath) {
+                    this.log(`[VERIFY-REDO] No scene image for Ch${asset.chapter} L${asset.line} — skipping`, 'warn');
+                    continue;
+                  }
+                  const clipFilename = `ch${String(asset.chapter).padStart(2, '0')}_line${String(asset.line).padStart(3, '0')}.mp4`;
+                  const clipPath = path.join(projectDir, 'assets', 'clips', clipFilename);
+                  const { line: lineObj, scene } = this.findLineAndScene(asset.chapter, asset.line);
+                  const videoPrompt = this.buildVideoPrompt(lineObj, scene, this.state.project.brief.accent);
+                  const clipLabel = `clip Ch${asset.chapter} L${asset.line} (redo)`;
+                  this.log(`[VERIFY-REDO] ${clipLabel}`);
+                  this.emit({ type: 'progress', stage: 'video', current: idx + 1, total: pendingClips.length });
+                  db.markAssetGenerating(asset.id, videoPrompt);
+                  try {
+                    const genMeta = await this._withSessionRetry(
+                      () => this.automation.generateVideo({ startFramePath, animationPrompt: videoPrompt, outputPath: clipPath, duration: 8, audioOn: true, aspectRatio: this.state.aspectRatio || '16:9' }),
+                      clipLabel
+                    );
+                    db.markAssetDone(asset.id, clipPath, genMeta);
+                    this.emit({ type: 'clip-complete', index: idx, path: clipPath });
+                  } catch (err) {
+                    if (err.detectedCdnUrl) db.markAssetCdnUrl(asset.id, err.detectedCdnUrl);
+                    db.markAssetFailed(asset.id, err.message);
+                    this.log(`[VERIFY-REDO] Clip failed: ${clipLabel}: ${err.message}`, 'error');
+                    if (err.message.startsWith('SESSION_EXPIRED')) throw err;
+                  }
+                }
+                db.updateProjectStage(projectId, 'videos-done');
+              });
+            }
             if (this.cancelled) return { success: false, reason: 'cancelled' };
           }
 
@@ -5509,6 +5524,32 @@ Output ONLY the JSON array, no explanation.`,
         }
       }
 
+      // ── SMART DURATION — ensure dialogue fits ──
+      // Count dialogue words from the prompt and calculate minimum needed time.
+      // Formula: (words / 2.0) + (shotTransitions * 0.5) + 1.5s buffer
+      // If the calculated duration exceeds the script's requested duration,
+      // bump up. Kling supports 3-15s; cap at 15.
+      const effectiveDuration = (() => {
+        const scriptDur = clipDef.duration_seconds || 10;
+        // Extract dialogue words: text inside quotes after speaker tags []: "..."
+        const dialogueMatches = finalMultiShotPrompt.match(/\]:\s*"([^"]*)"/g) || [];
+        const allDialogueText = dialogueMatches.map(m => {
+          const q = m.match(/"([^"]*)"/);
+          return q ? q[1] : '';
+        }).join(' ');
+        const wordCount = allDialogueText.split(/\s+/).filter(w => w.length > 0).length;
+        // Count shot transitions (number of shots - 1)
+        const shotCount = (finalMultiShotPrompt.match(/Shot \d+/gi) || []).length;
+        const transitions = Math.max(0, shotCount - 1);
+        // Conservative speaking rate: 2.0 words/sec for accented delivery
+        const minDuration = Math.ceil((wordCount / 2.0) + (transitions * 0.5) + 1.5);
+        const effective = Math.min(15, Math.max(5, Math.max(scriptDur, minDuration)));
+        if (effective > scriptDur) {
+          this.log(`[DURATION] ${clipId}: script says ${scriptDur}s but dialogue needs ~${minDuration}s (${wordCount} words, ${shotCount} shots) → bumped to ${effective}s`);
+        }
+        return effective;
+      })();
+
       const outputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
 
       // Insert/locate asset row — keyed by kling_clip_id for resume idempotency
@@ -5612,7 +5653,7 @@ Output ONLY the JSON array, no explanation.`,
         clipLabel: label,
         prompt: finalMultiShotPrompt,
         startFramePath,
-        durationSeconds: Math.min(12, Math.max(4, clipDef.duration_seconds || 10)),
+        durationSeconds: effectiveDuration,
       });
       const preGenDecision = await this.waitForApproval('prompt-preview');
       if (preGenDecision === 'stop') {
@@ -5647,7 +5688,7 @@ Output ONLY the JSON array, no explanation.`,
           startFramePath,
           startFrameGenId,
           multiShotPrompt: finalMultiShotPrompt,
-          durationSeconds: Math.min(12, Math.max(4, clipDef.duration_seconds || 10)),
+          durationSeconds: effectiveDuration,
           outputPath,
           validElements: validElementNames,
           onGenClicked: (creditCost) => {
@@ -5783,7 +5824,7 @@ Output ONLY the JSON array, no explanation.`,
               startFramePath,
               startFrameGenId,
               multiShotPrompt: finalMultiShotPrompt,
-              durationSeconds: Math.min(12, Math.max(4, clipDef.duration_seconds || 10)),
+              durationSeconds: effectiveDuration,
               outputPath,
               validElements: validElementNames,
               onGenClicked: (creditCost) => {
