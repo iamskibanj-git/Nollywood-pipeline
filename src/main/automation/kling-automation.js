@@ -82,21 +82,92 @@ class KlingAutomation {
     if (!currentUrl.includes('/ai/video') && !currentUrl.includes('/kling-3')) {
       this.log('Navigating to Kling 3.0 page...');
       await page.goto('https://higgsfield.ai/kling-3', { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(3000); // give the SPA time to hydrate
     }
+
+    // ── DYNAMIC READINESS WAIT ──
+    // The SPA hydrates slowly — DOM loads fast but React components aren't
+    // interactive until hydration completes. Poll for key UI elements that
+    // only appear when the Create Video panel is fully loaded:
+    //   1. Model label ("Kling 3.0")
+    //   2. Multi-shot toggle (role="switch")
+    //   3. Prompt textbox (role="textbox" or contenteditable)
+    //   4. Generate button
+    //   5. Duration chip (e.g. "5s", "10s")
+    // Wait until ≥90% of checks pass, then add 10% of elapsed time as buffer.
+    const readinessStart = Date.now();
+    let readyCount = 0;
+    const REQUIRED_CHECKS = 5;
+    const READY_THRESHOLD = Math.ceil(REQUIRED_CHECKS * 0.9); // 5 → need 5 (all)
+    const MAX_WAIT_MS = 30000;
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+      readyCount = await page.evaluate(() => {
+        let count = 0;
+        // 1. Model label
+        const allText = document.body?.innerText || '';
+        if (/kling\s*3\.0/i.test(allText)) count++;
+        // 2. Multi-shot toggle
+        if (document.querySelector('[role="switch"]')) count++;
+        // 3. Prompt textbox
+        if (document.querySelector('[role="textbox"], [contenteditable="true"]')) count++;
+        // 4. Generate button
+        const btns = document.querySelectorAll('button');
+        for (const b of btns) {
+          if (/generate/i.test(b.textContent || '') && b.getBoundingClientRect().width > 0) {
+            count++;
+            break;
+          }
+        }
+        // 5. Duration chip (button text matching "Ns" pattern)
+        for (const b of btns) {
+          if (/^\d+s$/.test((b.textContent || '').trim())) {
+            count++;
+            break;
+          }
+        }
+        return count;
+      }).catch(() => 0);
+
+      if (readyCount >= READY_THRESHOLD) break;
+
+      if (Date.now() - readinessStart > MAX_WAIT_MS) {
+        this.log(`Page readiness timeout: ${readyCount}/${REQUIRED_CHECKS} checks passed after ${MAX_WAIT_MS / 1000}s`, 'warn');
+        break;
+      }
+      await page.waitForTimeout(1000);
+    }
+
+    // Buffer: add 10% of the time it took to reach readiness
+    const elapsedMs = Date.now() - readinessStart;
+    const bufferMs = Math.max(1000, Math.round(elapsedMs * 0.1));
+    this.log(`Page readiness: ${readyCount}/${REQUIRED_CHECKS} checks in ${(elapsedMs / 1000).toFixed(1)}s — waiting ${bufferMs}ms buffer`);
+    await page.waitForTimeout(bufferMs);
 
     // ── AD DISMISSAL: ads can appear 1-3s after page load and cover the UI ──
     await this._dismissAdsWithPatience('[KLING-NAV]');
 
     // Verify Kling 3.0 is shown on the page (model label in the sidebar)
-    const kling30Visible = await page.getByText(/kling\s*3\.0/i).first()
-      .isVisible({ timeout: 8000 }).catch(() => false);
+    const kling30Visible = readyCount >= READY_THRESHOLD ||
+      await page.getByText(/kling\s*3\.0/i).first()
+        .isVisible({ timeout: 5000 }).catch(() => false);
 
     if (!kling30Visible) {
       // Retry: force-navigate to /kling-3 in case we landed on wrong model
       this.log('Kling 3.0 not visible — retrying navigation to /kling-3...');
       await page.goto('https://higgsfield.ai/kling-3', { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(3000);
+      // Re-run readiness wait on retry
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const rc = await page.evaluate(() => {
+          let c = 0;
+          if (/kling\s*3\.0/i.test(document.body?.innerText || '')) c++;
+          if (document.querySelector('[role="switch"]')) c++;
+          if (document.querySelector('[role="textbox"], [contenteditable="true"]')) c++;
+          return c;
+        }).catch(() => 0);
+        if (rc >= 3) break;
+        await page.waitForTimeout(1000);
+      }
+      await page.waitForTimeout(2000);
       await this._dismissAdsWithPatience('[KLING-NAV-RETRY]');
       const retryVisible = await page.getByText(/kling\s*3\.0/i).first()
         .isVisible({ timeout: 5000 }).catch(() => false);
@@ -663,7 +734,44 @@ class KlingAutomation {
         if (isNaN(creditCost)) creditCost = null;
       }
     }
-    this.log(`Clicking GENERATE at (${Math.round(genBtnBox.x)}, ${Math.round(genBtnBox.y)}) — "${genBtnBox.text}" (cost: ${creditCost ?? 'unknown'})`);
+    this.log(`Generate button found: "${genBtnBox.text}" (cost: ${creditCost ?? 'unknown'})`);
+
+    // ── PAGE NOT READY GATE ──
+    // When the page/model hasn't fully loaded, the Generate button shows
+    // just "Generate" with no credit number. If we click now, the generation
+    // may use wrong settings (5s, 16:9, 4K defaults). Wait for the credit
+    // number to appear, which confirms the model + settings are hydrated.
+    if (creditCost === null) {
+      this.log('Generate button has no credit number — page may not be fully loaded. Waiting for hydration...');
+      let hydrated = false;
+      for (let poll = 0; poll < 15; poll++) {
+        await page.waitForTimeout(2000);
+        const refreshed = await page.evaluate(() => {
+          const btns = document.querySelectorAll('button[type="submit"], button');
+          for (const b of btns) {
+            const text = b.textContent?.trim() || '';
+            if (/generate/i.test(text) && b.getBoundingClientRect().width > 0) {
+              return { text };
+            }
+          }
+          return null;
+        });
+        if (refreshed?.text) {
+          const m = refreshed.text.match(/([\d,.]+)\s*$/);
+          if (m) {
+            creditCost = parseFloat(m[1].replace(/,/g, ''));
+            if (!isNaN(creditCost)) {
+              this.log(`Page hydrated — Generate button now shows: "${refreshed.text}" (cost: ${creditCost})`);
+              hydrated = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!hydrated) {
+        throw new Error('[PRE-GEN] Generate button still shows no credit cost after 30s — page failed to fully load');
+      }
+    }
 
     // ── CREDIT COST GATE ──
     // 720p clips cost ~1.5-2 credits/sec. 4K clips cost ~6 credits/sec.

@@ -1756,8 +1756,38 @@ Changes: strict exact file basename matching in `regenerateLocations()`, safety 
 
 **Fix:** After `showGenerationView()`, immediately call `updateGenProgress(event.clipIndex, event.clipTotal)` using the clip data from the event.
 
+#### Credit Cost Inflation Gate
+
+**Problem:** Kling defaulted to 4K resolution, burning 72 credits for a 12s clip instead of ~18 at 720p. No automation existed to set or verify resolution.
+
+**Fix — 3-layer protection:**
+1. **Pre-gen resolution check:** DOM scan for resolution label ("720p", "4K", etc.) in the verification gate. Throws `[PRE-GEN]` if not 720p.
+2. **Credit cost gate:** Parses credit number from Generate button text. If cost > `duration × 3` (generous 720p ceiling), throws `[PRE-GEN]` before clicking Generate.
+3. **Pipeline pause on inflation:** Instead of retrying (same wrong resolution), pipeline pauses. UI shows error + Resume button. User fixes resolution in Kling, clicks Resume, clip retries. Asset reset to `pending`, loop index decremented to retry same clip.
+
+#### Smart Duration — Field Observations (revisit for tuning)
+
+Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.5) + 1.5`
+
+| Clip | Words | Shots | Script | Effective | Result |
+|------|-------|-------|--------|-----------|--------|
+| ch1_sc1_c1 | 19 | 3 | 10s | 12s | ✓ Perfect lip sync, all dialogue delivered |
+| ch1_sc1_c2 | 20 | 3 | 10s | 12s | ✓ Perfect lip sync |
+| ch1_sc1_c3 | 20 | 3 | 10s | 12s | ✓ Perfect lip sync |
+| ch1_sc2_c1 | 21 | 3 | 10s | 13s | ⚡ Shots 1-2 lip-synced, Shot 3 narrated over action (jaw tightens, push-in). Dramatically works as inner monologue — "He humiliated you in front of everyone" felt like unspoken thought. Acceptable. |
+
+**Open questions for later analysis:**
+- Does Kling prioritize camera movement + action over lip sync when time is tight?
+- Would 14-15s have forced lip sync on Shot 3, or would it still narrate?
+- Is the narration-as-inner-monologue pattern reliable enough to be intentional?
+- Buffer tuning: current 1.5s may need to go to 2.5-3.0 if more clips show narrated last shots
+- Consider per-shot action density scoring (camera movement + character action + dialogue = more time needed)
+
 ### Current Project State (Session 23)
 
-- First video clip generated successfully with smart duration (12s bump, perfect lip sync)
-- Video generation in progress — prompt-preview gate active per clip
-- All Session 22+23 changes in working tree, pending commit from Windows PowerShell
+- Video generation in progress — clip 4 of 150 done
+- Smart duration working (12-13s bumps confirmed)
+- Credit cost inflation gate added (4K → 720p protection)
+- Cinematic verify redo wired to _runCinematicVideoStage
+- Early SEO fires after script approval
+- All changes in working tree, pending commit from Windows PowerShell
