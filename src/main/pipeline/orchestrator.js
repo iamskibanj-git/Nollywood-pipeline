@@ -4727,12 +4727,21 @@ Output ONLY the JSON array, no explanation.`,
         return characters;
       }
 
-      // ── Resize image if needed ──
+      // ── Detect mime type from extension ──
+      const _detectMime = (p) => {
+        const ext = (p || '').split('.').pop().toLowerCase();
+        if (ext === 'png') return 'image/png';
+        if (ext === 'webp') return 'image/webp';
+        return 'image/jpeg'; // default for jpg/jpeg and unknown
+      };
+
+      // ── Resize image if needed (also converts webp → jpeg for API compat) ──
       let imageData;
       let mimeType = 'image/jpeg';
       const rawSize = fs.statSync(sceneImagePath).size;
+      const needsConversion = sceneImagePath.toLowerCase().endsWith('.webp');
 
-      if (rawSize > 3 * 1024 * 1024) {
+      if (rawSize > 3 * 1024 * 1024 || needsConversion) {
         const path = require('path');
         const { execSync } = require('child_process');
         let ffmpegPath = null;
@@ -4744,18 +4753,20 @@ Output ONLY the JSON array, no explanation.`,
           try {
             execSync(`"${ffmpegPath}" -i "${sceneImagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpJpeg}"`, { timeout: 15000, stdio: 'pipe' });
             imageData = fs.readFileSync(tmpJpeg);
+            mimeType = 'image/jpeg';
+            this.log(`[VISION-VERIFY] Converted ${needsConversion ? 'webp' : 'large image'} → JPEG (${(imageData.length / 1024).toFixed(0)}KB)`);
             try { fs.unlinkSync(tmpJpeg); } catch (_) {}
           } catch (resizeErr) {
             imageData = fs.readFileSync(sceneImagePath);
-            mimeType = sceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+            mimeType = _detectMime(sceneImagePath);
           }
         } else {
           imageData = fs.readFileSync(sceneImagePath);
-          mimeType = sceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+          mimeType = _detectMime(sceneImagePath);
         }
       } else {
         imageData = fs.readFileSync(sceneImagePath);
-        mimeType = sceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+        mimeType = _detectMime(sceneImagePath);
       }
 
       const base64Image = imageData.toString('base64');
@@ -5411,18 +5422,10 @@ Output ONLY the JSON array.`,
           this.log(`[CINEMATIC] Ch${ch.chapter_number} Sc${sc.scene_number}: could not parse stashed blocking — using original multi_shot_prompt`, 'warn');
         }
 
-        // ── VERIFY BLOCKING AGAINST ACTUAL SCENE IMAGE ──
-        // The stashed blocking was proposed by Vision looking at the EMPTY location
-        // image before the scene was rendered. Cinema Studio may have placed characters
-        // differently. Verify/correct positions by reading the actual scene image.
-        // This runs once per scene (shared by all clips in the scene).
-        if (visionRefinedChars && visionRefinedChars.length > 0) {
-          this.log(`[CINEMATIC] Ch${ch.chapter_number} Sc${sc.scene_number}: verifying blocking against rendered scene image...`);
-          visionRefinedChars = await this._verifyBlockingWithSceneImage(
-            sceneImageAsset.file_path,
-            visionRefinedChars
-          );
-        }
+        // NOTE: Blocking verification against the rendered scene image is done
+        // LAZILY in the clip generation loop below — only when the first pending
+        // clip for a scene is encountered. This avoids 64 Vision API calls at
+        // startup for scenes whose clips are all already done.
 
         for (const clipDef of klingClips) {
           allKlingClips.push({
@@ -5462,9 +5465,16 @@ Output ONLY the JSON array.`,
     let failed = 0;
     let dialogueSkipped = 0;
 
+    // ── LAZY VISION VERIFICATION CACHE ──
+    // Blocking verification against the rendered scene image is expensive (~1 Sonnet
+    // call per scene). We only run it when the first PENDING clip for a scene is
+    // encountered, then cache the result for subsequent clips in the same scene.
+    // Scenes whose clips are all done never trigger verification.
+    const verifiedBlockingCache = {}; // "ch{N}_sc{M}" → corrected visionRefinedChars
+
     for (let i = 0; i < allKlingClips.length; i++) {
       const item = allKlingClips[i];
-      const { chapter, scene, clipDef, startFramePath, startFrameGenId, visionRefinedChars } = item;
+      let { chapter, scene, clipDef, startFramePath, startFrameGenId, visionRefinedChars } = item;
       const clipId = clipDef.clip_id || `ch${chapter}_sc${scene}_c${i + 1}`;
       const label = `${clipId} (Ch${chapter} Sc${scene}, ${clipDef.duration_seconds || 10}s, ${(clipDef.line_refs || []).length} line(s))`;
 
@@ -5502,6 +5512,28 @@ Output ONLY the JSON array.`,
             chapter, scene, clipId, path: expectedOutputPath, status: 'complete',
           });
           continue;
+        }
+      }
+
+      // ── LAZY VISION BLOCKING VERIFICATION ──
+      // Only runs once per scene, when the first pending clip is encountered.
+      // Sends the rendered scene image to Claude Vision to verify/correct
+      // character positions so Kling prompts match the actual start frame.
+      if (visionRefinedChars && visionRefinedChars.length > 0) {
+        const sceneKey = `ch${chapter}_sc${scene}`;
+        if (verifiedBlockingCache[sceneKey]) {
+          // Already verified for this scene — use cached result
+          visionRefinedChars = verifiedBlockingCache[sceneKey];
+          item.visionRefinedChars = visionRefinedChars;
+        } else {
+          // First pending clip for this scene — verify now
+          this.log(`[VISION-VERIFY] ${sceneKey}: verifying blocking against rendered scene image...`);
+          visionRefinedChars = await this._verifyBlockingWithSceneImage(
+            startFramePath,
+            visionRefinedChars
+          );
+          verifiedBlockingCache[sceneKey] = visionRefinedChars;
+          item.visionRefinedChars = visionRefinedChars;
         }
       }
 
