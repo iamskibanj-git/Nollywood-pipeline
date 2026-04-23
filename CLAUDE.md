@@ -1871,28 +1871,41 @@ Too much body action competes with dialogue lip sync — observed pattern from c
 5. **Character budget:** Reconciled prompt must respect Kling's 2500-char limit. Vision instructed to stay within original shot direction character count.
 6. **Post-validation check:** Code verifies response before accepting — if any shot grew >20% in word count or action verb count increased, reject and fall back to deleting the impossible action while keeping rest of shot intact.
 
-**Trigger condition:** Only runs for clips in scenes where `_verifyBlockingWithSceneImage` returned `corrections > 0`. Scenes where verified blocking matched proposed blocking skip this entirely.
+**Trigger condition:** Only runs for clips in scenes where `_verifyBlockingWithSceneImage` returned `corrections > 0`. Scenes where verified blocking matched proposed blocking skip this entirely. **Exception:** scenes verified before Session 25 (no `blocking_had_corrections` flag in DB) default to `hadCorrections = true` as a safety measure — a few extra API calls is cheap compared to wrong blocking propagating.
 
 **Caching:** Reconciled prompt stored per-clip in DB via `prompt_used.shot_directions_reconciled = true`. On restart, clips with this flag skip the 3rd Vision call. In-memory cache keyed by clipId within a run.
+
+**BLOCKING_MISMATCH detection (self-healing):** The 3rd Vision pass cross-checks the "verified" positions against what it actually sees in the scene image BEFORE reconciling shot directions. If characters appear swapped or misidentified, it returns `BLOCKING_MISMATCH` instead of reconciled directions. The caller then:
+1. Re-runs `_verifyBlockingWithSceneImage()` fresh (2nd Vision pass, new API call)
+2. Updates the in-memory cache AND DB with corrected positions
+3. Re-injects corrected blocking via `_injectVisionBlocking()`
+4. Re-runs the 3rd Vision pass with corrected positions
+5. If still mismatched after re-verification, gives up and uses the re-injected prompt as-is
+
+This handles the case where the 2nd Vision pass misidentified characters (e.g. swapped driver/passenger in a car interior scene despite having visual descriptions). The 3rd pass acts as a safety net that catches what the 2nd pass got wrong.
+
+**Cache propagation for re-verification:** When a BLOCKING_MISMATCH triggers re-verification for a scene, the corrected positions are stored in `verifiedBlockingCache[sceneKey]`. Subsequent clips in the same scene pick up the corrected cache entry (the `visionBlockingVerified && verifiedBlockingCache[sceneKey]` branch runs before the DB-read branch), ensuring all clips in the scene get correct positions.
 
 **Architecture — where it fits in the flow:**
 1. Scene-level: `_verifyBlockingWithSceneImage()` → corrects CHARACTER POSITIONS → cached/persisted (unchanged)
 2. Clip-level: `_injectVisionBlocking()` → rewrites preamble + Shot 1 posture verbs (unchanged)
-3. **NEW — clip-level:** `_reconcileShotDirectionsWithImage()` → Vision sees scene image + corrected positions + shot directions → fixes physically impossible actions
-4. Clip-level: prompt sanitization (@-ref cleanup, bare name fix, dialogue @-strip) (unchanged)
+3. **NEW — clip-level:** `_reconcileShotDirectionsWithImage()` → Vision sees scene image + corrected positions + shot directions → cross-checks positions first, then fixes physically impossible actions
+4. **NEW — clip-level (conditional):** If BLOCKING_MISMATCH detected → re-run 2nd Vision pass → re-inject → re-reconcile
+5. Clip-level: prompt sanitization (@-ref cleanup, bare name fix, dialogue @-strip) (unchanged)
 
 **Connection to duration formula:** Reducing action density before duration calculation means more temporal budget for lip sync at any given clip duration. This is a pre-optimization for the future duration tuning work.
 
-Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 scenes had corrections × ~3 clips each = 30-45 calls ≈ $0.30-0.90 total for a 150-clip project.
+Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 scenes had corrections × ~3 clips each = 30-45 calls ≈ $0.30-0.90 total for a 150-clip project. Re-verification adds ~$0.02 per scene where mismatch is detected (rare).
 
 ### Current Project State (Session 25)
 
 - Video generation in progress — clip 11 of 150 done
 - 3-pass Vision blocking system: propose → verify → reconcile shot directions
+- Self-healing: 3rd pass detects when 2nd pass misidentified characters → auto re-verifies
+- Legacy scenes (pre-Session 25) default to hadCorrections=true for safety
 - Verified blocking persisted to DB (no redundant Vision calls on restart)
 - Active 720p resolution enforcement added
 - Smart duration working (12-15s bumps confirmed)
 - Credit cost inflation gate + pipeline pause on cost inflation
 - WebP magic bytes detection for scene images
 - Duration/lip-sync observation table being gathered (11 clips so far)
-- Frame-position warnings quieted

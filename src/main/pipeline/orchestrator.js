@@ -5031,6 +5031,12 @@ Output ONLY the JSON array.`,
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey });
 
+      // Build character visual descriptions for cross-check
+      const charDescLines = verifiedPositions.map(c => {
+        const baseName = (c.baseName || c.name).toLowerCase();
+        return `@${c.name} (${baseName})`;
+      }).join(', ');
+
       const response = await client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 800,
@@ -5045,13 +5051,20 @@ Output ONLY the JSON array.`,
               type: 'text',
               text: `You are reconciling shot directions with verified character positions for an AI video generation pipeline (Kling). The scene image above shows where characters ACTUALLY are.
 
-VERIFIED CHARACTER POSITIONS (ground truth — these match the scene image):
+VERIFIED CHARACTER POSITIONS (claimed to match the scene image):
 ${positionsSummary}
+
+CHARACTERS IN SCENE: ${charDescLines}
 
 CURRENT SHOT DIRECTIONS:
 ${prompt}
 
-TASK: Check each shot's body action directions against the scene image and verified positions. If a body action is PHYSICALLY IMPOSSIBLE given where the character actually is (e.g., "turns toward the ignition" but the character isn't in the driver's seat), fix it.
+STEP 1 — VERIFY POSITIONS FIRST:
+Before touching shot directions, CHECK whether the VERIFIED CHARACTER POSITIONS above actually match what you see in the scene image. Look at each character's described position and confirm it matches the image. If characters appear SWAPPED (e.g., the positions describe character A in the driver's seat but the image shows character B there), return ONLY:
+BLOCKING_MISMATCH: <brief description of what's wrong>
+Do NOT attempt to fix shot directions if the positions themselves are wrong — that's a deeper problem.
+
+STEP 2 — IF POSITIONS ARE CORRECT, check each shot's body action directions against the scene image. If a body action is PHYSICALLY IMPOSSIBLE given where the character actually is (e.g., "turns toward the ignition" but the character isn't in the driver's seat), fix it.
 
 CRITICAL GUARDRAILS — you MUST follow these:
 1. ONLY change actions that are physically impossible. Leave everything else EXACTLY as-is.
@@ -5074,6 +5087,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       });
 
       const resultText = (response.content?.[0]?.text || '').trim();
+
+      // ── Check for BLOCKING_MISMATCH — 2nd Vision pass got it wrong ──
+      if (resultText.startsWith('BLOCKING_MISMATCH')) {
+        this.log(`[SHOT-RECONCILE] ⚠ BLOCKING MISMATCH DETECTED: ${resultText.slice(0, 200)}`);
+        this.log('[SHOT-RECONCILE] 2nd Vision pass misidentified characters — signalling re-verification needed');
+        // Return special marker so the caller can trigger re-verification
+        return '__BLOCKING_MISMATCH__';
+      }
 
       // ── Check for no-changes response ──
       if (resultText === 'NO_CHANGES_NEEDED' || resultText.includes('NO_CHANGES_NEEDED')) {
@@ -5819,10 +5840,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       if (visionRefinedChars && visionRefinedChars.length > 0) {
         const sceneKey = `ch${chapter}_sc${scene}`;
 
-        if (visionBlockingVerified) {
+        if (visionBlockingVerified && verifiedBlockingCache[sceneKey]) {
+          // Already verified AND cached by a previous clip in THIS run — use cache
+          // (cache may contain re-verified positions from a BLOCKING_MISMATCH fix)
+          visionRefinedChars = verifiedBlockingCache[sceneKey].chars;
+          item.visionRefinedChars = visionRefinedChars;
+        } else if (visionBlockingVerified) {
           // Already verified in a previous run (persisted in DB) — skip Vision call
-          // Load hadCorrections flag from DB if available
-          let hadCorr = false;
+          // Load hadCorrections flag from DB if available.
+          // DEFAULT TO TRUE when flag is missing — scenes verified before Session 25
+          // don't have this flag, and we'd rather run a cheap 3rd pass check than
+          // silently propagate wrong blocking through all clips in the scene.
+          let hadCorr = true; // safe default: assume corrections happened
           if (sceneAssetId) {
             try {
               const sceneAssetCheck = db.getAssets(projectId, { type: 'scene_image_cinematic' })
@@ -5830,7 +5859,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               if (sceneAssetCheck) {
                 const pu = typeof sceneAssetCheck.prompt_used === 'string'
                   ? JSON.parse(sceneAssetCheck.prompt_used) : (sceneAssetCheck.prompt_used || {});
-                hadCorr = pu.blocking_had_corrections === true;
+                // Only use false if the flag was EXPLICITLY set to false
+                if (pu.blocking_had_corrections === false) hadCorr = false;
+                else if (pu.blocking_had_corrections === true) hadCorr = true;
+                // undefined → stays true (safe default)
               }
             } catch (_) {}
           }
@@ -6019,7 +6051,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // After preamble injection, shot body actions may still reference physically
       // impossible positions (e.g. "turns toward the ignition" when the character
       // isn't in the driver's seat). Only runs when the 2nd Vision pass made
-      // corrections to this scene's blocking.
+      // corrections to this scene's blocking — OR when hadCorrections is unknown
+      // (legacy scenes verified before Session 25, defaults to true for safety).
       if (visionRefinedChars && visionRefinedChars.length > 0 && !shotReconcileCache[clipId]) {
         const sceneKey = `ch${chapter}_sc${scene}`;
         const cachedScene = verifiedBlockingCache[sceneKey];
@@ -6042,11 +6075,105 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             shotReconcileCache[clipId] = true;
           } else {
             this.log(`[SHOT-RECONCILE] ${clipId}: scene had blocking corrections — reconciling shot directions with scene image...`);
-            finalMultiShotPrompt = await this._reconcileShotDirectionsWithImage(
+            let reconcileResult = await this._reconcileShotDirectionsWithImage(
               startFramePath,
               visionRefinedChars,
               finalMultiShotPrompt
             );
+
+            // ── BLOCKING MISMATCH: 2nd Vision pass misidentified characters ──
+            // The 3rd pass detected that the "verified" positions don't match the
+            // scene image (e.g. characters are swapped). Re-run 2nd Vision pass
+            // with a fresh call, then re-inject and re-reconcile.
+            if (reconcileResult === '__BLOCKING_MISMATCH__') {
+              this.log(`[SHOT-RECONCILE] ${clipId}: triggering re-verification of 2nd Vision pass for ${sceneKey}...`);
+
+              // Build character descriptions for re-verification
+              const characterDescs = [];
+              const bible = this.state.script?.character_bible || [];
+              for (const vc of visionRefinedChars) {
+                const baseName = (vc.baseName || vc.name).toLowerCase();
+                const charEntry = bible.find(c => {
+                  const hint = (c.element_name_hint || '').toLowerCase().replace(/^@/, '');
+                  const charId = (c.id || '').toLowerCase();
+                  return hint === baseName || charId === baseName ||
+                    hint === vc.name.toLowerCase() || charId === vc.name.toLowerCase();
+                });
+                if (charEntry) {
+                  const fullDesc = charEntry.full_prompt_description || '';
+                  const visualSnippet = fullDesc.length > 200 ? fullDesc.slice(0, 200) + '...' : fullDesc;
+                  characterDescs.push({ name: baseName, description: visualSnippet || charEntry.description_label || baseName });
+                } else {
+                  characterDescs.push({ name: baseName, description: baseName });
+                }
+              }
+
+              // Re-run 2nd Vision pass (this time it should get positions right)
+              const reCorrected = await this._verifyBlockingWithSceneImage(
+                startFramePath,
+                visionRefinedChars,
+                characterDescs
+              );
+
+              // Check if re-verification actually changed anything
+              let reVerifyChanged = false;
+              for (let ci = 0; ci < visionRefinedChars.length; ci++) {
+                if (reCorrected[ci] && visionRefinedChars[ci].position !== reCorrected[ci].position) {
+                  reVerifyChanged = true;
+                  break;
+                }
+              }
+
+              if (reVerifyChanged) {
+                this.log(`[SHOT-RECONCILE] ${sceneKey}: re-verification corrected positions — updating cache and DB`);
+                visionRefinedChars = reCorrected;
+                item.visionRefinedChars = visionRefinedChars;
+                verifiedBlockingCache[sceneKey] = { chars: reCorrected, hadCorrections: true };
+
+                // Persist corrected blocking to DB
+                if (sceneAssetId) {
+                  try {
+                    const sceneAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+                      .find(a => a.id === sceneAssetId);
+                    if (sceneAsset) {
+                      const existing = typeof sceneAsset.prompt_used === 'string'
+                        ? JSON.parse(sceneAsset.prompt_used) : (sceneAsset.prompt_used || {});
+                      existing.vision_refined_characters = reCorrected;
+                      existing.vision_blocking_verified = true;
+                      existing.blocking_had_corrections = true;
+                      db.updateAssetPromptUsed(sceneAssetId, existing);
+                      this.log(`[SHOT-RECONCILE] ${sceneKey}: persisted re-verified blocking to DB ✓`);
+                    }
+                  } catch (dbErr) {
+                    this.log(`[SHOT-RECONCILE] ${sceneKey}: failed to persist: ${dbErr.message}`, 'warn');
+                  }
+                }
+
+                // Re-inject corrected blocking into prompt
+                finalMultiShotPrompt = clipDef.multi_shot_prompt || '';
+                finalMultiShotPrompt = this._injectVisionBlocking(finalMultiShotPrompt, visionRefinedChars);
+                this.log(`[SHOT-RECONCILE] ${clipId}: re-injected corrected blocking into prompt`);
+
+                // Re-run 3rd pass with corrected positions
+                reconcileResult = await this._reconcileShotDirectionsWithImage(
+                  startFramePath,
+                  visionRefinedChars,
+                  finalMultiShotPrompt
+                );
+
+                if (reconcileResult === '__BLOCKING_MISMATCH__') {
+                  // Still mismatched after re-verification — give up, use re-injected prompt as-is
+                  this.log(`[SHOT-RECONCILE] ${clipId}: still mismatched after re-verification — using re-injected prompt as-is`);
+                } else {
+                  finalMultiShotPrompt = reconcileResult;
+                }
+              } else {
+                this.log(`[SHOT-RECONCILE] ${sceneKey}: re-verification returned same positions — using prompt as-is`);
+              }
+            } else {
+              finalMultiShotPrompt = reconcileResult;
+            }
+
             shotReconcileCache[clipId] = true;
           }
         } else {
