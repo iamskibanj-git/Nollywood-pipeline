@@ -1,0 +1,37 @@
+{
+  "drama": {
+    "font_family_hint": "bold condensed serif",
+    "primary_hex": "#C9A84C",
+    "primary_name": "burnished gold",
+    "secondary_hex": "#F5EDD6",
+    "secondary_name": "warm ivory"
+  },
+  "thriller": {
+    "font_family_hint": "modern geometric sans-serif",
+    "primary_hex": "#E63946",
+    "primary_name": "blood red",
+    "secondary_hex": "#F1FAEE",
+    "secondary_name": "bone white"
+  },
+  "romance": {
+    "font_family_hint": "high-contrast didone serif",
+    "primary_hex": "#E8C5C5",
+    "primary_name": "dusty rose",
+    "secondary_hex": "#F9E7D6",
+    "secondary_name": "candlelight cream"
+  },
+  "comedy": {
+    "font_family_hint": "rounded bold sans-serif",
+    "primary_hex": "#FFB703",
+    "primary_name": "bright amber",
+    "secondary_hex": "#FFFFFF",
+    "secondary_name": "clean white"
+  },
+  "action": {
+    "font_family_hint": "heavy impact condensed sans-serif",
+    "primary_hex": "#FF6B35",
+    "primary_name": "flame orange",
+    "secondary_hex": "#F7F7F7",
+    "secondary_name": "steel white"
+  }
+}

@@ -1,0 +1,3269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nollywood AI Pipeline</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0f1117;
+      --bg2: #1a1d27;
+      --bg3: #242836;
+      --accent: #4f8cff;
+      --accent2: #7c5cfc;
+      --green: #34d399;
+      --yellow: #fbbf24;
+      --red: #f87171;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --border: #2d3348;
+    }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+
+    /* ── Layout ── */
+    .dashboard { width: 100vw; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
+
+    /* ── Header ── */
+    .header { padding: 16px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    .header h1 { font-size: 16px; font-weight: 700; color: var(--accent); flex: 1; }
+    .header-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .header-btn:hover { color: var(--text); border-color: var(--accent); }
+
+    /* ── Pipeline Stepper ── */
+    .stepper { display: flex; padding: 12px 20px; gap: 4px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+    .step { flex: 1; text-align: center; padding: 8px 4px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--bg3); transition: all 0.3s; }
+    .step.active { background: var(--accent); color: white; }
+    .step.complete { background: #1a3a2a; color: var(--green); }
+    .step.waiting { background: #3a2a1a; color: var(--yellow); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    /* ── Content Area ── */
+    .content { flex: 1; overflow-y: auto; padding: 20px; }
+
+    /* ── Cards ── */
+    .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+    .card h2 { font-size: 14px; font-weight: 700; margin-bottom: 12px; color: var(--accent); }
+    .card h3 { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* ── Forms ── */
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+    input, textarea, select { width: 100%; padding: 10px 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; margin-bottom: 12px; font-family: inherit; }
+    textarea { resize: vertical; min-height: 80px; }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+
+    /* ── Buttons ── */
+    .btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { background: #3d7aef; }
+    .btn-success { background: var(--green); color: #0f1117; }
+    .btn-success:hover { background: #2bc48e; }
+    .btn-warning { background: var(--yellow); color: #0f1117; }
+    .btn-danger { background: var(--red); color: white; }
+    .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--text); }
+    .btn-group { display: flex; gap: 8px; margin-top: 12px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Title Selection ── */
+    .title-option { padding: 12px; background: var(--bg3); border: 2px solid var(--border); border-radius: 8px; margin-bottom: 8px; cursor: pointer; transition: all 0.2s; }
+    .title-option:hover { border-color: var(--accent); }
+    .title-option.selected { border-color: var(--green); background: #1a2a1a; }
+    .title-option .title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .title-option .reason { font-size: 11px; color: var(--muted); }
+
+    /* ── Script Viewer ── */
+    .script-line { padding: 12px; background: var(--bg3); border-radius: 8px; margin-bottom: 8px; border-left: 3px solid var(--accent); }
+    .script-line .speaker { font-size: 11px; color: var(--accent); font-weight: 600; text-transform: uppercase; }
+    .script-line .dialogue { font-size: 14px; margin: 6px 0; font-style: italic; }
+    .script-line .tone { font-size: 11px; color: var(--yellow); }
+    .script-line .prompt-preview { font-size: 11px; color: var(--muted); margin-top: 6px; max-height: 0; overflow: hidden; transition: max-height 0.3s; }
+    .script-line:hover .prompt-preview { max-height: 200px; }
+    .camera-break { text-align: center; padding: 4px; font-size: 10px; color: var(--red); font-weight: 700; letter-spacing: 2px; }
+
+    /* ── Progress ── */
+    .progress-bar { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.5s; border-radius: 3px; }
+    .progress-text { font-size: 12px; color: var(--muted); text-align: right; }
+
+    /* ── Asset Grid ── */
+    .asset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .asset-thumb { aspect-ratio: 16/9; background: var(--bg3); border-radius: 6px; overflow: hidden; position: relative; cursor: pointer; border: 2px solid transparent; }
+    .asset-thumb.flagged { border-color: var(--red); }
+    .asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .asset-thumb .status { position: absolute; top: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; }
+    .asset-thumb .status.complete { background: var(--green); }
+    .asset-thumb .status.pending { background: var(--muted); }
+    .asset-thumb .status.generating { background: var(--yellow); animation: pulse 1s infinite; }
+
+    /* ── Log ── */
+    .log-container { max-height: 200px; overflow-y: auto; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 11px; background: #0a0c12; border-radius: 6px; padding: 10px; }
+    .log-entry { padding: 2px 0; border-bottom: 1px solid #1a1d27; }
+    .log-entry .ts { color: var(--muted); }
+    .log-entry.error { color: var(--red); }
+    .log-entry.info { color: var(--text); }
+
+    /* ── Research Video Items ── */
+    .research-video { padding: 10px; background: var(--bg3); border-radius: 8px; margin-bottom: 8px; display: flex; gap: 10px; align-items: center; }
+    .research-video .rv-rank { font-size: 20px; font-weight: 700; color: var(--accent); min-width: 30px; text-align: center; }
+    .research-video .rv-info { flex: 1; }
+    .research-video .rv-title { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+    .research-video .rv-meta { font-size: 11px; color: var(--muted); }
+    .research-video .rv-views { color: var(--green); font-weight: 600; }
+    .research-pattern-tag { display: inline-block; padding: 4px 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 12px; font-size: 11px; margin: 3px; color: var(--accent); }
+    .theme-tag { display: inline-block; padding: 6px 12px; background: var(--bg3); border: 2px solid var(--border); border-radius: 16px; font-size: 12px; margin: 3px; color: var(--text); cursor: pointer; transition: all 0.2s; user-select: none; }
+    .theme-tag:hover { border-color: var(--accent); }
+    .theme-tag.selected { border-color: var(--green); background: #1a2a1a; color: var(--green); }
+    .dedup-badge { display: inline-block; padding: 2px 8px; background: #3a2a1a; border: 1px solid var(--yellow); border-radius: 10px; font-size: 10px; color: var(--yellow); margin-left: 8px; }
+    .title-option.duplicate { opacity: 0.6; }
+    .title-option.duplicate .title::after { content: ' (already produced)'; font-size: 11px; color: var(--yellow); font-weight: 400; }
+    .dedup-item { padding: 6px 10px; background: var(--bg3); border-radius: 6px; margin-bottom: 4px; font-size: 11px; display: flex; justify-content: space-between; }
+    .dedup-item .dedup-title { color: var(--text); }
+    .dedup-item .dedup-date { color: var(--muted); }
+
+    /* ── Settings Modal ── */
+    .modal-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.7); display: none; z-index: 100; justify-content: center; align-items: center; }
+    .modal-overlay.show { display: flex; }
+    .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 90%; max-width: 500px; }
+    .modal h2 { margin-bottom: 16px; }
+
+    /* ── Control Bar ── */
+    .control-bar { padding: 12px 20px; background: var(--bg2); border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
+    .control-bar .status-badge { padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .status-badge.idle { background: var(--bg3); color: var(--muted); }
+    .status-badge.running { background: #1a2a3a; color: var(--accent); }
+    .status-badge.paused { background: #3a2a1a; color: var(--yellow); }
+    .status-badge.waiting_approval { background: #3a2a1a; color: var(--yellow); }
+    .status-badge.error { background: #3a1a1a; color: var(--red); }
+    .status-badge.complete { background: #1a3a2a; color: var(--green); }
+
+    /* ── Cache Status ── */
+    .cache-status { padding: 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
+    .cache-status.active { border-color: var(--green); background: #1a2a1a; }
+    .cache-status.exhausted { border-color: var(--yellow); background: #2a2a1a; }
+    .cache-status .cache-label { font-weight: 600; margin-bottom: 4px; }
+    .cache-status .cache-detail { color: var(--muted); font-size: 11px; }
+    .cache-bar { height: 4px; background: var(--bg); border-radius: 2px; margin: 8px 0 4px; overflow: hidden; }
+    .cache-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+    .cache-bar-fill.green { background: var(--green); }
+    .cache-bar-fill.yellow { background: var(--yellow); }
+    .cache-bar-fill.red { background: var(--red); }
+
+    /* ── Used Video Styling ── */
+    .research-video.used { opacity: 0.45; position: relative; }
+    .research-video.used::after { content: 'PRODUCED'; position: absolute; top: 8px; right: 8px; font-size: 9px; font-weight: 700; color: var(--green); background: #1a2a1a; border: 1px solid var(--green); padding: 2px 6px; border-radius: 4px; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="dashboard" id="app">
+    <!-- Header -->
+    <div class="header">
+      <h1>NOLLYWOOD AI PIPELINE</h1>
+      <button class="header-btn" onclick="openStandalonePublish()" id="btn-publish-standalone" title="Open Publish for any completed project" style="border-color:var(--accent2);color:var(--accent2);">Publish</button>
+      <button class="header-btn" onclick="toggleSettings()">Settings</button>
+    </div>
+
+    <!-- Pipeline Stepper -->
+    <div class="stepper" id="stepper">
+      <div class="step" data-stage="research">Research</div>
+      <div class="step" data-stage="script">Script</div>
+      <div class="step" data-stage="portraits">Portraits</div>
+      <div class="step" data-stage="locations">Locations</div>
+      <div class="step" data-stage="scenes">Scenes</div>
+      <div class="step" data-stage="video">Video</div>
+      <div class="step" data-stage="verify">Verify</div>
+      <div class="step" data-stage="assembly">Assembly</div>
+      <div class="step" data-stage="publish">Publish</div>
+      <div class="step" data-stage="export">Export</div>
+    </div>
+
+    <!-- Content -->
+    <div class="content" id="content">
+      <!-- LAUNCHER (shown by default) -->
+      <div id="view-launcher">
+        <!-- RESUME CARD (shown when an in-progress project exists) -->
+        <div id="resume-card" class="card" style="display:none;text-align:center;padding:32px;border:1px solid var(--accent);">
+          <div style="font-size:40px;margin-bottom:12px;">&#9658;&#65039;</div>
+          <h2 style="font-size:18px;color:var(--text);margin-bottom:4px;" id="resume-title">Continue: Untitled</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:4px;" id="resume-stage-label">Stage info here</p>
+          <div id="resume-progress-info" style="font-size:11px;color:var(--accent);margin-bottom:8px;"></div>
+          <div id="resume-context-info" style="font-size:11px;color:var(--muted);margin-bottom:16px;text-align:left;max-width:400px;margin-left:auto;margin-right:auto;display:none;"></div>
+          <button class="btn btn-primary" id="btn-resume" onclick="resumeProject()" style="font-size:15px;padding:14px 40px;">Continue Production</button>
+          <div style="margin-top:16px;padding-top:16px;border-top:1px dashed var(--border);">
+            <button class="btn btn-ghost" onclick="startNewStoryOverride()" style="font-size:11px;padding:8px 18px;color:var(--muted);">Start a different story instead &rarr;</button>
+            <p style="font-size:10px;color:var(--muted);margin:6px 0 0 0;">Abandons the current project. Lets you pick a new generator mode, aspect, and duration.</p>
+          </div>
+        </div>
+
+        <!-- NEW STORY CARD (shown when no in-progress project) -->
+        <div id="new-story-card" style="text-align:center;">
+
+          <!-- POOL PICKER (shown when one or more research pools exist) -->
+          <div id="pool-picker" style="display:none;margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <h3 style="margin:0;font-size:13px;color:var(--muted);letter-spacing:0.04em;">Research Pools <span id="pool-picker-count" style="color:var(--text);"></span></h3>
+              <span style="font-size:10px;color:var(--muted);">max 5 · oldest auto-pruned</span>
+            </div>
+            <div id="pool-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+            <div style="margin-top:16px;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">
+              <div style="display:flex;align-items:center;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:12px;">
+                <select id="duration-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;">
+                  <option value="1min">1 min (~9 clips, ~108 credits) — test</option>
+                  <option value="2min">2 min (~18 clips, ~216 credits) — test</option>
+                  <option value="5min">5 min (~45 clips, ~540 credits) — test</option>
+                  <option value="10min" selected>10 min (~90 clips, ~1080 credits)</option>
+                  <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
+                  <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+                </select>
+                <select id="aspect-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Aspect ratio — locked once Research starts">
+                  <option value="16:9" selected>16:9 (YouTube long)</option>
+                  <option value="9:16">9:16 (Shorts / TikTok / Reels)</option>
+                </select>
+                <select id="mode-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Generator mode — locked once Research starts. Cinematic requires Cinema Studio 2.0 + Kling 3.0 pipeline (Phases 2-6, not yet built)">
+                  <option value="staged" selected>Staged (Veo — proven)</option>
+                  <option value="cinematic">Cinematic (Kling — prestige, WIP)</option>
+                </select>
+              </div>
+              <p style="font-size:11px;color:var(--accent);margin:0;text-align:center;white-space:pre-line;line-height:1.6;" id="duration-info">Target: ~90 clips × 7s = 10+ minutes</p>
+            </div>
+          </div>
+
+          <!-- FRESH START (shown when no pool or pool exhausted) -->
+          <div id="fresh-start-card" class="card" style="padding:32px;">
+            <div style="font-size:40px;margin-bottom:12px;">&#127916;</div>
+            <h2 style="font-size:18px;color:var(--text);margin-bottom:8px;">Ready to Create</h2>
+            <p style="font-size:12px;color:var(--muted);margin-bottom:4px;">Research-driven pipeline. YouTube trends → Gemini analysis → AI script → Higgsfield generation.</p>
+            <div style="margin-bottom:16px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+              <select id="duration-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;">
+                <option value="1min">1 min (~9 clips, ~108 credits) — test</option>
+                <option value="2min">2 min (~18 clips, ~216 credits) — test</option>
+                <option value="5min">5 min (~45 clips, ~540 credits) — test</option>
+                <option value="10min" selected>10 min (~90 clips, ~1080 credits)</option>
+                <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
+                <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+              </select>
+              <select id="aspect-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Aspect ratio — locked once Research starts">
+                <option value="16:9" selected>16:9 (YouTube long)</option>
+                <option value="9:16">9:16 (Shorts / TikTok / Reels)</option>
+              </select>
+              <select id="mode-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Generator mode — locked once Research starts. Cinematic requires Cinema Studio 2.0 + Kling 3.0 pipeline (Phases 2-6, not yet built)">
+                <option value="staged" selected>Staged (Veo — proven)</option>
+                <option value="cinematic">Cinematic (Kling — prestige, WIP)</option>
+              </select>
+            </div>
+            <p style="font-size:11px;color:var(--accent);margin-bottom:20px;white-space:pre-line;line-height:1.6;" id="duration-info-fresh">Target: ~90 clips × 7s = 10+ minutes</p>
+            <button class="btn btn-primary" id="btn-start-fresh" onclick="startPipeline()" style="font-size:15px;padding:14px 40px;">Proceed to Research &#10132;</button>
+          </div>
+
+          <!-- Fresh research (always visible when any pool exists — creates a NEW pool without touching existing ones) -->
+          <div id="force-refresh-row" style="display:none;margin-top:8px;text-align:center;">
+            <button class="btn btn-ghost" onclick="startPipeline(true)" style="font-size:12px;padding:10px 24px;">+ New Research Pool</button>
+            <p style="font-size:10px;color:var(--muted);margin:6px 0 0 0;">Runs fresh YouTube research. Existing pools stay intact.</p>
+          </div>
+
+          <div id="dedup-history" style="display:none;margin-top:12px;text-align:left;">
+            <h3 style="font-size:11px;margin-bottom:6px;">Previously Produced</h3>
+            <div id="dedup-history-list" style="max-height:120px;overflow-y:auto;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RESEARCH VIEW -->
+      <div id="view-research" style="display:none">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <h2 style="margin:0;">Market Research</h2>
+            <div id="research-project-badge" onclick="toggleResearchSettings()" style="font-size:11px;color:var(--muted);padding:4px 10px;border:1px solid var(--border);border-radius:12px;background:var(--surface);cursor:pointer;" title="Click to change settings">
+              <span id="research-badge-duration">10 min</span>
+              <span style="color:var(--border);margin:0 4px;">·</span>
+              <span id="research-badge-aspect">16:9</span>
+              <span style="color:var(--border);margin:0 4px;">·</span>
+              <span id="research-badge-mode">staged</span>
+              <span style="margin-left:6px;font-size:9px;">&#9998;</span>
+            </div>
+          </div>
+          <div id="research-settings-editor" style="display:none;margin-bottom:12px;padding:12px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
+            <p style="font-size:11px;color:var(--muted);margin:0 0 8px 0;"><strong>Change project settings</strong> — research data is preserved</p>
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+              <select id="research-edit-duration" style="padding:8px 12px;font-size:13px;">
+                <option value="1min">1 min (~9 clips, ~108 credits) — test</option>
+                <option value="2min">2 min (~18 clips, ~216 credits) — test</option>
+                <option value="5min">5 min (~45 clips, ~540 credits) — test</option>
+                <option value="10min">10 min (~90 clips, ~1080 credits)</option>
+                <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
+                <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+              </select>
+              <select id="research-edit-aspect" style="padding:8px 12px;font-size:13px;">
+                <option value="16:9">16:9 (YouTube long)</option>
+                <option value="9:16">9:16 (Shorts / TikTok / Reels)</option>
+              </select>
+              <select id="research-edit-mode" style="padding:8px 12px;font-size:13px;">
+                <option value="staged">Staged (Veo — proven)</option>
+                <option value="cinematic">Cinematic (Kling — prestige, WIP)</option>
+              </select>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:8px;">
+              <button class="btn btn-primary" onclick="applyResearchSettings()" style="padding:8px 20px;font-size:13px;">Apply Changes</button>
+              <button class="btn btn-ghost" onclick="toggleResearchSettings()" style="padding:8px 16px;font-size:13px;">Cancel</button>
+            </div>
+          </div>
+          <div id="research-searching" style="display:none">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">Searching YouTube for top-performing AI Nollywood content...</p>
+            <div class="progress-bar"><div class="progress-fill" id="research-progress-bar" style="width:30%;animation:pulse 2s infinite;"></div></div>
+          </div>
+          <div id="research-analyzing" style="display:none">
+            <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">Analyzing top videos with Gemini AI...</p>
+            <div class="progress-bar"><div class="progress-fill" id="research-analyze-bar" style="width:60%;animation:pulse 2s infinite;"></div></div>
+          </div>
+          <div id="research-results" style="display:none">
+            <h3>AI Originals <span style="font-weight:400;font-size:10px;color:var(--muted);">(competition)</span></h3>
+            <div id="research-ai-list" style="margin-bottom:16px;"></div>
+            <h3>Remake Candidates <span style="font-weight:400;font-size:10px;color:var(--muted);">(proven traditional hits to redo as AI)</span></h3>
+            <div id="research-remake-list" style="margin-bottom:16px;"></div>
+            <div id="research-patterns" style="display:none">
+              <h3>Select Themes to Use <span style="font-weight:400;font-size:10px;color:var(--muted);">(click to toggle)</span></h3>
+              <div id="research-themes-selectable" style="margin-bottom:12px;"></div>
+              <h3>Patterns Identified</h3>
+              <div id="research-patterns-content"></div>
+            </div>
+            <div style="margin-top:16px;padding:12px;background:var(--bg3);border-radius:8px;">
+              <p style="font-size:11px;color:var(--muted);margin:0;">
+                <strong style="color:var(--accent);">Auto-configured:</strong>
+                Nationality &amp; accent are always Nigerian. Tone and setting are derived from the research patterns above.
+              </p>
+            </div>
+            <div class="btn-group" style="margin-top:16px;">
+              <button class="btn btn-success" onclick="approveResearch()">Use Research & Generate Script</button>
+              <button class="btn btn-ghost" onclick="skipResearch()">Skip Research</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TITLE SELECTION -->
+      <div id="view-titles" style="display:none">
+        <div class="card">
+          <h2>Select a Title</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px;">Claude generated these title candidates. Click one to select, or edit below.</p>
+          <div id="titles-list"></div>
+          <label style="margin-top:12px;">Or type your own title:</label>
+          <input type="text" id="custom-title" placeholder="Custom title...">
+          <div class="btn-group">
+            <button class="btn btn-success" onclick="approveTitle()">Approve Title & Generate Script</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCRIPT VIEWER -->
+      <div id="view-script" style="display:none">
+        <div class="card">
+          <h2>Script Review</h2>
+          <div id="script-progress" style="display:none">
+            <p style="font-size:12px;color:var(--muted);">Generating script...</p>
+            <div class="progress-bar"><div class="progress-fill" id="script-progress-bar" style="width:0%"></div></div>
+          </div>
+
+          <!-- Structural review panel — populated by script-review-ready event -->
+          <div id="structural-review-panel" style="display:none;margin:12px 0 20px 0;padding:16px;border-radius:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <span id="review-status-icon" style="font-size:18px;"></span>
+                <div>
+                  <div style="font-size:14px;font-weight:600;" id="review-status-text">Structural Review</div>
+                  <div style="font-size:11px;color:var(--muted);" id="review-score-text"></div>
+                </div>
+              </div>
+              <button type="button" onclick="toggleReviewDetails()" style="background:transparent;border:1px solid var(--border);color:var(--muted);font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer;" id="review-toggle-btn">Show details</button>
+            </div>
+            <div id="review-summary" style="font-size:12px;color:var(--text);margin-bottom:8px;"></div>
+            <div id="review-details" style="display:none;">
+              <div id="review-issues" style="margin-bottom:10px;"></div>
+              <div id="review-strengths"></div>
+            </div>
+          </div>
+
+          <div id="script-content"></div>
+          <div class="btn-group" id="script-approve-btns" style="display:none">
+            <button class="btn btn-success" id="script-approve-btn" onclick="approveScript()">Approve Script &amp; Start Generation</button>
+            <button class="btn btn-ghost" id="script-regen-btn" style="display:none;" onclick="regenerateScript()">Regenerate Script</button>
+            <button class="btn btn-ghost" id="script-override-btn" style="display:none;color:#ef4444;border-color:#ef4444;" onclick="overrideApproveScript()">Override (Approve Anyway)</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- GENERATION PROGRESS -->
+      <div id="view-generation" style="display:none">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <h2 id="gen-title" style="margin:0;">Generating...</h2>
+            <div id="gen-mode-badge" style="display:none;font-size:11px;color:var(--muted);padding:4px 10px;border:1px solid var(--border);border-radius:12px;background:var(--surface);">
+              <span id="gen-badge-mode">staged</span>
+              <span style="color:var(--border);margin:0 4px;">·</span>
+              <span id="gen-badge-aspect">16:9</span>
+            </div>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" id="gen-progress-bar" style="width:0%"></div></div>
+          <p class="progress-text" id="gen-progress-text">0 / 0</p>
+          <div class="asset-grid" id="asset-grid"></div>
+          <div class="btn-group" id="gen-approve-btns" style="display:none">
+            <button class="btn btn-warning" id="gen-rerender-btn" onclick="rerenderFlagged()" style="display:none">Re-render Flagged</button>
+            <button class="btn btn-success" id="gen-approve-btn" onclick="approveGeneration()">Approve & Continue</button>
+          </div>
+          <!-- TEMPORARY — remove when full production starts. Pre-gen prompt preview gate. -->
+          <div id="prompt-preview-panel" style="display:none; margin-top:16px; padding:16px; border:1px solid #f97316; border-radius:8px; background:rgba(249,115,22,0.08);">
+            <p style="margin:0 0 4px; font-size:13px; color:#f97316; font-weight:600;">
+              Pre-Gen Prompt Preview — <span id="prompt-preview-label"></span>
+            </p>
+            <p style="margin:0 0 8px; font-size:11px; color:var(--muted);">
+              TEMPORARY GATE — remove when full production starts. Review the prompt before Kling burns ~18 credits.
+            </p>
+            <div style="margin-bottom:8px;">
+              <img id="prompt-preview-startframe" style="max-width:100%; max-height:180px; border-radius:6px; background:#000; display:none;" />
+            </div>
+            <pre id="prompt-preview-text" style="margin:0 0 12px; padding:10px; background:rgba(0,0,0,0.3); border-radius:6px; font-size:11px; line-height:1.5; color:#e2e8f0; white-space:pre-wrap; word-wrap:break-word; max-height:300px; overflow-y:auto;"></pre>
+            <div class="btn-group" style="gap:8px;">
+              <button class="btn btn-success" onclick="approvePromptPreview('continue')">Approve & Generate</button>
+              <button class="btn" style="background:#dc2626;color:#fff;" onclick="approvePromptPreview('stop')">Stop — Don't Generate</button>
+            </div>
+          </div>
+          <!-- TEMPORARY — remove when full production starts. Per-clip approval gate. -->
+          <div id="clip-review-panel" style="display:none; margin-top:16px; padding:16px; border:1px solid #eab308; border-radius:8px; background:rgba(234,179,8,0.08);">
+            <p style="margin:0 0 8px; font-size:13px; color:#eab308; font-weight:600;">
+              Clip Review — <span id="clip-review-label"></span>
+            </p>
+            <p style="margin:0 0 12px; font-size:12px; color:var(--muted);">
+              Watch the clip above, then approve to continue or stop to skip remaining clips.
+            </p>
+            <div style="margin-bottom:12px;">
+              <video id="clip-review-video" controls style="max-width:100%; max-height:280px; border-radius:6px; background:#000;"></video>
+            </div>
+            <div class="btn-group" style="gap:8px;">
+              <button class="btn btn-success" onclick="approveClipReview('continue')">Approve & Next Clip</button>
+              <button class="btn" style="background:#dc2626;color:#fff;" onclick="approveClipReview('stop')">Stop — Skip Remaining</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CINEMATIC ELEMENTS PANEL — shown when automation fails + manual creation needed -->
+      <div id="view-cinematic-elements" style="display:none">
+        <div class="card">
+          <h2 style="color:#eab308;">Cinematic Mode — Elements Setup</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">
+            The pipeline needs Higgsfield Character elements for each character so Cinema Studio 2.0 + Kling 3.0 can lock visual + voice identity across multi-shot generations. Automation is best-effort for this 7-click UI path; if it didn't finish, finish manually and click "Elements Ready — Continue."
+          </p>
+
+          <div id="cinematic-elements-pending" style="margin-bottom:20px;"></div>
+
+          <details style="font-size:11px;color:var(--muted);margin-bottom:20px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;">
+            <summary style="cursor:pointer;color:var(--text);font-weight:600;margin-bottom:8px;">Manual creation steps (click to expand)</summary>
+            <ol style="margin-top:8px;padding-left:20px;line-height:1.6;">
+              <li>Open Cinema Studio in Higgsfield</li>
+              <li>Click the <strong>"2.5"</strong> toggle (top-right, next to grid icon)</li>
+              <li>Click the <strong>"Image"</strong> tab on the left</li>
+              <li>Ensure the model dropdown shows <strong>"Cinema 2.0"</strong></li>
+              <li>Click the <strong>@</strong> icon (rightmost in prompt toolbar)</li>
+              <li>In the Elements panel, click <strong>"+ Create new"</strong></li>
+              <li>For each character listed above:
+                <ul style="margin-top:4px;">
+                  <li>Upload the portrait (from <code>projects/&lt;id&gt;/assets/portraits/</code>)</li>
+                  <li>Upload the character grid (from <code>projects/&lt;id&gt;/assets/grids/</code>) if present</li>
+                  <li>Enter the element name exactly as listed (WITHOUT the @ prefix)</li>
+                  <li>Set Category → <strong>"Characters"</strong></li>
+                  <li>Optionally bind a voice tone (improves Kling lip-sync later)</li>
+                  <li>Click Create</li>
+                </ul>
+              </li>
+              <li>When every character listed above has an element, click the button below</li>
+            </ol>
+          </details>
+
+          <div class="btn-group" style="justify-content:center;">
+            <button class="btn btn-success" onclick="approveElementsReady()" style="font-size:14px;padding:12px 32px;">Elements Ready &mdash; Continue &#10132;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CINEMATIC LOCATIONS — thumbnail grid with orientation badges -->
+      <div id="view-cinematic-locations" style="display:none">
+        <div class="card">
+          <h2 style="color:#3b82f6;">Locations — Review Before Scene Generation</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">
+            Verify each location image has the correct orientation and content. Images with wrong orientation are badged in red. Click a thumbnail to enlarge. Click "Locations Ready" when all look correct.
+          </p>
+          <div id="cinematic-locations-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-bottom:20px;"></div>
+          <div class="btn-group" style="justify-content:center;">
+            <button class="btn btn-success" onclick="approveLocationsReady()" style="font-size:14px;padding:12px 32px;">Locations Ready &mdash; Continue &#10132;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CINEMATIC SCENE IMAGES — shown when Cinema Studio automation fails partially -->
+      <div id="view-cinematic-scenes" style="display:none">
+        <div class="card">
+          <h2 style="color:#eab308;">Cinematic Mode &mdash; Scene Images Need Manual Generation</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">
+            Cinema Studio 2.0 automation couldn't complete some scene images (selector / picker fragility). Generate each one manually and save it to the listed path. The pipeline will rescan disk and continue when you click the button below.
+          </p>
+
+          <div id="cinematic-scenes-pending" style="margin-bottom:20px;"></div>
+
+          <details style="font-size:11px;color:var(--muted);margin-bottom:20px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;">
+            <summary style="cursor:pointer;color:var(--text);font-weight:600;margin-bottom:8px;">Manual generation steps (click to expand)</summary>
+            <ol style="margin-top:8px;padding-left:20px;line-height:1.6;">
+              <li>Open Higgsfield &rarr; Cinema Studio &rarr; click <strong>"2.5"</strong> toggle (top-right)</li>
+              <li>Click <strong>"Image"</strong> tab on the left &rarr; ensure model dropdown shows <strong>"Cinema 2.0"</strong></li>
+              <li>For each scene listed above:
+                <ul style="margin-top:4px;">
+                  <li>Click <strong>+</strong> (left of prompt) &rarr; <strong>"Image Generations"</strong> tab &rarr; pick the location reference image listed</li>
+                  <li>Type a blocking prompt: "WIDE SHOT inside [location] from the reference image. @character_name [position]. @character_name [position]. [lighting notes]. Photorealistic cinematic still."</li>
+                  <li>Use <strong>@</strong> autocomplete for character refs (type @ + 2-3 letters + Enter)</li>
+                  <li>Set <strong>16:9 Cinematic</strong>, <strong>4K</strong> &rarr; Generate</li>
+                  <li>Right-click the result &rarr; Download &rarr; save to the "Save to" path listed for that scene</li>
+                </ul>
+              </li>
+              <li>When all scene images exist on disk at their listed paths, click the button below</li>
+            </ol>
+          </details>
+
+          <div class="btn-group" style="justify-content:center;">
+            <button class="btn btn-success" onclick="approveSceneImagesReady()" style="font-size:14px;padding:12px 32px;">Scene Images Ready &mdash; Continue &#10132;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCENE VERIFICATION VIEW — review scene images grouped by location before video gen -->
+      <div id="view-scene-verify" style="display:none">
+        <div class="card">
+          <h2 style="color:#8b5cf6;">Scene Verification — Review Before Video Generation</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:4px;" id="scene-verify-summary">
+            Scenes grouped by location. Check for continuity issues (character positions, props). Click a scene to mark it for regeneration.
+          </p>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:16px;">
+            Regen uses <strong>soft delete</strong> — original images are archived, not deleted. You can always roll back.
+          </p>
+          <div id="scene-verify-groups" style="margin-bottom:20px;"></div>
+          <div class="btn-group" style="justify-content:center;">
+            <button id="regen-scenes-btn" class="btn" style="font-size:14px;padding:12px 24px;background:#f97316;color:#fff;border:none;border-radius:6px;cursor:pointer;margin-right:12px;display:none;" onclick="regenerateSelectedScenes()">Regenerate 0 Scenes ↻</button>
+            <button class="btn btn-success" onclick="approveScenesFromVerify()" style="font-size:14px;padding:12px 32px;">Scenes Approved &mdash; Continue to Video &#10132;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- DIALOGUE TRIAGE VIEW — flag no-dialogue clips before video gen -->
+      <div id="view-dialogue-triage" style="display:none">
+        <div class="card">
+          <h2 style="color:#f59e0b;">Dialogue Triage — Review Before Video Generation</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:4px;" id="dialogue-triage-summary">
+            Scanning clips for dialogue content...
+          </p>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:16px;">
+            Kling produces gibberish speech on silent scenes. Silent clips are auto-skipped. Click a silent clip to approve it as <strong>b-roll</strong> (establishing shots, dramatic pauses).
+          </p>
+
+          <div style="display:flex;gap:16px;margin-bottom:12px;">
+            <div style="flex:1;padding:8px 12px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:6px;">
+              <div style="font-size:11px;color:#22c55e;font-weight:600;margin-bottom:4px;">Has Dialogue — Auto-approved</div>
+              <div style="font-size:20px;font-weight:700;color:#22c55e;" id="triage-count-dialogue">0</div>
+            </div>
+            <div style="flex:1;padding:8px 12px;background:rgba(96,165,250,0.1);border:1px solid rgba(96,165,250,0.3);border-radius:6px;">
+              <div style="font-size:11px;color:#60a5fa;font-weight:600;margin-bottom:4px;">B-Roll Approved</div>
+              <div style="font-size:20px;font-weight:700;color:#60a5fa;" id="triage-count-broll">0</div>
+            </div>
+            <div style="flex:1;padding:8px 12px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;">
+              <div style="font-size:11px;color:#ef4444;font-weight:600;margin-bottom:4px;">Silent — Skipped</div>
+              <div style="font-size:20px;font-weight:700;color:#ef4444;" id="triage-count-skip">0</div>
+            </div>
+          </div>
+
+          <div id="dialogue-triage-content" style="margin-bottom:20px;"></div>
+
+          <div class="btn-group" style="justify-content:center;">
+            <button class="btn btn-success" onclick="approveDialogueTriage()" style="font-size:14px;padding:12px 32px;">Continue to Video Generation &#10132;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- VERIFY VIEW — clip verification results -->
+      <div id="view-verify" style="display:none">
+        <div class="card">
+          <h2>Verify Clips</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px;" id="verify-summary">
+            Running Gemini multimodal verification on all clips...
+          </p>
+          <div id="verify-running" style="display:none;">
+            <div class="progress-bar"><div class="progress-fill" id="verify-progress-bar" style="width:0%"></div></div>
+            <p class="progress-text" id="verify-progress-text">0 / 0</p>
+          </div>
+          <div id="verify-table-wrap" style="display:none;">
+            <div style="max-height:60vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
+              <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                <thead style="position:sticky;top:0;background:var(--bg);">
+                  <tr style="border-bottom:1px solid var(--border);">
+                    <th style="text-align:left;padding:8px;">Clip</th>
+                    <th style="text-align:left;padding:8px;">Tier</th>
+                    <th style="text-align:center;padding:8px;">Sim</th>
+                    <th style="text-align:left;padding:8px;">Expected</th>
+                    <th style="text-align:left;padding:8px;">Transcribed</th>
+                    <th style="text-align:center;padding:8px;">Preview</th>
+                    <th style="text-align:center;padding:8px;">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="verify-table-body"></tbody>
+              </table>
+            </div>
+            <div class="btn-group" style="margin-top:16px;justify-content:center;">
+              <button class="btn btn-ghost" onclick="refreshVerify()">Refresh</button>
+              <button class="btn btn-success" id="verify-approve-btn" onclick="approveVerify()">Approve & Continue</button>
+            </div>
+            <p style="font-size:11px;color:var(--muted);margin-top:8px;text-align:center;">
+              Accept keeps the clip as-is. Redo resets the clip so it regenerates when you approve.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ASSEMBLY VIEW -->
+      <div id="view-assembly" style="display:none">
+        <div class="card">
+          <h2>Assembly</h2>
+          <div id="assembly-status">
+            <p style="font-size:12px;color:var(--muted);">Assembling video with FFmpeg...</p>
+            <div class="progress-bar"><div class="progress-fill" id="assembly-progress-bar" style="width:0%"></div></div>
+            <p class="progress-text" id="assembly-progress-text"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- PUBLISH VIEW -->
+      <div id="view-publish" style="display:none">
+        <div class="card">
+          <!-- Standalone project selector (hidden during pipeline runs) -->
+          <div id="publish-project-bar" style="display:none;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border);">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <label style="font-size:12px;color:var(--muted);margin:0;white-space:nowrap;">Project:</label>
+              <select id="publish-project-selector" onchange="switchPublishProject(this.value)" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;margin:0;">
+                <option value="">Select a project...</option>
+              </select>
+              <button class="btn btn-ghost" onclick="exitStandalonePublish()" style="font-size:11px;padding:6px 10px;">Back</button>
+            </div>
+            <div id="publish-project-status" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
+          </div>
+
+          <h2>Publish</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Generate thumbnail + SEO metadata for YouTube and Facebook.</p>
+
+          <!-- Publish tools (hidden until project selected in standalone mode) -->
+          <div id="publish-tools">
+
+          <!-- Sub-tabs -->
+          <div style="display:flex;gap:4px;margin-bottom:16px;">
+            <button class="btn btn-ghost publish-tab active" data-tab="thumbnail" onclick="switchPublishTab('thumbnail')">Thumbnail</button>
+            <button class="btn btn-ghost publish-tab" data-tab="youtube" onclick="switchPublishTab('youtube')">YouTube</button>
+            <button class="btn btn-ghost publish-tab" data-tab="facebook" onclick="switchPublishTab('facebook')">Facebook</button>
+          </div>
+
+          <!-- THUMBNAIL TAB -->
+          <div id="publish-tab-thumbnail" class="publish-tab-content">
+            <div style="display:flex;gap:16px;flex-wrap:wrap;">
+              <!-- Scene candidates -->
+              <div style="flex:0 0 200px;">
+                <h3 style="font-size:13px;margin-bottom:8px;">Scene Candidates</h3>
+                <div id="publish-scene-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
+                  <div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>
+                </div>
+              </div>
+              <!-- Preview -->
+              <div style="flex:1;min-width:300px;">
+                <h3 style="font-size:13px;margin-bottom:8px;">Thumbnail Preview</h3>
+                <div id="publish-thumbnail-preview" style="background:#111;border-radius:8px;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:12px;">
+                  <span style="color:var(--muted);font-size:12px;">Generate to preview</span>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                  <select id="publish-placement" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;">
+                    <option value="lower-third">Lower Third</option>
+                    <option value="upper-third">Upper Third</option>
+                    <option value="auto">Auto (Gemini picks)</option>
+                  </select>
+                  <select id="publish-genre" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;">
+                    <option value="drama">Drama</option>
+                    <option value="thriller">Thriller</option>
+                    <option value="romance">Romance</option>
+                    <option value="comedy">Comedy</option>
+                    <option value="action">Action</option>
+                  </select>
+                  <button class="btn btn-primary" onclick="generatePublishThumbnail()" style="font-size:12px;">Generate Thumbnail</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- YOUTUBE TAB -->
+          <div id="publish-tab-youtube" class="publish-tab-content" style="display:none;">
+            <div id="publish-yt-loading" style="color:var(--muted);font-size:12px;margin-bottom:12px;">Generate metadata to populate fields.</div>
+            <div id="publish-yt-fields" style="display:none;">
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Title</label>
+              <input id="publish-yt-title" type="text" maxlength="100" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:13px;margin-bottom:12px;">
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Title (short, mobile)</label>
+              <input id="publish-yt-title-short" type="text" maxlength="60" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:13px;margin-bottom:12px;">
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Hashtags</label>
+              <input id="publish-yt-hashtags" type="text" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:13px;margin-bottom:12px;">
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Description</label>
+              <textarea id="publish-yt-description" rows="8" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:12px;font-family:inherit;margin-bottom:12px;resize:vertical;"></textarea>
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Tags</label>
+              <textarea id="publish-yt-tags" rows="3" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:12px;font-family:inherit;margin-bottom:12px;resize:vertical;"></textarea>
+              <button class="btn btn-ghost" onclick="saveYouTubeEdits()" style="font-size:11px;">Save Edits</button>
+            </div>
+            <button class="btn btn-primary" id="btn-gen-seo" onclick="generatePublishSEO()" style="font-size:12px;margin-top:8px;">Generate SEO Metadata</button>
+          </div>
+
+          <!-- FACEBOOK TAB -->
+          <div id="publish-tab-facebook" class="publish-tab-content" style="display:none;">
+            <div id="publish-fb-loading" style="color:var(--muted);font-size:12px;margin-bottom:12px;">Generate metadata to populate fields.</div>
+            <div id="publish-fb-fields" style="display:none;">
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Caption</label>
+              <textarea id="publish-fb-caption" rows="8" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:12px;font-family:inherit;margin-bottom:12px;resize:vertical;"></textarea>
+              <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Hashtags</label>
+              <input id="publish-fb-hashtags" type="text" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:8px;font-size:13px;margin-bottom:12px;">
+              <button class="btn btn-ghost" onclick="saveFacebookEdits()" style="font-size:11px;">Save Edits</button>
+            </div>
+          </div>
+
+          <!-- Project auto-closes once thumbnail is generated (final video + thumbnail both exist) -->
+
+          </div><!-- /publish-tools -->
+        </div>
+      </div>
+
+      <!-- COMPLETE VIEW -->
+      <div id="view-complete" style="display:none">
+        <div class="card" style="text-align:center;padding:40px;">
+          <div style="font-size:48px;margin-bottom:16px;">&#127916;</div>
+          <h2 style="font-size:20px;color:var(--green);margin-bottom:8px;">Pipeline Complete!</h2>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Your video is ready for review and upload.</p>
+          <div id="complete-mode-badge" style="display:none;margin-bottom:12px;font-size:11px;color:var(--muted);padding:4px 10px;border:1px solid var(--border);border-radius:12px;background:var(--surface);display:inline-block;">
+            <span id="complete-badge-mode">staged</span>
+            <span style="color:var(--border);margin:0 4px;">·</span>
+            <span id="complete-badge-aspect">16:9</span>
+            <span style="color:var(--border);margin:0 4px;">·</span>
+            <span id="complete-badge-duration">10 min</span>
+          </div>
+          <p id="output-path" style="font-size:12px;color:var(--accent);word-break:break-all;margin-bottom:8px;"></p>
+          <div id="complete-cache-status" style="margin-bottom:16px;"></div>
+          <div class="btn-group" style="justify-content:center;flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="openOutputFolder()">Open Output Folder</button>
+            <button class="btn btn-success" id="btn-next-story" onclick="nextStory()" style="display:none;">Next Story (Same Pool)</button>
+            <button class="btn btn-ghost" onclick="resetPipeline()">New Story (Fresh Research)</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTIVITY LOG (live session) -->
+      <div class="card" style="margin-top:16px;">
+        <h2>Activity Log</h2>
+        <div class="log-container" id="log-container"></div>
+      </div>
+
+      <!-- PROJECT LOGS (persisted per-project) -->
+      <div class="card" style="margin-top:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <h2 style="margin:0;">Project Logs</h2>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <select id="project-log-selector" onchange="loadProjectLogs()" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;">
+              <option value="">Select project...</option>
+            </select>
+            <select id="project-log-level-filter" onchange="loadProjectLogs()" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;">
+              <option value="">All levels</option>
+              <option value="info">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select>
+            <span id="project-log-count" style="font-size:11px;color:#888;"></span>
+          </div>
+        </div>
+        <div class="log-container" id="project-log-container" style="max-height:400px;"></div>
+        <div id="project-log-pagination" style="display:none;margin-top:8px;text-align:center;">
+          <button class="btn btn-ghost" onclick="loadProjectLogs(projectLogOffset - 500)" style="font-size:11px;">Previous</button>
+          <span id="project-log-page-info" style="font-size:11px;color:#888;margin:0 8px;"></span>
+          <button class="btn btn-ghost" onclick="loadProjectLogs(projectLogOffset + 500)" style="font-size:11px;">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Control Bar -->
+    <div class="control-bar">
+      <span class="status-badge idle" id="status-badge">IDLE</span>
+      <div style="flex:1"></div>
+      <button class="btn btn-ghost" id="btn-pause" onclick="pausePipeline()" disabled>Pause</button>
+      <button class="btn btn-ghost" id="btn-resume-pipeline" onclick="resumePipeline()" style="display:none">Resume</button>
+      <button class="btn btn-danger" id="btn-cancel" onclick="cancelPipeline()" disabled style="font-size:12px;">Cancel</button>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settings-modal">
+      <div class="modal">
+        <h2>Settings</h2>
+        <label>Claude API Key</label>
+        <input type="password" id="set-api-key" placeholder="sk-ant-...">
+        <label>Gemini API Key <span style="font-weight:400;color:var(--muted);">(optional — for video analysis)</span></label>
+        <input type="password" id="set-gemini-key" placeholder="AIza...">
+        <label>Projects Directory</label>
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <input type="text" id="set-projects-dir" readonly style="margin-bottom:0;">
+          <button class="btn btn-ghost" onclick="chooseProjectsDir()">Browse</button>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+          <button class="btn btn-ghost" id="btn-test-api" onclick="testApiKeys()">Test API Keys</button>
+          <button class="btn btn-ghost" onclick="toggleSettings()">Close</button>
+        </div>
+        <div id="api-test-results" style="display:none;margin-top:12px;padding:12px;border-radius:8px;background:var(--card);font-size:13px;line-height:1.6;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── State ──
+    let state = {
+      status: 'idle',
+      currentStage: null,
+      selectedTitle: null,
+      currentApprovalGate: null,
+    };
+
+    // ── Views ──
+    function showView(viewId) {
+      document.querySelectorAll('[id^="view-"]').forEach(el => el.style.display = 'none');
+      const el = document.getElementById(viewId);
+      if (el) el.style.display = 'block';
+    }
+
+    function updateStepper(currentStage, status) {
+      const stages = ['research', 'script', 'portraits', 'locations', 'scenes', 'video', 'verify', 'assembly', 'export'];
+      const currentIdx = stages.indexOf(currentStage);
+      document.querySelectorAll('.step').forEach((step, i) => {
+        step.className = 'step';
+        if (i < currentIdx) step.classList.add('complete');
+        else if (i === currentIdx) {
+          if (status === 'waiting_approval') step.classList.add('waiting');
+          else step.classList.add('active');
+        }
+      });
+    }
+
+    function _timeAgo(date) {
+      const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+      if (seconds < 60) return 'just now';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      return `${days}d ago`;
+    }
+
+    function updateStatusBadge(status) {
+      const badge = document.getElementById('status-badge');
+      badge.className = `status-badge ${status}`;
+      badge.textContent = status.replace('_', ' ').toUpperCase();
+
+      document.getElementById('btn-pause').disabled = status !== 'running';
+      document.getElementById('btn-cancel').disabled = status === 'idle' || status === 'complete';
+      document.getElementById('btn-pause').style.display = status === 'paused' ? 'none' : 'inline-block';
+      document.getElementById('btn-resume-pipeline').style.display = status === 'paused' ? 'inline-block' : 'none';
+    }
+
+    // ── Theme Selection State ──
+    let selectedThemes = [];
+
+    // ── Duration Info ──
+    // ── Duration preset structure data (mirrors DURATION_PRESETS in orchestrator.js) ──
+    // Staged (Veo): fixed grid model
+    const PRESET_STRUCTURES = {
+      '1min':  { chapters: 1, scenesPerChapter: 3, linesPerScene: 3, tier: 'test' },
+      '2min':  { chapters: 2, scenesPerChapter: 3, linesPerScene: 3, tier: 'test' },
+      '5min':  { chapters: 3, scenesPerChapter: 3, linesPerScene: 5, tier: 'test' },
+      '10min': { chapters: 6, scenesPerChapter: 3, linesPerScene: 5, tier: 'standard' },
+      '20min': { chapters: 8, scenesPerChapter: 3, linesPerScene: 8, tier: 'long-form' },
+      '30min': { chapters: 10, scenesPerChapter: 3, linesPerScene: 9, tier: 'long-form' },
+    };
+    // Cinematic (Kling): story-driven, clip-budget model
+    const CINEMATIC_PRESET_STRUCTURES = {
+      '1min':  { chapters: 1, targetClips: 6, estimatedScenes: 3, estimatedChars: 3, tier: 'test' },
+      '2min':  { chapters: 2, targetClips: 11, estimatedScenes: 6, estimatedChars: 3, tier: 'test' },
+      '5min':  { chapters: 3, targetClips: 27, estimatedScenes: 12, estimatedChars: 4, tier: 'test' },
+      '10min': { chapters: 6, targetClips: 55, estimatedScenes: 20, estimatedChars: 5, tier: 'standard' },
+      '20min': { chapters: 8, targetClips: 109, estimatedScenes: 30, estimatedChars: 6, tier: 'long-form' },
+      '30min': { chapters: 10, targetClips: 164, estimatedScenes: 40, estimatedChars: 8, tier: 'long-form' },
+    };
+
+    function updateDurationInfo() {
+      const aspectLabel = (value) => {
+        if (value === '9:16') return '9:16 vertical (Shorts / TikTok / Reels)';
+        return '16:9 horizontal (YouTube long-form)';
+      };
+
+      const buildInfo = (dur, asp, mode) => {
+        const isCinematic = mode === 'cinematic';
+
+        if (isCinematic) {
+          // ── CINEMATIC: clip-budget, story-driven display ──
+          const c = CINEMATIC_PRESET_STRUCTURES[dur] || CINEMATIC_PRESET_STRUCTURES['10min'];
+          const estMinutes = Math.round((c.targetClips * 11) / 60 * 10) / 10;
+          const clipCredits = c.targetClips * 11;
+          const sceneCredits = c.estimatedScenes * 2;
+          const portraitCredits = c.estimatedChars * 2;
+          const buffer = Math.ceil(clipCredits * 0.1);
+          const hfCredits = clipCredits + sceneCredits + portraitCredits + buffer;
+
+          // Script token estimation for cinematic
+          const clipsPerChapter = Math.ceil(c.targetClips / c.chapters);
+          const scriptTokens = c.chapters * clipsPerChapter * 150 + 2000;
+          const numBatches = Math.max(1, Math.ceil(c.chapters / 2));
+          const inputTokensTotal = numBatches * 4000;
+          const claudeCost = (inputTokensTotal * 3 + scriptTokens * 15) / 1_000_000;
+          const hfDollars = hfCredits * 0.10;
+          const totalDollars = claudeCost + hfDollars;
+
+          const tierLabel = c.tier === 'test' ? 'test' : c.tier === 'long-form' ? 'long-form — 3-act + B-plot' : 'standard — 3-act';
+          const line1 = `${c.chapters} chapters · ~${c.targetClips} clips · unlimited scenes/lines · ~${estMinutes} min (${tierLabel})`;
+          const line2 = `Script: ~${(scriptTokens / 1000).toFixed(0)}K tokens in ${numBatches} batches · $${claudeCost.toFixed(2)} API` +
+            ` | Gen: ~${hfCredits.toLocaleString()} credits · ~$${hfDollars.toFixed(0)}` +
+            ` | Total: ~$${totalDollars.toFixed(0)}`;
+          const line3 = `${aspectLabel(asp)} · Cinematic (Cinema Studio + Kling)`;
+          return `${line1}\n${line2}\n${line3}`;
+        }
+
+        // ── STAGED (Veo): fixed grid display ──
+        const s = PRESET_STRUCTURES[dur] || PRESET_STRUCTURES['10min'];
+        const totalLines = s.chapters * s.scenesPerChapter * s.linesPerScene;
+        const estMinutes = Math.round((totalLines * 7) / 60 * 10) / 10;
+
+        // Script generation tokens (matches script-engine.js iterative logic)
+        const tokensPerLine = 45;
+        const scriptTokens = totalLines * tokensPerLine + 2000;
+        const maxTokensPerCall = 16384;
+        const needsBatches = scriptTokens > maxTokensPerCall * 0.85;
+        const chaptersPerBatch = 3;
+        const batch1Size = Math.max(1, chaptersPerBatch - 1);
+        const remainingAfterBatch1 = Math.max(0, s.chapters - batch1Size);
+        const numBatches = needsBatches ? 1 + Math.ceil(remainingAfterBatch1 / chaptersPerBatch) : 1;
+
+        // Claude API cost
+        const inputTokensTotal = numBatches * 4000;
+        const outputTokensTotal = scriptTokens;
+        const claudeCost = (inputTokensTotal * 3 + outputTokensTotal * 15) / 1_000_000;
+
+        const CREDITS_PER_CLIP = 12;
+        const hfCredits = totalLines * CREDITS_PER_CLIP;
+        const hfDollars = hfCredits * 0.10;
+        const totalDollars = claudeCost + hfDollars;
+
+        const tierLabel = s.tier === 'test' ? 'test' : s.tier === 'long-form' ? 'long-form — 3-act + B-plot' : 'standard — 3-act';
+        const line1 = `${s.chapters} chapters × ${s.scenesPerChapter} scenes × ${s.linesPerScene} lines = ${totalLines} clips · ~${estMinutes} min (${tierLabel})`;
+        const line2 = `Script: ~${(scriptTokens / 1000).toFixed(0)}K tokens` +
+          (needsBatches ? ` in ${numBatches} batches` : '') +
+          ` · $${claudeCost.toFixed(2)} API` +
+          ` | Gen: ~${hfCredits.toLocaleString()} credits · ~$${hfDollars.toFixed(0)}` +
+          ` | Total: ~$${totalDollars.toFixed(0)}`;
+        const line3 = `${aspectLabel(asp)} · Staged (Veo)`;
+        return `${line1}\n${line2}\n${line3}`;
+      };
+
+      const poolDur = document.getElementById('duration-preset');
+      const poolAsp = document.getElementById('aspect-preset');
+      const poolMode = document.getElementById('mode-preset');
+      const poolInfo = document.getElementById('duration-info');
+      if (poolDur && poolInfo) {
+        poolInfo.textContent = buildInfo(poolDur.value, poolAsp?.value || '16:9', poolMode?.value || 'staged');
+      }
+      const freshDur = document.getElementById('duration-preset-fresh');
+      const freshAsp = document.getElementById('aspect-preset-fresh');
+      const freshMode = document.getElementById('mode-preset-fresh');
+      const freshInfo = document.getElementById('duration-info-fresh');
+      if (freshDur && freshInfo) {
+        freshInfo.textContent = buildInfo(freshDur.value, freshAsp?.value || '16:9', freshMode?.value || 'staged');
+      }
+    }
+
+    // Get the active duration — pool picker's dropdown takes priority when visible
+    function getActiveDuration() {
+      const picker = document.getElementById('pool-picker');
+      if (picker && picker.style.display !== 'none') {
+        return document.getElementById('duration-preset').value;
+      }
+      return document.getElementById('duration-preset-fresh').value;
+    }
+
+    // Get the active aspect ratio — same pattern as duration
+    function getActiveAspectRatio() {
+      const picker = document.getElementById('pool-picker');
+      const el = (picker && picker.style.display !== 'none')
+        ? document.getElementById('aspect-preset')
+        : document.getElementById('aspect-preset-fresh');
+      const v = el?.value;
+      return (v === '9:16' || v === '16:9') ? v : '16:9';
+    }
+
+    // Get the active generator mode — same pattern as duration + aspect
+    function getActiveGeneratorMode() {
+      const picker = document.getElementById('pool-picker');
+      const el = (picker && picker.style.display !== 'none')
+        ? document.getElementById('mode-preset')
+        : document.getElementById('mode-preset-fresh');
+      const v = el?.value;
+      return (v === 'cinematic' || v === 'staged') ? v : 'staged';
+    }
+
+    // ── Pipeline Actions ──
+    function setResearchProjectBadge(duration, aspectRatio, generatorMode) {
+      const durMap = { '1min': '1 min', '2min': '2 min', '5min': '5 min', '10min': '10 min', '20min': '20 min', '30min': '30 min' };
+      const aspMap = { '16:9': '16:9 horizontal', '9:16': '9:16 vertical' };
+      const modeMap = { 'staged': 'staged', 'cinematic': 'cinematic' };
+      const durEl = document.getElementById('research-badge-duration');
+      const aspEl = document.getElementById('research-badge-aspect');
+      const modeEl = document.getElementById('research-badge-mode');
+      if (durEl) durEl.textContent = durMap[duration] || duration || '—';
+      if (aspEl) aspEl.textContent = aspMap[aspectRatio] || aspectRatio || '16:9';
+      if (modeEl) modeEl.textContent = modeMap[generatorMode] || generatorMode || 'staged';
+    }
+
+    function toggleResearchSettings() {
+      const editor = document.getElementById('research-settings-editor');
+      if (!editor) return;
+      const isHidden = editor.style.display === 'none';
+      if (isHidden) {
+        // Pre-fill dropdowns with current badge values
+        const durText = document.getElementById('research-badge-duration')?.textContent?.trim() || '10 min';
+        const aspText = document.getElementById('research-badge-aspect')?.textContent?.trim() || '16:9';
+        const modeText = document.getElementById('research-badge-mode')?.textContent?.trim() || 'staged';
+        // Reverse-map display text to value
+        const durRevMap = { '1 min': '1min', '2 min': '2min', '3 min': '3min', '5 min': '5min', '10 min': '10min', '15 min': '15min', '20 min': '20min', '30 min': '30min' };
+        const aspRevMap = { '16:9 horizontal': '16:9', '16:9': '16:9', '9:16 vertical': '9:16', '9:16': '9:16' };
+        document.getElementById('research-edit-duration').value = durRevMap[durText] || '10min';
+        document.getElementById('research-edit-aspect').value = aspRevMap[aspText] || '16:9';
+        document.getElementById('research-edit-mode').value = modeText || 'staged';
+      }
+      editor.style.display = isHidden ? 'block' : 'none';
+    }
+
+    async function applyResearchSettings() {
+      const duration = document.getElementById('research-edit-duration').value;
+      const aspectRatio = document.getElementById('research-edit-aspect').value;
+      const generatorMode = document.getElementById('research-edit-mode').value;
+      try {
+        await window.api.updateProjectSettings({ duration, aspectRatio, generatorMode });
+        setResearchProjectBadge(duration, aspectRatio, generatorMode);
+        addLog(`Settings updated → ${duration}, ${aspectRatio}, ${generatorMode}`);
+      } catch (e) {
+        addLog(`Failed to update settings: ${e.message}`, 'error');
+      }
+      document.getElementById('research-settings-editor').style.display = 'none';
+    }
+
+    async function startPipeline(forceRefresh = false, researchCacheId = null) {
+      const duration = getActiveDuration();
+      const aspectRatio = getActiveAspectRatio();
+      const generatorMode = getActiveGeneratorMode();
+      const poolTag = forceRefresh ? ' with FRESH research' : (researchCacheId ? ` from pool #${researchCacheId}` : '');
+      addLog(`Starting pipeline [${duration}, ${aspectRatio}, ${generatorMode}]${poolTag}...`);
+      updateStatusBadge('running');
+      updateStepper('research', 'running');
+      setResearchProjectBadge(duration, aspectRatio, generatorMode);
+      showView('view-research');
+      document.getElementById('research-searching').style.display = 'block';
+      selectedThemes = [];
+
+      await window.api.startPipeline({ forceRefresh, duration, aspectRatio, generatorMode, researchCacheId });
+    }
+
+    // Called from the per-pool "Use this pool" button in the pool list
+    function proceedWithPool(poolId) {
+      startPipeline(false, poolId);
+    }
+
+    async function removePool(poolId) {
+      if (!confirm(`Delete research pool #${poolId}? Projects made from this pool keep their data, but you can't make new stories from it.`)) return;
+      await window.api.deleteResearchPool(poolId);
+      await loadCacheStatus();
+    }
+
+    async function nextStory() {
+      // Navigate back to the launcher/setup screen so the user can
+      // pick duration, aspect ratio, generator mode, and research pool
+      // before starting the next story.
+      addLog('Returning to project setup for next story...', 'info');
+      resetPipeline();
+    }
+
+    async function resumeProject() {
+      addLog('Resuming in-progress project...');
+      updateStatusBadge('running');
+      // Don't show any stage view yet — let the backend 'stage' event drive the correct view.
+      // The orchestrator emits the stage event immediately on resume, so the correct view
+      // will appear within ~1 second. Showing research here was a bug (always showed
+      // "Searching YouTube..." even when resuming at title-chosen or later stages).
+
+      // Start without forceNew — orchestrator detects active project and resumes
+      await window.api.startPipeline({});
+    }
+
+    /**
+     * Abandon the active in-progress project so the user can start a new one
+     * with different settings (generator mode, aspect, duration). Preserves
+     * the abandoned project's DB rows + files on disk — use scripts/wipe-project.js
+     * for hard deletion. Only used from the Resume card's "Start a different
+     * story instead" escape hatch.
+     */
+    async function startNewStoryOverride() {
+      const status = await window.api.getActiveProjectStatus();
+      const title = status?.title || 'the current project';
+      const confirmMsg =
+        `Abandon "${title}" and start a new project?\n\n` +
+        `The abandoned project's data (script, portraits, clips, etc.) stays in the database — ` +
+        `you won't lose anything, but it won't be the active project anymore. ` +
+        `You'll get to pick a new generator mode, aspect ratio, and duration for the fresh story.\n\n` +
+        `Abandon and continue?`;
+      if (!confirm(confirmMsg)) return;
+
+      const result = await window.api.abandonActiveProject();
+      if (!result?.success) {
+        alert(`Couldn't abandon the project: ${result?.reason || 'unknown error'}`);
+        return;
+      }
+      addLog(`Abandoned "${title}" — starting fresh`, 'warn');
+      // Reload the launcher so the Resume card hides and New Story card (with
+      // the generator-mode selector) becomes visible.
+      await loadCacheStatus();
+    }
+
+    async function pausePipeline() {
+      await window.api.pausePipeline();
+      updateStatusBadge('paused');
+    }
+
+    async function resumePipeline() {
+      await window.api.resumePipeline();
+      updateStatusBadge('running');
+    }
+
+    async function cancelPipeline() {
+      if (confirm('Are you sure you want to cancel the pipeline?')) {
+        await window.api.cancelPipeline();
+        updateStatusBadge('idle');
+        showView('view-launcher');
+        updateStepper('research', 'idle');
+      }
+    }
+
+    // ── Title Selection ──
+    function renderTitles(titles) {
+      const container = document.getElementById('titles-list');
+      container.innerHTML = '';
+      titles.forEach((t, i) => {
+        const div = document.createElement('div');
+        div.className = 'title-option' + (t.isDuplicate ? ' duplicate' : '');
+        const dupBadge = t.isDuplicate ? `<span class="dedup-badge">${t.dupInfo}</span>` : '';
+        div.innerHTML = `<div class="title">${i + 1}. ${t.title}${dupBadge}</div><div class="reason">${t.hook_reason || ''}</div>`;
+        div.onclick = () => {
+          if (t.isDuplicate && !confirm('This title was already produced. Use it anyway?')) return;
+          document.querySelectorAll('.title-option').forEach(el => el.classList.remove('selected'));
+          div.classList.add('selected');
+          state.selectedTitle = t.title;
+          document.getElementById('custom-title').value = t.title;
+        };
+        container.appendChild(div);
+      });
+    }
+
+    async function approveTitle() {
+      const title = document.getElementById('custom-title').value || state.selectedTitle;
+      if (!title) { alert('Please select or enter a title.'); return; }
+      state.selectedTitle = title;
+      addLog(`Title approved: "${title}"`);
+      await window.api.approveTitle(title);
+
+      // Show script generation view
+      showView('view-script');
+      document.getElementById('script-progress').style.display = 'block';
+      document.getElementById('script-approve-btns').style.display = 'none';
+    }
+
+    // ── Script ──
+    function renderScript(script) {
+      const container = document.getElementById('script-content');
+      container.innerHTML = '';
+
+      if (script.character_bible) {
+        const bibleDiv = document.createElement('div');
+        bibleDiv.style.marginBottom = '16px';
+        bibleDiv.innerHTML = '<h3 style="margin-bottom:8px;">Character Bible</h3>';
+        script.character_bible.forEach(char => {
+          bibleDiv.innerHTML += `
+            <div style="padding:8px;background:var(--bg3);border-radius:6px;margin-bottom:6px;font-size:12px;">
+              <strong style="color:var(--accent);">${char.description_label}</strong> (${char.id})<br>
+              <span style="color:var(--muted);">${char.full_prompt_description || ''}</span>
+            </div>`;
+        });
+        container.appendChild(bibleDiv);
+      }
+
+      if (script.chapters) {
+        script.chapters.forEach(ch => {
+          const chDiv = document.createElement('div');
+          chDiv.innerHTML = `<h3 style="margin:16px 0 8px;">Chapter ${ch.chapter_number}: ${ch.chapter_title || ''}</h3>`;
+
+          ch.scenes.forEach(scene => {
+            scene.lines.forEach(line => {
+              const speaker = script.character_bible?.find(c => c.id === line.speaker_id);
+              if (line.camera_angle_break) {
+                chDiv.innerHTML += `<div class="camera-break">[NEW CAMERA ANGLE]</div>`;
+              }
+              chDiv.innerHTML += `
+                <div class="script-line">
+                  <div class="speaker">${speaker?.description_label || line.speaker_id}</div>
+                  <div class="dialogue">"${line.dialogue}"</div>
+                  <div class="tone">Tone: ${line.tone}</div>
+                  <div class="prompt-preview">Image: ${(line.image_prompt || '').slice(0, 150)}...</div>
+                </div>`;
+            });
+          });
+
+          container.appendChild(chDiv);
+        });
+      }
+    }
+
+    // ── Structural Review UI ──
+    let currentReview = null;
+
+    function renderStructuralReview(review) {
+      currentReview = review;
+      const panel = document.getElementById('structural-review-panel');
+      if (!panel) return;
+      panel.style.display = 'block';
+
+      const pass = !!review.pass;
+      const score = review.score || 0;
+      const threshold = review.threshold || 0;
+      const tierLabel = review.tier === 'long-form' ? 'Long-form (20-30 min)'
+        : review.tier === 'standard' ? 'Standard (10 min)'
+        : 'Test (1-5 min)';
+
+      // Colour + icon based on pass
+      panel.style.background = pass ? 'rgba(34,197,94,0.06)' : 'rgba(239,68,68,0.06)';
+      panel.style.border = pass ? '1px solid var(--green)' : '1px solid #ef4444';
+      document.getElementById('review-status-icon').textContent = pass ? '✓' : '✗';
+      document.getElementById('review-status-icon').style.color = pass ? 'var(--green)' : '#ef4444';
+      document.getElementById('review-status-text').textContent = pass
+        ? 'Structural Review — PASSED'
+        : 'Structural Review — BLOCKED';
+      document.getElementById('review-score-text').textContent =
+        `Score: ${score}/100 (threshold ${threshold}) · Tier: ${tierLabel} · ${(review.issues || []).length} issue(s)`;
+      document.getElementById('review-summary').textContent = review.summary || '';
+
+      // Issues
+      const issuesEl = document.getElementById('review-issues');
+      issuesEl.innerHTML = '';
+      const issues = review.issues || [];
+      if (issues.length) {
+        const heading = document.createElement('div');
+        heading.style.cssText = 'font-size:11px;letter-spacing:0.04em;color:var(--muted);margin-bottom:6px;';
+        heading.textContent = `ISSUES (${issues.length})`;
+        issuesEl.appendChild(heading);
+        issues.forEach((issue) => {
+          const item = document.createElement('div');
+          const sevColor = issue.severity === 'critical' ? '#ef4444'
+            : issue.severity === 'warning' ? '#eab308'
+            : 'var(--muted)';
+          item.style.cssText = 'display:flex;gap:8px;padding:6px 0;border-top:1px dashed var(--border);font-size:12px;';
+          const loc = [
+            issue.chapter ? `Ch${issue.chapter}` : null,
+            issue.scene ? `Sc${issue.scene}` : null,
+            issue.line ? `L${issue.line}` : null,
+          ].filter(Boolean).join(' ') || '—';
+          item.innerHTML =
+            '<span style="color:' + sevColor + ';font-weight:600;min-width:64px;">' + escapeHtml((issue.severity || 'minor').toUpperCase()) + '</span>' +
+            '<span style="color:var(--muted);min-width:80px;">' + escapeHtml(loc) + '</span>' +
+            '<span style="color:var(--text);flex:1;">' + escapeHtml(issue.description || '') + '</span>';
+          issuesEl.appendChild(item);
+        });
+      }
+
+      // Strengths
+      const strEl = document.getElementById('review-strengths');
+      strEl.innerHTML = '';
+      const strengths = review.strengths || [];
+      if (strengths.length) {
+        const heading = document.createElement('div');
+        heading.style.cssText = 'font-size:11px;letter-spacing:0.04em;color:var(--muted);margin:8px 0 4px 0;';
+        heading.textContent = 'STRENGTHS';
+        strEl.appendChild(heading);
+        strengths.forEach((s) => {
+          const item = document.createElement('div');
+          item.style.cssText = 'padding:4px 0;font-size:12px;color:var(--text);';
+          item.textContent = '✓ ' + s;
+          strEl.appendChild(item);
+        });
+      }
+
+      // Gate the approval buttons based on pass/fail
+      const approveBtn = document.getElementById('script-approve-btn');
+      const regenBtn = document.getElementById('script-regen-btn');
+      const overrideBtn = document.getElementById('script-override-btn');
+      if (pass) {
+        approveBtn.disabled = false;
+        approveBtn.style.opacity = '1';
+        regenBtn.style.display = 'none';
+        overrideBtn.style.display = 'none';
+      } else {
+        // Hard-block: disable primary approve, show regenerate + override options
+        approveBtn.disabled = true;
+        approveBtn.style.opacity = '0.4';
+        regenBtn.style.display = 'inline-block';
+        overrideBtn.style.display = 'inline-block';
+      }
+    }
+
+    function toggleReviewDetails() {
+      const details = document.getElementById('review-details');
+      const btn = document.getElementById('review-toggle-btn');
+      if (!details) return;
+      const showing = details.style.display !== 'none';
+      details.style.display = showing ? 'none' : 'block';
+      btn.textContent = showing ? 'Show details' : 'Hide details';
+    }
+
+    async function approveScript() {
+      if (currentReview && !currentReview.pass) {
+        addLog('Approve blocked — script review failed. Regenerate or override.', 'warn');
+        return;
+      }
+      addLog('Script approved. Starting portrait generation...');
+      await window.api.approveScript({ override: false });
+    }
+
+    async function overrideApproveScript() {
+      const score = currentReview?.score || 0;
+      const threshold = currentReview?.threshold || 0;
+      const msg =
+        `Override the structural review?\n\n` +
+        `Score: ${score}/${threshold} (review recommended regenerating).\n\n` +
+        `If you override, video generation will proceed with the current script. ` +
+        `A weak script can burn 1000-3000 credits on video output that won't retain viewers. ` +
+        `Only override if you've read the flagged issues and still believe the script is usable.\n\n` +
+        `Proceed with override?`;
+      if (!confirm(msg)) return;
+      addLog(`Script OVERRIDE approved (score ${score}/${threshold})`, 'warn');
+      await window.api.approveScript({ override: true });
+    }
+
+    async function regenerateScript() {
+      if (!confirm('Regenerate the script from scratch? The current script + review will be discarded.')) return;
+      addLog('Regenerating script...', 'warn');
+      // Hide review panel + approve buttons until new review lands
+      document.getElementById('structural-review-panel').style.display = 'none';
+      document.getElementById('script-approve-btns').style.display = 'none';
+      await window.api.regenerateScript();
+    }
+
+    // ── Generation Progress ──
+    let currentGenGate = null;
+
+    function showGenerationView(title, gate) {
+      currentGenGate = gate;
+      showView('view-generation');
+      document.getElementById('gen-title').textContent = title;
+      document.getElementById('gen-progress-bar').style.width = '0%';
+      document.getElementById('gen-progress-text').textContent = '0 / 0';
+      document.getElementById('asset-grid').innerHTML = '';
+      document.getElementById('gen-approve-btns').style.display = 'none';
+      document.getElementById('gen-rerender-btn').style.display = 'none';
+      // Populate the mode + aspect badge from the active project status (cached
+      // by setResearchProjectBadge on the launcher; we mirror it here for the
+      // generation view's badge).
+      try {
+        const modeEl = document.getElementById('research-badge-mode');
+        const aspEl = document.getElementById('research-badge-aspect');
+        const genBadge = document.getElementById('gen-mode-badge');
+        const genBadgeMode = document.getElementById('gen-badge-mode');
+        const genBadgeAsp = document.getElementById('gen-badge-aspect');
+        if (modeEl && aspEl && genBadge) {
+          genBadgeMode.textContent = modeEl.textContent || 'staged';
+          genBadgeAsp.textContent = aspEl.textContent || '16:9';
+          genBadge.style.display = 'inline-block';
+        }
+      } catch (_) {}
+    }
+
+    function updateGenProgress(current, total) {
+      const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+      document.getElementById('gen-progress-bar').style.width = pct + '%';
+      document.getElementById('gen-progress-text').textContent = `${current} / ${total}`;
+    }
+
+    function addAssetThumb(index, path, type) {
+      const grid = document.getElementById('asset-grid');
+      const thumb = document.createElement('div');
+      thumb.className = 'asset-thumb';
+      thumb.dataset.index = index;
+      thumb.innerHTML = `<div class="status complete"></div>`;
+      if (type === 'image' && path) {
+        thumb.innerHTML = `<img src="file://${path}" alt="Asset ${index}"><div class="status complete"></div>`;
+      }
+      thumb.onclick = () => {
+        thumb.classList.toggle('flagged');
+        window.api.flagAsset(currentGenGate, index);
+        // Show/hide "Re-render Flagged" button based on whether any thumbs are flagged
+        if (currentGenGate === 'portraits') {
+          const anyFlagged = grid.querySelector('.asset-thumb.flagged');
+          document.getElementById('gen-rerender-btn').style.display = anyFlagged ? 'inline-block' : 'none';
+        }
+      };
+      grid.appendChild(thumb);
+    }
+
+    async function approveGeneration() {
+      addLog(`${currentGenGate} approved.`);
+      if (currentGenGate === 'portraits') await window.api.approvePortraits();
+      else if (currentGenGate === 'scenes') await window.api.approveScenes();
+      else if (currentGenGate === 'clips') await window.api.approveClips();
+    }
+
+    async function rerenderFlagged() {
+      if (currentGenGate !== 'portraits') return;
+      addLog('Re-rendering flagged portraits...');
+      // Hide approve buttons while re-rendering
+      document.getElementById('gen-approve-btns').style.display = 'none';
+      document.getElementById('gen-rerender-btn').style.display = 'none';
+      await window.api.rerenderPortraits();
+    }
+
+    // ── TEMPORARY — remove when full production starts ──
+    // Pre-gen prompt preview: show final multi_shot_prompt before Kling generation
+    async function approvePromptPreview(decision) {
+      document.getElementById('prompt-preview-panel').style.display = 'none';
+      addLog(`Prompt preview: ${decision}`);
+      await window.api.approvePromptPreview(decision);
+    }
+
+    // ── TEMPORARY — remove when full production starts ──
+    // Per-clip approval: watch the clip after generation before continuing
+    async function approveClipReview(decision) {
+      document.getElementById('clip-review-panel').style.display = 'none';
+      // Stop video playback
+      const vid = document.getElementById('clip-review-video');
+      vid.pause();
+      vid.src = '';
+      addLog(`Clip review: ${decision}`);
+      await window.api.approveClipReview(decision);
+    }
+
+    // ── Cinematic Elements (Phase 2) ──
+    // Shown when the cinematic element-setup stage couldn't finish automation
+    // and falls back to a manual checklist + "Elements Ready" gate.
+    function showCinematicElementsPanel() {
+      showView('view-cinematic-elements');
+    }
+
+    function renderCinematicElementChecklist(pending) {
+      const container = document.getElementById('cinematic-elements-pending');
+      if (!container) return;
+      if (!pending || pending.length === 0) {
+        container.innerHTML =
+          '<div style="padding:14px;background:rgba(34,197,94,0.08);border:1px solid var(--green);border-radius:8px;color:var(--green);font-size:13px;">' +
+          '&#10003; All character elements appear to be in place. Click Continue below when ready.' +
+          '</div>';
+        return;
+      }
+      const rows = pending.map(p => {
+        const descShort = p.description ? escapeHtml(p.description.slice(0, 110) + (p.description.length > 110 ? '…' : '')) : '';
+        return `
+          <div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-bottom:8px;display:flex;align-items:flex-start;gap:12px;">
+            <span style="font-size:11px;color:#eab308;font-weight:600;letter-spacing:0.04em;min-width:60px;">NEEDED</span>
+            <div style="flex:1;min-width:0;">
+              <div style="font-family:monospace;font-size:13px;color:var(--text);margin-bottom:4px;">@${escapeHtml(p.name)}</div>
+              ${descShort ? `<div style="font-size:11px;color:var(--muted);line-height:1.5;">${descShort}</div>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+      container.innerHTML = `
+        <h3 style="font-size:11px;letter-spacing:0.04em;color:var(--muted);margin-bottom:10px;">
+          ${pending.length} ELEMENT${pending.length === 1 ? '' : 'S'} PENDING
+        </h3>
+        ${rows}
+      `;
+    }
+
+    async function approveElementsReady() {
+      addLog('Elements confirmed ready — continuing pipeline');
+      await window.api.approveElementsReady();
+    }
+
+    // ── Cinematic Locations Review ──
+    function showCinematicLocationsPanel() {
+      showView('view-cinematic-locations');
+    }
+
+    // Track which locations the user has selected for regeneration
+    const _selectedLocationsForRegen = new Set();
+
+    function renderCinematicLocationsGrid(locations, expectedAspect) {
+      const grid = document.getElementById('cinematic-locations-grid');
+      if (!grid) return;
+      if (!locations || locations.length === 0) {
+        grid.innerHTML = '<div style="padding:14px;color:var(--muted);font-size:13px;">No location images found.</div>';
+        return;
+      }
+      _selectedLocationsForRegen.clear();
+      window._locationData = locations; // stash for regen handler
+
+      const expectLandscape = expectedAspect === '16:9';
+      grid.innerHTML = locations.map((loc, idx) => {
+        const isLandscape = loc.width > loc.height;
+        const isPortrait = loc.height > loc.width;
+        const orientationOk = loc.status === 'missing' ? false
+          : (expectLandscape && isLandscape) || (!expectLandscape && isPortrait) || expectedAspect === '1:1';
+        const badgeColor = loc.status === 'missing' ? '#ef4444' : (orientationOk ? '#22c55e' : '#ef4444');
+        const badgeText = loc.status === 'missing' ? 'MISSING'
+          : (orientationOk ? 'OK' : 'WRONG ORIENTATION');
+        const dimText = loc.width && loc.height ? `${loc.width}×${loc.height}` : '';
+        const imgSrc = loc.imagePath ? `file://${loc.imagePath}` : '';
+        return `
+          <div id="loc-card-${idx}" data-hint="${escapeHtml(loc.hint)}"
+               style="background:var(--surface);border:2px solid var(--border);border-radius:8px;overflow:hidden;position:relative;cursor:pointer;transition:border-color 0.15s;"
+               onclick="toggleLocationSelection(${idx}, '${escapeHtml(loc.hint)}')">
+            <div style="aspect-ratio:9/16;max-height:280px;background:#111;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+              ${imgSrc ? `<img src="${imgSrc}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'">` : '<span style="color:var(--muted);font-size:11px;">No image</span>'}
+            </div>
+            <div class="loc-badge" style="position:absolute;top:6px;right:6px;background:${badgeColor};color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;letter-spacing:0.04em;">${badgeText}</div>
+            ${dimText ? `<div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,0.7);color:#ccc;font-size:9px;padding:2px 5px;border-radius:3px;">${dimText}</div>` : ''}
+            <div style="padding:8px 10px;">
+              <div style="font-family:monospace;font-size:11px;color:var(--text);margin-bottom:2px;">@${escapeHtml(loc.hint)}</div>
+              <div style="font-size:10px;color:var(--muted);line-height:1.4;max-height:2.8em;overflow:hidden;">${escapeHtml((loc.description || '').slice(0, 80))}</div>
+            </div>
+          </div>`;
+      }).join('');
+
+      // Update regen button visibility
+      updateRegenButton();
+    }
+
+    function toggleLocationSelection(idx, hint) {
+      const card = document.getElementById(`loc-card-${idx}`);
+      if (!card) return;
+      if (_selectedLocationsForRegen.has(hint)) {
+        _selectedLocationsForRegen.delete(hint);
+        card.style.borderColor = 'var(--border)';
+        // Remove REGEN badge, restore original
+        const badge = card.querySelector('.loc-badge');
+        if (badge) { badge.style.background = '#22c55e'; badge.textContent = 'OK'; }
+      } else {
+        _selectedLocationsForRegen.add(hint);
+        card.style.borderColor = '#ef4444';
+        // Show REGEN badge
+        const badge = card.querySelector('.loc-badge');
+        if (badge) { badge.style.background = '#f97316'; badge.textContent = 'REGEN'; }
+      }
+      updateRegenButton();
+    }
+
+    function updateRegenButton() {
+      let btn = document.getElementById('regen-locations-btn');
+      if (!btn) {
+        // Insert regen button before the "Locations Ready" button
+        const btnGroup = document.querySelector('#view-cinematic-locations .btn-group');
+        if (btnGroup) {
+          const regenBtn = document.createElement('button');
+          regenBtn.id = 'regen-locations-btn';
+          regenBtn.className = 'btn';
+          regenBtn.style.cssText = 'font-size:14px;padding:12px 24px;background:#f97316;color:#fff;border:none;border-radius:6px;cursor:pointer;margin-right:12px;display:none;';
+          regenBtn.onclick = regenerateSelectedLocations;
+          btnGroup.insertBefore(regenBtn, btnGroup.firstChild);
+          btn = regenBtn;
+        }
+      }
+      if (btn) {
+        const count = _selectedLocationsForRegen.size;
+        btn.style.display = count > 0 ? 'inline-block' : 'none';
+        btn.textContent = `Regenerate ${count} Location${count !== 1 ? 's' : ''} \u21BB`;
+      }
+    }
+
+    async function regenerateSelectedLocations() {
+      const hints = [..._selectedLocationsForRegen];
+      if (hints.length === 0) return;
+      const confirmMsg = `Regenerate ${hints.length} location(s)?\n\n${hints.map(h => '• @' + h).join('\n')}\n\nThis will delete the current image and re-generate on next pipeline run.`;
+      if (!confirm(confirmMsg)) return;
+      addLog(`Requesting regen for ${hints.length} location(s): ${hints.join(', ')}`);
+      try {
+        await window.api.regenerateLocations(hints);
+        addLog(`✓ ${hints.length} location(s) queued for regeneration`);
+        // Update UI: mark selected cards as "PENDING REGEN"
+        for (const hint of hints) {
+          const card = document.querySelector(`[data-hint="${hint}"]`);
+          if (card) {
+            const badge = card.querySelector('.loc-badge');
+            if (badge) { badge.style.background = '#a855f7'; badge.textContent = 'PENDING'; }
+            const img = card.querySelector('img');
+            if (img) img.style.opacity = '0.3';
+          }
+        }
+        _selectedLocationsForRegen.clear();
+        updateRegenButton();
+
+        // Hide the "Locations Ready" button — user must restart to re-generate
+        const approveBtn = document.querySelector('#view-cinematic-locations .btn-success');
+        if (approveBtn) approveBtn.style.display = 'none';
+        // Show restart notice
+        const notice = document.createElement('div');
+        notice.style.cssText = 'text-align:center;padding:16px;color:#f97316;font-size:14px;font-weight:600;';
+        notice.textContent = `${hints.length} location(s) queued — restart the app to re-generate with refined prompts.`;
+        const btnGroup = document.querySelector('#view-cinematic-locations .btn-group');
+        if (btnGroup) btnGroup.parentNode.insertBefore(notice, btnGroup.nextSibling);
+      } catch (err) {
+        addLog(`Failed to queue regen: ${err.message}`, 'error');
+      }
+    }
+
+    async function approveLocationsReady() {
+      if (_selectedLocationsForRegen.size > 0) {
+        if (!confirm(`${_selectedLocationsForRegen.size} location(s) are selected for regeneration. Continue anyway without regenerating?`)) return;
+      }
+      addLog('Locations confirmed ready — continuing pipeline');
+      await window.api.approveLocationsReady();
+    }
+
+    // ── Cinematic Scene Images Manual Fallback ──
+    function showCinematicScenesPanel() {
+      showView('view-cinematic-scenes');
+    }
+
+    function renderCinematicScenesChecklist(pending) {
+      const container = document.getElementById('cinematic-scenes-pending');
+      if (!container) return;
+      if (!pending || pending.length === 0) {
+        container.innerHTML =
+          '<div style="padding:14px;background:rgba(34,197,94,0.08);border:1px solid var(--green);border-radius:8px;color:var(--green);font-size:13px;">' +
+          '&#10003; All scene images appear to be in place. Click Continue below.' +
+          '</div>';
+        return;
+      }
+      const rows = pending.map(p => {
+        const blocking = p.blocking || {};
+        const positions = [];
+        if (blocking.frame_left)   positions.push(`<div><span style="color:var(--muted);">left:</span> ${escapeHtml(blocking.frame_left)}</div>`);
+        if (blocking.frame_center) positions.push(`<div><span style="color:var(--muted);">center:</span> ${escapeHtml(blocking.frame_center)}</div>`);
+        if (blocking.frame_right)  positions.push(`<div><span style="color:var(--muted);">right:</span> ${escapeHtml(blocking.frame_right)}</div>`);
+        const notes = blocking.notes ? `<div style="margin-top:4px;color:var(--muted);font-style:italic;">${escapeHtml(blocking.notes)}</div>` : '';
+        return `
+          <div style="padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+              <span style="font-size:11px;color:#eab308;font-weight:600;letter-spacing:0.04em;min-width:60px;">NEEDED</span>
+              <span style="font-family:monospace;font-size:13px;color:var(--text);">Ch${p.chapter} Sc${p.scene}</span>
+              <span style="font-size:11px;color:var(--muted);">${escapeHtml(p.location || '')}</span>
+            </div>
+            ${p.locationImagePath ? `<div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Location ref: <code>${escapeHtml(p.locationImagePath)}</code></div>` : ''}
+            <div style="font-size:11px;color:var(--text);line-height:1.5;margin:4px 0;">
+              ${positions.join('')}
+              ${notes}
+            </div>
+            <div style="font-size:10px;color:var(--accent);margin-top:6px;">Save to: <code>${escapeHtml(p.expectedPath || '')}</code></div>
+          </div>`;
+      }).join('');
+      container.innerHTML = `
+        <h3 style="font-size:11px;letter-spacing:0.04em;color:var(--muted);margin-bottom:10px;">
+          ${pending.length} SCENE IMAGE${pending.length === 1 ? '' : 'S'} PENDING
+        </h3>
+        ${rows}
+      `;
+    }
+
+    async function approveSceneImagesReady() {
+      addLog('Scene images confirmed ready — continuing pipeline');
+      await window.api.approveSceneImagesReady();
+    }
+
+    // ── Scene Verification (pre-video gate) ──
+    const _selectedScenesForRegen = new Set();
+
+    function showSceneVerifyPanel() {
+      showView('view-scene-verify');
+    }
+
+    function renderSceneVerificationGrid(locationGroups, totalScenes, doneScenes) {
+      const container = document.getElementById('scene-verify-groups');
+      if (!container) return;
+      _selectedScenesForRegen.clear();
+      window._sceneVerifyData = locationGroups; // stash for regen handler
+
+      if (!locationGroups || locationGroups.length === 0) {
+        container.innerHTML = '<div style="padding:14px;color:var(--muted);font-size:13px;">No scene images found.</div>';
+        return;
+      }
+
+      document.getElementById('scene-verify-summary').textContent =
+        `${doneScenes}/${totalScenes} scenes generated across ${locationGroups.length} location(s). Review continuity within each location group.`;
+
+      // Stash prompts in a JS map (safer than data-attributes for long text with quotes)
+      window._scenePrompts = {};
+
+      container.innerHTML = locationGroups.map((group, gIdx) => {
+        const locImg = group.locationImagePath ? `<img src="file://${group.locationImagePath}" style="width:100%;height:100%;object-fit:cover;" onerror="this.parentElement.innerHTML='<span style=\\'color:var(--muted);font-size:10px;\\'>No image</span>'">` : '<span style="color:var(--muted);font-size:10px;">No image</span>';
+
+        const sceneCards = group.scenes.map((sc, sIdx) => {
+          const globalId = `sv-${gIdx}-${sIdx}`;
+          const imgSrc = sc.imagePath ? `file://${sc.imagePath}` : '';
+          const statusColor = sc.status === 'done' ? '#22c55e' : (sc.status === 'failed' ? '#ef4444' : '#f59e0b');
+          const statusText = sc.status === 'done' ? 'OK' : sc.status.toUpperCase();
+          const charText = sc.characters.length > 0 ? sc.characters.map(c => '@' + c).join(', ') : '';
+          const hasPrompt = !!sc.promptUsed;
+          if (hasPrompt) window._scenePrompts[globalId] = sc.promptUsed;
+          return `
+            <div id="${globalId}" data-hint="${escapeHtml(sc.hint)}" data-group="${gIdx}"
+                 style="background:var(--surface);border:2px solid var(--border);border-radius:6px;overflow:hidden;position:relative;cursor:pointer;transition:border-color 0.15s;min-width:200px;max-width:280px;flex-shrink:0;"
+                 onclick="toggleSceneSelection('${globalId}', '${escapeHtml(sc.hint)}')"
+                 ondblclick="event.stopPropagation(); showScenePrompt('${globalId}')">
+              <div style="background:#111;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+                ${imgSrc ? `<img src="${imgSrc}" style="width:100%;height:auto;display:block;" onerror="this.style.display='none'">` : '<div style="width:100%;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;"><span style="color:var(--muted);font-size:10px;">Missing</span></div>'}
+              </div>
+              <div class="sv-badge" style="position:absolute;top:4px;right:4px;background:${statusColor};color:#fff;font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:0.04em;">${statusText}</div>
+              ${hasPrompt ? '<div class="sv-prompt-badge" style="position:absolute;top:4px;left:4px;background:rgba(0,0,0,0.7);color:#60a5fa;font-size:7px;font-weight:600;padding:2px 4px;border-radius:3px;cursor:help;" title="Double-click to view prompt">P</div>' : ''}
+              <div style="padding:6px 8px;">
+                <div style="font-family:monospace;font-size:10px;color:var(--text);">Ch${sc.chapter} Sc${sc.scene}</div>
+                ${charText ? `<div style="font-size:9px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(charText)}</div>` : ''}
+              </div>
+            </div>`;
+        }).join('');
+
+        return `
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+              <div style="width:90px;height:68px;border-radius:4px;overflow:hidden;background:#111;flex-shrink:0;display:flex;align-items:center;justify-content:center;">
+                ${locImg}
+              </div>
+              <div>
+                <div style="font-family:monospace;font-size:12px;color:#60a5fa;font-weight:600;">@${escapeHtml(group.locationHint)}</div>
+                <div style="font-size:10px;color:var(--muted);">${group.scenes.length} scene${group.scenes.length !== 1 ? 's' : ''} — ${escapeHtml(group.locationLabel)}</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;">
+              ${sceneCards}
+            </div>
+          </div>`;
+      }).join('');
+
+      updateSceneRegenButton();
+    }
+
+    function toggleSceneSelection(elementId, hint) {
+      const card = document.getElementById(elementId);
+      if (!card) return;
+      if (_selectedScenesForRegen.has(hint)) {
+        _selectedScenesForRegen.delete(hint);
+        card.style.borderColor = 'var(--border)';
+        const badge = card.querySelector('.sv-badge');
+        if (badge) { badge.style.background = '#22c55e'; badge.textContent = 'OK'; }
+      } else {
+        _selectedScenesForRegen.add(hint);
+        card.style.borderColor = '#ef4444';
+        const badge = card.querySelector('.sv-badge');
+        if (badge) { badge.style.background = '#f97316'; badge.textContent = 'REGEN'; }
+      }
+      updateSceneRegenButton();
+    }
+
+    function updateSceneRegenButton() {
+      const btn = document.getElementById('regen-scenes-btn');
+      if (!btn) return;
+      const count = _selectedScenesForRegen.size;
+      btn.style.display = count > 0 ? 'inline-block' : 'none';
+      btn.textContent = `Regenerate ${count} Scene${count !== 1 ? 's' : ''} \u21BB`;
+    }
+
+    function showScenePrompt(elementId) {
+      const prompt = (window._scenePrompts || {})[elementId];
+      if (!prompt) { alert('No prompt data available for this scene.'); return; }
+
+      const card = document.getElementById(elementId);
+      const hint = card ? (card.getAttribute('data-hint') || elementId) : elementId;
+
+      // Create a modal overlay to show the full prompt
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+      const modal = document.createElement('div');
+      modal.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;max-width:700px;width:100%;max-height:80vh;overflow-y:auto;';
+
+      const titleEl = document.createElement('div');
+      titleEl.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;';
+      const h3 = document.createElement('h3');
+      h3.style.cssText = 'margin:0;color:#60a5fa;font-size:14px;font-family:monospace;';
+      h3.textContent = `${hint} — Generation Prompt`;
+      const closeBtn = document.createElement('button');
+      closeBtn.style.cssText = 'background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;';
+      closeBtn.textContent = '\u00D7';
+      closeBtn.onclick = () => overlay.remove();
+      titleEl.appendChild(h3);
+      titleEl.appendChild(closeBtn);
+
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;font-size:11px;color:var(--text);line-height:1.5;background:var(--bg);padding:12px;border-radius:6px;border:1px solid var(--border);margin:0;max-height:60vh;overflow-y:auto;';
+      pre.textContent = prompt;
+
+      const btnWrap = document.createElement('div');
+      btnWrap.style.cssText = 'margin-top:10px;text-align:right;';
+      const copyBtn = document.createElement('button');
+      copyBtn.style.cssText = 'background:#374151;color:#d1d5db;border:1px solid var(--border);padding:5px 12px;border-radius:4px;font-size:11px;cursor:pointer;';
+      copyBtn.textContent = 'Copy Prompt';
+      copyBtn.onclick = () => { navigator.clipboard.writeText(prompt).then(() => { copyBtn.textContent = 'Copied!'; }); };
+      btnWrap.appendChild(copyBtn);
+
+      modal.appendChild(titleEl);
+      modal.appendChild(pre);
+      modal.appendChild(btnWrap);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    }
+
+    async function regenerateSelectedScenes() {
+      const hints = [..._selectedScenesForRegen];
+      if (hints.length === 0) return;
+      const confirmMsg = `Regenerate ${hints.length} scene(s)?\n\n${hints.map(h => '\u2022 ' + h).join('\n')}\n\nOriginal images will be archived (soft delete). Pipeline will re-generate on next restart.`;
+      if (!confirm(confirmMsg)) return;
+      addLog(`Requesting regen for ${hints.length} scene(s): ${hints.join(', ')}`);
+      try {
+        await window.api.regenerateScenes(hints);
+        addLog(`\u2713 ${hints.length} scene(s) queued for regeneration (archived)`);
+        // Update UI: mark selected cards as "PENDING REGEN"
+        for (const hint of hints) {
+          const card = document.querySelector(`[data-hint="${hint}"]`);
+          if (card) {
+            const badge = card.querySelector('.sv-badge');
+            if (badge) { badge.style.background = '#a855f7'; badge.textContent = 'ARCHIVED'; }
+            const img = card.querySelector('img');
+            if (img) img.style.opacity = '0.3';
+          }
+        }
+        _selectedScenesForRegen.clear();
+        updateSceneRegenButton();
+
+        // Hide the approve button — user must restart to re-generate
+        const approveBtn = document.querySelector('#view-scene-verify .btn-success');
+        if (approveBtn) approveBtn.style.display = 'none';
+        // Show restart notice
+        const notice = document.createElement('div');
+        notice.style.cssText = 'text-align:center;padding:16px;color:#f97316;font-size:14px;font-weight:600;';
+        notice.textContent = `${hints.length} scene(s) archived \u2014 restart the app to re-generate.`;
+        const btnGroup = document.querySelector('#view-scene-verify .btn-group');
+        if (btnGroup) btnGroup.parentNode.insertBefore(notice, btnGroup.nextSibling);
+      } catch (err) {
+        addLog(`Failed to queue scene regen: ${err.message}`, 'error');
+      }
+    }
+
+    async function approveScenesFromVerify() {
+      if (_selectedScenesForRegen.size > 0) {
+        if (!confirm(`${_selectedScenesForRegen.size} scene(s) are selected for regeneration. Continue anyway without regenerating?`)) return;
+      }
+      addLog('Scenes approved from verification tab \u2014 continuing to video generation');
+      await window.api.approveScenes();
+    }
+
+    // ── Dialogue Triage ──
+    let _triageData = null;
+    const _triageBrollSet = new Set(); // clipIds approved as b-roll
+
+    function showDialogueTriagePanel() {
+      showView('view-dialogue-triage');
+    }
+
+    function renderDialogueTriage(triageItems, totalClips, withDialogue, silent) {
+      _triageData = triageItems;
+      _triageBrollSet.clear();
+
+      document.getElementById('dialogue-triage-summary').textContent =
+        `${totalClips} clip(s) total: ${withDialogue} with dialogue, ${silent} silent. Review and adjust before video generation.`;
+
+      updateTriageCounts();
+
+      const container = document.getElementById('dialogue-triage-content');
+      if (!container) return;
+
+      // Split items into dialogue and silent groups
+      const dialogueClips = triageItems.filter(t => t.hasDialogue);
+      const silentClips = triageItems.filter(t => !t.hasDialogue);
+
+      let html = '';
+
+      // Silent clips section — these need attention
+      if (silentClips.length > 0) {
+        html += `<div style="margin-bottom:16px;">
+          <h3 style="color:#ef4444;font-size:13px;margin-bottom:8px;font-weight:600;">Silent Clips — Click to approve as B-Roll</h3>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">`;
+        for (const clip of silentClips) {
+          const isBroll = _triageBrollSet.has(clip.clipId);
+          const actionLines = clip.linesWithoutDialogue.map(l =>
+            l.action ? l.action.substring(0, 60) + (l.action.length > 60 ? '...' : '') : '(no action)'
+          ).join(' | ');
+          html += `
+            <div id="triage-${escapeHtml(clip.clipId)}" data-clip-id="${escapeHtml(clip.clipId)}"
+                 style="background:var(--surface);border:2px solid ${isBroll ? '#60a5fa' : '#ef4444'};border-radius:6px;padding:10px 12px;min-width:180px;max-width:260px;cursor:pointer;transition:border-color 0.15s;"
+                 onclick="toggleTriageBroll('${escapeHtml(clip.clipId)}')">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                <span style="font-family:monospace;font-size:11px;color:var(--text);font-weight:600;">${escapeHtml(clip.clipId)}</span>
+                <span class="triage-badge" style="font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;color:#fff;background:${isBroll ? '#60a5fa' : '#ef4444'};">${isBroll ? 'B-ROLL' : 'SKIP'}</span>
+              </div>
+              <div style="font-size:9px;color:var(--muted);">Ch${clip.chapter} Sc${clip.scene} &middot; ${clip.durationSeconds}s &middot; ${clip.lineRefs.length} line(s)</div>
+              <div style="font-size:9px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(actionLines)}">${escapeHtml(actionLines)}</div>
+              ${clip.promptSnippet ? `<div style="font-size:8px;color:#6b7280;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(clip.promptSnippet)}">${escapeHtml(clip.promptSnippet.substring(0, 80))}...</div>` : ''}
+            </div>`;
+        }
+        html += '</div></div>';
+      }
+
+      // Dialogue clips section — auto-approved, collapsible
+      if (dialogueClips.length > 0) {
+        html += `<details style="margin-bottom:8px;">
+          <summary style="cursor:pointer;color:#22c55e;font-size:13px;font-weight:600;margin-bottom:8px;">Has Dialogue — Auto-approved (${dialogueClips.length} clips) ▸</summary>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;">`;
+        for (const clip of dialogueClips) {
+          const dialoguePreview = clip.linesWithDialogue.map(l =>
+            `${l.speaker}: "${l.dialogue.substring(0, 40)}${l.dialogue.length > 40 ? '...' : ''}"`
+          ).join(' | ');
+          html += `
+            <div style="background:var(--surface);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:10px 12px;min-width:180px;max-width:260px;opacity:0.8;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                <span style="font-family:monospace;font-size:11px;color:var(--text);font-weight:600;">${escapeHtml(clip.clipId)}</span>
+                <span style="font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;color:#fff;background:#22c55e;">OK</span>
+              </div>
+              <div style="font-size:9px;color:var(--muted);">Ch${clip.chapter} Sc${clip.scene} &middot; ${clip.durationSeconds}s &middot; ${clip.lineRefs.length} line(s)</div>
+              <div style="font-size:9px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(dialoguePreview)}">${escapeHtml(dialoguePreview)}</div>
+            </div>`;
+        }
+        html += '</div></details>';
+      }
+
+      if (silentClips.length === 0) {
+        html = '<div style="padding:14px;color:#22c55e;font-size:13px;text-align:center;">All clips have dialogue — no triage needed.</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
+    function toggleTriageBroll(clipId) {
+      if (_triageBrollSet.has(clipId)) {
+        _triageBrollSet.delete(clipId);
+      } else {
+        _triageBrollSet.add(clipId);
+      }
+
+      // Update card visual
+      const card = document.getElementById(`triage-${clipId}`);
+      if (card) {
+        const isBroll = _triageBrollSet.has(clipId);
+        card.style.borderColor = isBroll ? '#60a5fa' : '#ef4444';
+        const badge = card.querySelector('.triage-badge');
+        if (badge) {
+          badge.style.background = isBroll ? '#60a5fa' : '#ef4444';
+          badge.textContent = isBroll ? 'B-ROLL' : 'SKIP';
+        }
+      }
+
+      updateTriageCounts();
+    }
+
+    function updateTriageCounts() {
+      if (!_triageData) return;
+      const dialogueCount = _triageData.filter(t => t.hasDialogue).length;
+      const silentCount = _triageData.filter(t => !t.hasDialogue).length;
+      const brollCount = _triageBrollSet.size;
+      const skipCount = silentCount - brollCount;
+
+      document.getElementById('triage-count-dialogue').textContent = dialogueCount;
+      document.getElementById('triage-count-broll').textContent = brollCount;
+      document.getElementById('triage-count-skip').textContent = skipCount;
+    }
+
+    async function approveDialogueTriage() {
+      if (!_triageData) return;
+
+      const silentClips = _triageData.filter(t => !t.hasDialogue);
+      const skipClipIds = silentClips.filter(t => !_triageBrollSet.has(t.clipId)).map(t => t.clipId);
+      const approveClipIds = [..._triageBrollSet];
+
+      const skipCount = skipClipIds.length;
+      const brollCount = approveClipIds.length;
+      const dialogueCount = _triageData.filter(t => t.hasDialogue).length;
+      const totalGen = dialogueCount + brollCount;
+
+      if (skipCount > 0) {
+        const msg = `Proceed with video generation?\n\n${totalGen} clip(s) will be generated (${dialogueCount} dialogue + ${brollCount} b-roll)\n${skipCount} silent clip(s) will be skipped\n\nSkipped clips can be un-skipped later by re-running dialogue triage.`;
+        if (!confirm(msg)) return;
+      }
+
+      addLog(`Dialogue triage: ${dialogueCount} dialogue, ${brollCount} b-roll approved, ${skipCount} skipped`);
+      try {
+        await window.api.approveDialogueTriage({ skipClipIds, approveClipIds });
+        addLog('Dialogue triage approved — continuing to video generation');
+      } catch (err) {
+        addLog(`Dialogue triage error: ${err.message}`, 'error');
+      }
+    }
+
+    // ── Verify Clips ──
+    function showVerifyRunning() {
+      showView('view-verify');
+      document.getElementById('verify-summary').textContent =
+        'Running Gemini multimodal verification on all clips...';
+      document.getElementById('verify-running').style.display = 'block';
+      document.getElementById('verify-table-wrap').style.display = 'none';
+    }
+
+    function updateVerifyProgress(current, total) {
+      const bar = document.getElementById('verify-progress-bar');
+      const txt = document.getElementById('verify-progress-text');
+      const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+      if (bar) bar.style.width = pct + '%';
+      if (txt) txt.textContent = `${current} / ${total}`;
+    }
+
+    async function showVerifyTable() {
+      showView('view-verify');
+      document.getElementById('verify-running').style.display = 'none';
+      document.getElementById('verify-table-wrap').style.display = 'block';
+      await refreshVerify();
+    }
+
+    async function refreshVerify() {
+      const rows = await window.api.getClipVerifications();
+      const tbody = document.getElementById('verify-table-body');
+      tbody.innerHTML = '';
+      let accepts = 0, reviews = 0, rejects = 0, pending = 0;
+      for (const r of rows) {
+        if (r.status !== 'done') continue;
+        const tier = r.verify_tier || 'pending';
+        if (tier === 'accept') accepts++;
+        else if (tier === 'review') reviews++;
+        else if (tier === 'reject') rejects++;
+        else pending++;
+        tbody.appendChild(renderVerifyRow(r, tier));
+      }
+      const summary = document.getElementById('verify-summary');
+      summary.innerHTML =
+        `<span style="color:var(--green);">${accepts} accept</span> · ` +
+        `<span style="color:#d4b300;">${reviews} review</span> · ` +
+        `<span style="color:#e55;">${rejects} reject</span>` +
+        (pending ? ` · <span style="color:var(--muted);">${pending} not verified</span>` : '');
+
+      // Enable Approve & Continue only when no review/reject items without decision remain
+      const needsAction = rows.some(r =>
+        r.status === 'done' &&
+        (r.verify_tier === 'review' || r.verify_tier === 'reject') &&
+        r.verify_human_decision !== 'accepted'
+      );
+      const btn = document.getElementById('verify-approve-btn');
+      if (btn) {
+        btn.disabled = needsAction;
+        btn.title = needsAction ? 'Accept or Redo every flagged clip first' : '';
+        btn.style.opacity = needsAction ? '0.5' : '1';
+      }
+    }
+
+    function renderVerifyRow(row, tier) {
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid var(--border)';
+      const tierColor = tier === 'accept' ? 'var(--green)'
+        : tier === 'review' ? '#d4b300'
+        : tier === 'reject' ? '#e55'
+        : 'var(--muted)';
+      const similarity = row.verify_similarity != null ? row.verify_similarity + '%' : '—';
+      const decision = row.verify_human_decision || null;
+      const decisionLabel = decision === 'accepted' ? ' · <span style="color:var(--green);font-size:10px;">✓ accepted</span>'
+        : decision === 'rejected' ? ' · <span style="color:#e55;font-size:10px;">↻ will redo</span>'
+        : '';
+      const transcript = row.verify_transcript || '(no transcript)';
+      const filePath = row.file_path || '';
+      const isCinematic = row.type === 'video_clip_cinematic' || !!row.cinematic_verify;
+
+      // Label: cinematic clips identify by kling_clip_id (e.g. "ch3_sc3_c1")
+      // and by line_refs count rather than a single Ch+L coordinate.
+      let label;
+      if (isCinematic) {
+        const clipId = row.kling_clip_id || `Ch${row.chapter} Sc${row.scene}`;
+        const lineCount = row.cinematic_verify?.linesVerified?.length || 0;
+        label = `<div style="font-weight:600;">${escapeHtml(clipId)}</div>` +
+          `<div style="font-size:10px;color:var(--muted);">${lineCount} line${lineCount === 1 ? '' : 's'} · ${row.cinematic_verify?.shotCutsObserved != null ? row.cinematic_verify.shotCutsObserved + ' cut(s)' : ''}</div>`;
+      } else {
+        label = `<div style="font-weight:600;">Ch${row.chapter} L${row.line}</div>`;
+      }
+
+      // Per-line tiers as colored letter boxes for cinematic
+      let perLineDots = '';
+      if (isCinematic && row.cinematic_verify?.linesVerified) {
+        perLineDots = row.cinematic_verify.linesVerified.map(l => {
+          const c = l.tier === 'accept' ? 'var(--green)' : l.tier === 'review' ? '#d4b300' : '#e55';
+          const speakerWarn = !l.speaker_match ? '⚠' : '';
+          return `<span title="L${l.line_number}: ${escapeHtml(l.expected).slice(0, 40)}... → ${escapeHtml(l.transcribed_segment).slice(0, 40)}... (${l.similarity}%)" style="display:inline-block;width:14px;height:14px;background:${c};color:white;border-radius:2px;font-size:9px;line-height:14px;text-align:center;margin-right:2px;font-weight:600;">${l.line_number}${speakerWarn}</span>`;
+        }).join('');
+      }
+
+      tr.innerHTML = `
+        <td style="padding:8px;">${label}</td>
+        <td style="padding:8px;"><span style="color:${tierColor};font-weight:600;">${tier}</span>${decisionLabel}${perLineDots ? '<div style="margin-top:4px;">' + perLineDots + '</div>' : ''}</td>
+        <td style="padding:8px;text-align:center;">${similarity}</td>
+        <td style="padding:8px;max-width:240px;font-size:11px;color:var(--muted);">${isCinematic && row.cinematic_verify?.linesVerified?.length
+          ? row.cinematic_verify.linesVerified.map(l => escapeHtml(l.expected || '')).join(' ').slice(0, 200)
+          : isCinematic ? 'multi-shot' : '—'}</td>
+        <td style="padding:8px;max-width:240px;font-size:11px;">${escapeHtml(transcript).slice(0, 120)}</td>
+        <td style="padding:8px;text-align:center;">
+          ${filePath ? `<a href="#" style="font-size:11px;" onclick="openClipFile('${filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">Play</a>` : ''}
+        </td>
+        <td style="padding:8px;text-align:center;">
+          ${tier === 'accept' ? '<span style="color:var(--muted);font-size:11px;">auto</span>' :
+            `<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;" onclick="verifyDecide(${row.id}, 'accepted')">Accept</button>
+             <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;margin-left:4px;color:#e55;" onclick="verifyDecide(${row.id}, 'rejected')">Redo</button>`
+          }
+        </td>`;
+      return tr;
+    }
+
+    function escapeHtml(s) {
+      return String(s || '').replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;',
+      })[c]);
+    }
+
+    async function openClipFile(filePath) {
+      // Use Electron's shell.openPath via main (we don't have that IPC yet — fallback to native)
+      try { window.open('file:///' + filePath.replace(/\\/g, '/')); }
+      catch (e) { addLog('Could not open clip: ' + e.message, 'warn'); }
+    }
+
+    async function verifyDecide(assetId, decision) {
+      await window.api.setVerifyDecision(assetId, decision);
+      addLog(`Clip ${assetId}: ${decision}`);
+      await refreshVerify();
+    }
+
+    async function approveVerify() {
+      addLog('Verify stage approved — proceeding...');
+      await window.api.approveVerify();
+    }
+
+    // ── Research ──
+    function renderResearchVideos(aiOriginals, remakeCandidates, fromCache = false) {
+      // Show cache badge if loaded from cache
+      if (fromCache) {
+        const searchingEl = document.getElementById('research-searching');
+        searchingEl.style.display = 'block';
+        searchingEl.innerHTML = '<p style="font-size:12px;color:var(--green);margin-bottom:8px;">Loaded from cache — no YouTube scraping needed.</p>';
+      }
+
+      // Render AI originals
+      const aiContainer = document.getElementById('research-ai-list');
+      aiContainer.innerHTML = '';
+      if (aiOriginals.length === 0) {
+        aiContainer.innerHTML = '<p style="font-size:11px;color:var(--muted);padding:8px;">No AI Nollywood videos found yet — this niche is wide open.</p>';
+      }
+      aiOriginals.forEach((v, i) => {
+        const div = document.createElement('div');
+        div.className = 'research-video' + (v._used ? ' used' : '');
+        div.innerHTML = `
+          <div class="rv-rank" style="color:var(--accent);">${i + 1}</div>
+          <div class="rv-info">
+            <div class="rv-title">${v.title}</div>
+            <div class="rv-meta">
+              <span class="rv-views">${v.viewsFormatted}</span> &middot;
+              ${v.channel} &middot; ${v.duration} &middot; ${v.uploadAge}
+            </div>
+          </div>`;
+        aiContainer.appendChild(div);
+      });
+
+      // Render remake candidates
+      const remakeContainer = document.getElementById('research-remake-list');
+      remakeContainer.innerHTML = '';
+      if (remakeCandidates.length === 0) {
+        remakeContainer.innerHTML = '<p style="font-size:11px;color:var(--muted);padding:8px;">No traditional hits found.</p>';
+      }
+      remakeCandidates.forEach((v, i) => {
+        const div = document.createElement('div');
+        div.className = 'research-video' + (v._used ? ' used' : '');
+        div.innerHTML = `
+          <div class="rv-rank" style="color:var(--yellow);">${i + 1}</div>
+          <div class="rv-info">
+            <div class="rv-title">${v.title} <span class="dedup-badge" style="background:#1a2a3a;border-color:var(--accent);color:var(--accent);">remake</span></div>
+            <div class="rv-meta">
+              <span class="rv-views">${v.viewsFormatted}</span> &middot;
+              ${v.channel} &middot; ${v.duration} &middot; ${v.uploadAge}
+            </div>
+          </div>`;
+        remakeContainer.appendChild(div);
+      });
+    }
+
+    function renderResearchPatterns(patterns) {
+      const container = document.getElementById('research-patterns-content');
+      container.innerHTML = '';
+
+      // Render selectable themes
+      const themesContainer = document.getElementById('research-themes-selectable');
+      themesContainer.innerHTML = '';
+      if (patterns.recurring_themes?.length) {
+        patterns.recurring_themes.forEach(t => {
+          const tag = document.createElement('span');
+          tag.className = 'theme-tag';
+          tag.textContent = t;
+          tag.onclick = () => {
+            tag.classList.toggle('selected');
+            if (tag.classList.contains('selected')) {
+              selectedThemes.push(t);
+            } else {
+              selectedThemes = selectedThemes.filter(s => s !== t);
+            }
+          };
+          themesContainer.appendChild(tag);
+        });
+      }
+
+      if (patterns.recurring_themes?.length) {
+        container.innerHTML += '<p style="font-size:12px;color:var(--muted);margin:8px 0 4px;">All Themes Found:</p>';
+        container.innerHTML += patterns.recurring_themes.map(t => `<span class="research-pattern-tag">${t}</span>`).join('');
+      }
+      if (patterns.winning_character_archetypes?.length) {
+        container.innerHTML += '<p style="font-size:12px;color:var(--muted);margin:8px 0 4px;">Character Archetypes:</p>';
+        container.innerHTML += patterns.winning_character_archetypes.map(a => `<span class="research-pattern-tag">${a}</span>`).join('');
+      }
+      if (patterns.audience_triggers?.length) {
+        container.innerHTML += '<p style="font-size:12px;color:var(--muted);margin:8px 0 4px;">Audience Triggers:</p>';
+        container.innerHTML += patterns.audience_triggers.map(t => `<span class="research-pattern-tag">${t}</span>`).join('');
+      }
+      if (patterns.content_formula) {
+        container.innerHTML += `<p style="font-size:12px;color:var(--yellow);margin:12px 0 4px;padding:8px;background:var(--bg3);border-radius:6px;">${patterns.content_formula}</p>`;
+      }
+      if (patterns.recommendations?.length) {
+        container.innerHTML += '<p style="font-size:12px;color:var(--muted);margin:8px 0 4px;">Recommendations:</p>';
+        patterns.recommendations.forEach(r => {
+          container.innerHTML += `<p style="font-size:12px;color:var(--text);padding:4px 0;">&#8226; ${r}</p>`;
+        });
+      }
+
+      document.getElementById('research-patterns').style.display = 'block';
+    }
+
+    async function approveResearch() {
+      const selections = { selectedThemes };
+      addLog(`Research approved with ${selectedThemes.length} themes selected`);
+      await window.api.approveResearch(selections);
+    }
+
+    async function skipResearch() {
+      addLog('Research skipped — proceeding without market data');
+      await window.api.approveResearch({ selectedThemes: [] });
+    }
+
+    // ── Settings ──
+    function toggleSettings() {
+      const modal = document.getElementById('settings-modal');
+      modal.classList.toggle('show');
+    }
+
+    async function loadSettings() {
+      const key = await window.api.getApiKey();
+      const geminiKey = await window.api.getGeminiKey();
+      const dir = await window.api.getProjectsDir();
+      document.getElementById('set-api-key').value = key || '';
+      document.getElementById('set-gemini-key').value = geminiKey || '';
+      document.getElementById('set-projects-dir').value = dir || '';
+    }
+
+    async function saveSettings() {
+      const key = document.getElementById('set-api-key').value;
+      const geminiKey = document.getElementById('set-gemini-key').value;
+      if (key) await window.api.setApiKey(key);
+      if (geminiKey) await window.api.setGeminiKey(geminiKey);
+      toggleSettings();
+      addLog('Settings saved.');
+    }
+
+    async function chooseProjectsDir() {
+      const dir = await window.api.setProjectsDir();
+      if (dir) document.getElementById('set-projects-dir').value = dir;
+    }
+
+    async function testApiKeys() {
+      const btn = document.getElementById('btn-test-api');
+      const resultsDiv = document.getElementById('api-test-results');
+
+      // Save keys first (so the test uses latest values)
+      const key = document.getElementById('set-api-key').value;
+      const geminiKey = document.getElementById('set-gemini-key').value;
+      if (key) await window.api.setApiKey(key);
+      if (geminiKey) await window.api.setGeminiKey(geminiKey);
+
+      btn.disabled = true;
+      btn.textContent = 'Testing...';
+      resultsDiv.style.display = 'block';
+      resultsDiv.innerHTML = '<span style="color:var(--muted);">Testing API connectivity...</span>';
+
+      try {
+        const results = await window.api.testApiKeys();
+        let html = '';
+
+        // Claude result
+        if (results.claude?.ok) {
+          html += '<div style="color:#4ade80;">&#10003; Claude API — Connected</div>';
+        } else {
+          html += `<div style="color:#f87171;">&#10007; Claude API — ${results.claude?.error || 'Failed'}</div>`;
+        }
+
+        // Gemini result
+        if (results.gemini?.ok) {
+          html += '<div style="color:#4ade80;">&#10003; Gemini API — Connected</div>';
+        } else if (!document.getElementById('set-gemini-key').value) {
+          html += '<div style="color:#fbbf24;">&#9888; Gemini API — No key set (will use browser fallback)</div>';
+        } else {
+          html += `<div style="color:#f87171;">&#10007; Gemini API — ${results.gemini?.error || 'Failed'}</div>`;
+        }
+
+        // Overall verdict
+        if (results.claude?.ok) {
+          html += '<div style="margin-top:8px;color:var(--muted);">Ready to run the pipeline.</div>';
+        } else {
+          html += '<div style="margin-top:8px;color:#f87171;">Fix the Claude API key before running the pipeline.</div>';
+        }
+
+        resultsDiv.innerHTML = html;
+      } catch (e) {
+        resultsDiv.innerHTML = `<div style="color:#f87171;">Test failed: ${e.message}</div>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Test API Keys';
+    }
+
+    // ── Log ──
+    function addLog(message, level = 'info') {
+      const container = document.getElementById('log-container');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${level}`;
+      const ts = new Date().toLocaleTimeString();
+      entry.innerHTML = `<span class="ts">[${ts}]</span> ${message}`;
+      container.appendChild(entry);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    // ── Publish Stage ──
+    function switchPublishTab(tab) {
+      document.querySelectorAll('.publish-tab-content').forEach(el => el.style.display = 'none');
+      document.querySelectorAll('.publish-tab').forEach(el => el.classList.remove('active'));
+      document.getElementById(`publish-tab-${tab}`).style.display = 'block';
+      document.querySelector(`.publish-tab[data-tab="${tab}"]`).classList.add('active');
+    }
+
+    function showPublishView(data) {
+      standalonePublishMode = false;
+      document.getElementById('publish-project-bar').style.display = 'none';
+      document.getElementById('publish-tools').style.display = 'block';
+      document.getElementById('stepper').style.display = 'flex';
+      showView('view-publish');
+      updateStepper('publish', 'running');
+      if (data.sceneCandidates && data.sceneCandidates.length > 0) {
+        renderSceneCandidates(data.sceneCandidates);
+      }
+    }
+
+    async function generatePublishThumbnail() {
+      const placement = document.getElementById('publish-placement').value;
+      const genre = document.getElementById('publish-genre').value;
+      const btn = document.querySelector('[onclick="generatePublishThumbnail()"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Launching browser...'; }
+      addLog('Generating thumbnail...', 'info');
+      try {
+        const result = await window.api.generateThumbnail({ placement, genre });
+        if (result && result.error === 'login-required') {
+          addLog(result.message, 'warn');
+          const preview = document.getElementById('publish-thumbnail-preview');
+          preview.innerHTML = `<div style="padding:20px;text-align:center;"><p style="color:var(--yellow);font-size:13px;margin-bottom:8px;">Login Required</p><p style="color:var(--muted);font-size:12px;">A browser window has opened. Please log in to Higgsfield, then click Generate Thumbnail again.</p></div>`;
+          if (btn) { btn.disabled = false; btn.textContent = 'Retry Generate'; }
+          return;
+        }
+        if (result && result.thumbnailPath) {
+          const preview = document.getElementById('publish-thumbnail-preview');
+          preview.innerHTML = `<img src="file://${result.thumbnailPath}?t=${Date.now()}" style="width:100%;height:100%;object-fit:contain;">`;
+          addLog('Thumbnail generated!', 'info');
+        }
+      } catch (e) {
+        addLog(`Thumbnail error: ${e.message}`, 'error');
+      }
+      if (btn) { btn.disabled = false; btn.textContent = 'Generate Thumbnail'; }
+    }
+
+    async function generatePublishSEO() {
+      const btn = document.getElementById('btn-gen-seo');
+      btn.disabled = true;
+      btn.textContent = 'Generating...';
+      addLog('Generating SEO metadata...', 'info');
+      try {
+        const result = await window.api.generateSEOMetadata();
+        if (result) {
+          populateYouTubeFields(result.youtube);
+          populateFacebookFields(result.facebook);
+          addLog('SEO metadata generated!', 'info');
+        }
+      } catch (e) {
+        addLog(`SEO error: ${e.message}`, 'error');
+      }
+      btn.disabled = false;
+      btn.textContent = 'Regenerate SEO Metadata';
+    }
+
+    function populateYouTubeFields(yt) {
+      if (!yt) return;
+      document.getElementById('publish-yt-loading').style.display = 'none';
+      document.getElementById('publish-yt-fields').style.display = 'block';
+      document.getElementById('publish-yt-title').value = yt.title || '';
+      document.getElementById('publish-yt-title-short').value = yt.titleShort || '';
+      document.getElementById('publish-yt-hashtags').value = (yt.hashtags || []).join(' ');
+      document.getElementById('publish-yt-description').value = yt.description || '';
+      document.getElementById('publish-yt-tags').value = (yt.tags || []).join(', ');
+    }
+
+    function populateFacebookFields(fb) {
+      if (!fb) return;
+      document.getElementById('publish-fb-loading').style.display = 'none';
+      document.getElementById('publish-fb-fields').style.display = 'block';
+      document.getElementById('publish-fb-caption').value = fb.caption || '';
+      document.getElementById('publish-fb-hashtags').value = (fb.hashtags || []).join(' ');
+    }
+
+    async function saveYouTubeEdits() {
+      const fields = {
+        title: document.getElementById('publish-yt-title').value,
+        titleShort: document.getElementById('publish-yt-title-short').value,
+        hashtags: document.getElementById('publish-yt-hashtags').value.split(/\s+/).filter(Boolean),
+        description: document.getElementById('publish-yt-description').value,
+        tags: document.getElementById('publish-yt-tags').value.split(',').map(t => t.trim()).filter(Boolean),
+      };
+      await window.api.updatePlatformMetadata('youtube', fields);
+      addLog('YouTube metadata saved', 'info');
+    }
+
+    async function saveFacebookEdits() {
+      const fields = {
+        caption: document.getElementById('publish-fb-caption').value,
+        hashtags: document.getElementById('publish-fb-hashtags').value.split(/\s+/).filter(Boolean),
+      };
+      await window.api.updatePlatformMetadata('facebook', fields);
+      addLog('Facebook metadata saved', 'info');
+    }
+
+    async function approvePublish() {
+      const result = await window.api.approvePublish();
+      addLog('Publish approved — output package finalized', 'info');
+      // In standalone mode, update the status badge
+      if (result && result.mode === 'standalone') {
+        const statusEl = document.getElementById('publish-project-status');
+        if (statusEl) statusEl.innerHTML = '<span style="color:var(--green);">Published!</span>';
+      }
+    }
+
+    // ── Standalone Publish ──
+    let standalonePublishMode = false;
+
+    async function openStandalonePublish() {
+      standalonePublishMode = true;
+
+      // Hide the pipeline stepper — Publish is its own workspace
+      document.getElementById('stepper').style.display = 'none';
+
+      // Always show the publish view immediately
+      document.getElementById('publish-project-bar').style.display = 'block';
+      document.getElementById('publish-tools').style.display = 'none'; // hide tools until project loaded
+      showView('view-publish');
+      resetPublishFields();
+
+      const selector = document.getElementById('publish-project-selector');
+      selector.innerHTML = '<option value="">Select a project...</option>';
+      const statusEl = document.getElementById('publish-project-status');
+      statusEl.textContent = 'Loading projects...';
+
+      try {
+        const projects = await window.api.getPublishableProjects();
+        if (!projects || projects.length === 0) {
+          statusEl.innerHTML = '<span style="color:var(--yellow);">No projects with completed scene images yet.</span> Complete a pipeline run first to generate scenes, then come back here.';
+          return;
+        }
+
+        projects.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          const badges = [];
+          if (p.sceneCount) badges.push(`${p.sceneCount} scenes`);
+          if (p.published_at) badges.push('published');
+          else if (p.thumbnail_path) badges.push('has thumbnail');
+          opt.textContent = `${p.title || 'Untitled'}${badges.length ? ' (' + badges.join(', ') + ')' : ''}`;
+          selector.appendChild(opt);
+        });
+
+        statusEl.textContent = `${projects.length} project${projects.length > 1 ? 's' : ''} available — select one above`;
+
+        // Auto-select if only one
+        if (projects.length === 1) {
+          selector.value = projects[0].id;
+          await switchPublishProject(projects[0].id);
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error loading projects: ${e.message}</span>`;
+      }
+    }
+
+    function exitStandalonePublish() {
+      standalonePublishMode = false;
+      // Restore stepper
+      document.getElementById('stepper').style.display = 'flex';
+      document.getElementById('publish-project-bar').style.display = 'none';
+      document.getElementById('publish-tools').style.display = 'block';
+      showView('view-launcher');
+    }
+
+    async function switchPublishProject(projectId) {
+      if (!projectId) {
+        resetPublishFields();
+        document.getElementById('publish-tools').style.display = 'none';
+        return;
+      }
+
+      const statusEl = document.getElementById('publish-project-status');
+      statusEl.textContent = 'Loading project...';
+
+      try {
+        const result = await window.api.loadPublishProject(projectId);
+        if (!result || !result.success) {
+          statusEl.innerHTML = `<span style="color:var(--red);">${result?.reason || 'Failed to load project'}</span>`;
+          document.getElementById('publish-tools').style.display = 'none';
+          return;
+        }
+
+        // Show the tools now that a project is loaded
+        document.getElementById('publish-tools').style.display = 'block';
+        statusEl.textContent = `${result.sceneCount} scene image${result.sceneCount > 1 ? 's' : ''} available`;
+
+        // Load existing publish data if any
+        const ps = result.project;
+        if (ps) {
+          if (ps.thumbnailPath) {
+            const preview = document.getElementById('publish-thumbnail-preview');
+            preview.innerHTML = `<img src="file://${ps.thumbnailPath}?t=${Date.now()}" style="width:100%;height:100%;object-fit:contain;">`;
+          }
+          if (ps.youtubeMetadata) populateYouTubeFields(ps.youtubeMetadata);
+          if (ps.facebookMetadata) populateFacebookFields(ps.facebookMetadata);
+          if (ps.publishedAt) {
+            statusEl.innerHTML += ` &mdash; <span style="color:var(--green);">Published ${new Date(ps.publishedAt).toLocaleDateString()}</span>`;
+          }
+        }
+
+        // Score scene candidates in the background
+        const grid = document.getElementById('publish-scene-grid');
+        grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>';
+        try {
+          const candidates = await window.api.scoreSceneThumbnails();
+          if (candidates && candidates.length > 0) {
+            renderSceneCandidates(candidates);
+          } else {
+            grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">No scene images on disk</div>';
+          }
+        } catch (se) {
+          grid.innerHTML = `<div style="color:var(--red);font-size:11px;grid-column:span 2;">Scene scoring failed: ${se.message}</div>`;
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+      }
+    }
+
+    function renderSceneCandidates(candidates) {
+      const grid = document.getElementById('publish-scene-grid');
+      grid.innerHTML = '';
+      candidates.forEach((c, i) => {
+        const div = document.createElement('div');
+        div.style.cssText = 'cursor:pointer;border:2px solid transparent;border-radius:6px;overflow:hidden;position:relative;';
+        if (i === 0) div.style.borderColor = 'var(--accent)';
+        div.innerHTML = `<img src="file://${c.path}" style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;">
+          <div style="position:absolute;bottom:2px;right:4px;font-size:10px;background:rgba(0,0,0,0.7);padding:1px 4px;border-radius:3px;color:var(--green);">${c.score}/10</div>`;
+        div.onclick = () => {
+          grid.querySelectorAll('div').forEach(d => d.style.borderColor = 'transparent');
+          div.style.borderColor = 'var(--accent)';
+          window.api.setThumbnailScene(c.assetId || c.path);
+        };
+        grid.appendChild(div);
+      });
+    }
+
+    function resetPublishFields() {
+      // Reset thumbnail preview
+      document.getElementById('publish-thumbnail-preview').innerHTML = '<span style="color:var(--muted);font-size:12px;">Generate to preview</span>';
+      // Reset scene grid
+      document.getElementById('publish-scene-grid').innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">Select a project to score scenes</div>';
+      // Reset YouTube
+      document.getElementById('publish-yt-loading').style.display = 'block';
+      document.getElementById('publish-yt-fields').style.display = 'none';
+      // Reset Facebook
+      document.getElementById('publish-fb-loading').style.display = 'block';
+      document.getElementById('publish-fb-fields').style.display = 'none';
+    }
+
+    // ── Project Logs Viewer ──
+    let projectLogOffset = 0;
+
+    async function populateProjectLogSelector() {
+      const selector = document.getElementById('project-log-selector');
+      // Keep the first "Select project..." option, remove the rest
+      while (selector.options.length > 1) selector.remove(1);
+
+      // Add active project if any
+      try {
+        const status = await window.api.getActiveProjectStatus();
+        if (status.hasActiveProject) {
+          const opt = document.createElement('option');
+          opt.value = status.projectId;
+          opt.textContent = `${status.title || 'Untitled'} (active)`;
+          selector.appendChild(opt);
+        }
+      } catch (_) {}
+
+      // Add completed projects
+      try {
+        const pipelineState = await window.api.getPipelineState();
+        if (pipelineState?.project?.id) {
+          // Current project already added above if active
+          const existing = Array.from(selector.options).map(o => o.value);
+          if (!existing.includes(pipelineState.project.id)) {
+            const opt = document.createElement('option');
+            opt.value = pipelineState.project.id;
+            opt.textContent = `${pipelineState.project.brief?.title || 'Current run'}`;
+            selector.appendChild(opt);
+          }
+        }
+      } catch (_) {}
+    }
+
+    async function loadProjectLogs(offset) {
+      const projectId = document.getElementById('project-log-selector').value;
+      const level = document.getElementById('project-log-level-filter').value;
+      const container = document.getElementById('project-log-container');
+      const countEl = document.getElementById('project-log-count');
+      const pagDiv = document.getElementById('project-log-pagination');
+
+      if (!projectId) {
+        container.innerHTML = '<div style="color:#888;padding:8px;">Select a project to view its logs.</div>';
+        countEl.textContent = '';
+        pagDiv.style.display = 'none';
+        return;
+      }
+
+      projectLogOffset = Math.max(0, offset || 0);
+      const options = { limit: 500, offset: projectLogOffset };
+      if (level) options.level = level;
+
+      try {
+        const [logs, totalCount] = await Promise.all([
+          window.api.getProjectLogs(projectId, options),
+          window.api.getProjectLogCount(projectId),
+        ]);
+
+        countEl.textContent = `${totalCount} total entries`;
+        container.innerHTML = '';
+
+        if (logs.length === 0) {
+          container.innerHTML = '<div style="color:#888;padding:8px;">No log entries found.</div>';
+          pagDiv.style.display = 'none';
+          return;
+        }
+
+        for (const log of logs) {
+          const entry = document.createElement('div');
+          entry.className = `log-entry ${log.level}`;
+          const ts = log.created_at ? new Date(log.created_at + 'Z').toLocaleString() : '';
+          entry.innerHTML = `<span class="ts">[${ts}]</span> <span class="log-level-tag" style="color:${log.level === 'error' ? '#f87171' : log.level === 'warn' ? '#fbbf24' : '#888'}">[${log.level.toUpperCase()}]</span> ${log.message}`;
+          container.appendChild(entry);
+        }
+
+        // Pagination
+        if (totalCount > 500) {
+          pagDiv.style.display = 'block';
+          const pageStart = projectLogOffset + 1;
+          const pageEnd = Math.min(projectLogOffset + logs.length, totalCount);
+          document.getElementById('project-log-page-info').textContent = `${pageStart}-${pageEnd} of ${totalCount}`;
+        } else {
+          pagDiv.style.display = 'none';
+        }
+
+        container.scrollTop = 0;
+      } catch (e) {
+        container.innerHTML = `<div style="color:#f87171;padding:8px;">Error loading logs: ${e.message}</div>`;
+      }
+    }
+
+    // ── Utility ──
+    function resetPipelineState() {
+      updateStepper('research', 'idle');
+      updateStatusBadge('idle');
+      state = { status: 'idle', currentStage: null, selectedTitle: null, currentApprovalGate: null, browserVisible: true };
+    }
+
+    function resetPipeline() {
+      resetPipelineState();
+      showView('view-launcher');
+      loadCacheStatus();
+    }
+
+    // ── Launcher State: Active Project + Cache Status ──
+    async function loadCacheStatus() {
+      try {
+        // Check for in-progress project first
+        const projectStatus = await window.api.getActiveProjectStatus();
+        const resumeCard = document.getElementById('resume-card');
+        const newStoryCard = document.getElementById('new-story-card');
+
+        if (projectStatus && projectStatus.hasActiveProject) {
+          // Show resume card, hide new story card
+          resumeCard.style.display = 'block';
+          newStoryCard.style.display = 'none';
+
+          // Prime the research-view badge so it's correct if the user resumes into Research
+          setResearchProjectBadge(projectStatus.durationPreset, projectStatus.aspectRatio, projectStatus.generatorMode);
+
+          document.getElementById('resume-title').textContent = `Continue: ${projectStatus.title}`;
+          document.getElementById('resume-stage-label').textContent = projectStatus.stageLabel;
+
+          // Show asset progress if available
+          const progressInfo = document.getElementById('resume-progress-info');
+          const aspectBadge = projectStatus.aspectRatio === '9:16' ? ' · 9:16 (vertical)' : ' · 16:9';
+          const modeBadge = projectStatus.generatorMode === 'cinematic' ? ' · cinematic' : '';
+          if (projectStatus.progress && projectStatus.progress.total > 0) {
+            progressInfo.textContent = `${projectStatus.progress.done}/${projectStatus.progress.total} assets complete${aspectBadge}${modeBadge}`;
+          } else {
+            const durMap = { '1min': '1 min', '2min': '2 min', '5min': '5 min', '10min': '10 min', '20min': '20 min', '30min': '30 min' };
+            const durLabel = (durMap[projectStatus.durationPreset] || '10 min') + ' movie';
+            progressInfo.textContent = durLabel + aspectBadge + modeBadge;
+          }
+
+          // Show resume context from previous session
+          const ctxDiv = document.getElementById('resume-context-info');
+          const ctx = projectStatus.resumeContext;
+          if (ctx) {
+            const lines = [];
+            if (ctx.interruptedAsset) {
+              lines.push(`<span style="color:var(--yellow);">&#9888; Interrupted:</span> ${ctx.interruptedAsset.label}`);
+            }
+            if (ctx.lastEvent) {
+              const when = new Date(ctx.lastEvent.at + 'Z');
+              const ago = _timeAgo(when);
+              lines.push(`Last action: ${ctx.lastEvent.type.replace(/_/g, ' ')} ${ctx.lastEvent.label || ''} <span style="opacity:0.6">(${ago})</span>`);
+            }
+            if (ctx.sessionStats.completed > 0 || ctx.sessionStats.failed > 0) {
+              const parts = [];
+              if (ctx.sessionStats.completed) parts.push(`${ctx.sessionStats.completed} done`);
+              if (ctx.sessionStats.failed) parts.push(`<span style="color:var(--red)">${ctx.sessionStats.failed} failed</span>`);
+              if (ctx.sessionStats.deduped) parts.push(`${ctx.sessionStats.deduped} deduped`);
+              lines.push(`Previous session: ${parts.join(', ')}`);
+            }
+            if (lines.length > 0) {
+              ctxDiv.innerHTML = lines.join('<br>');
+              ctxDiv.style.display = 'block';
+            } else {
+              ctxDiv.style.display = 'none';
+            }
+          } else {
+            ctxDiv.style.display = 'none';
+          }
+          return;
+        }
+
+        // No active project — show new story card
+        resumeCard.style.display = 'none';
+        newStoryCard.style.display = 'block';
+
+        const poolPicker = document.getElementById('pool-picker');
+        const freshCard = document.getElementById('fresh-start-card');
+        const forceRefreshRow = document.getElementById('force-refresh-row');
+
+        // Load all active pools
+        const pools = (await window.api.listResearchPools()) || [];
+
+        if (pools.length === 0) {
+          poolPicker.style.display = 'none';
+          freshCard.style.display = 'block';
+          forceRefreshRow.style.display = 'none';
+          document.getElementById('btn-start-fresh').textContent = 'Start Research';
+          return;
+        }
+
+        // Render pool list — each pool gets its own card with Use/Delete actions
+        poolPicker.style.display = 'block';
+        freshCard.style.display = 'none';
+        forceRefreshRow.style.display = 'block';
+
+        const MAX_POOLS = 5;
+        document.getElementById('pool-picker-count').textContent = `(${pools.length}/${MAX_POOLS})`;
+
+        const list = document.getElementById('pool-list');
+        list.innerHTML = '';
+        const maxHours = 168;
+
+        pools.forEach((p, idx) => {
+          const remainPct = Math.min(100, Math.round((p.expiresInHours / maxHours) * 100));
+          const remainColor = remainPct > 30 ? 'var(--green)' : remainPct > 10 ? '#eab308' : '#ef4444';
+          const fetchDate = p.fetchedAt ? new Date(p.fetchedAt).toLocaleDateString() : '';
+          const fetchTime = p.fetchedAt ? new Date(p.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.style.cssText = `padding:16px;border:1px solid ${idx === 0 ? 'var(--green)' : 'var(--border)'};background:var(--surface);`;
+          const labelHtml = escapeHtml(p.label || ('Pool ' + p.poolId));
+          card.innerHTML =
+            '<div style="display:flex;gap:14px;align-items:flex-start;">' +
+              '<div style="flex:1;min-width:0;">' +
+                '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">' +
+                  '<span style="font-size:13px;font-weight:600;color:var(--text);">' +
+                    (idx === 0 ? '&#127918; ' : '') + labelHtml +
+                  '</span>' +
+                  (idx === 0 ? '<span style="font-size:9px;color:var(--green);background:rgba(34,197,94,0.15);padding:2px 6px;border-radius:4px;letter-spacing:0.04em;">NEWEST</span>' : '') +
+                '</div>' +
+                '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">' +
+                  p.totalVideos + ' videos · ' + p.storiesProduced + ' ' + (p.storiesProduced === 1 ? 'story' : 'stories') + ' produced · Fetched ' + fetchDate + ' ' + fetchTime +
+                '</div>' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                  '<div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;">' +
+                    '<div style="width:' + remainPct + '%;height:100%;background:' + remainColor + ';"></div>' +
+                  '</div>' +
+                  '<span style="font-size:10px;color:var(--muted);white-space:nowrap;">' + p.expiresInHours + 'h left</span>' +
+                '</div>' +
+              '</div>' +
+              '<div style="display:flex;flex-direction:column;gap:6px;">' +
+                '<button class="btn btn-primary" onclick="proceedWithPool(' + p.poolId + ')" style="font-size:11px;padding:8px 14px;">Use this pool</button>' +
+                '<button class="btn btn-ghost" onclick="removePool(' + p.poolId + ')" style="font-size:10px;padding:4px 10px;color:var(--muted);" title="Delete this pool">Delete</button>' +
+              '</div>' +
+            '</div>';
+          list.appendChild(card);
+        });
+
+      } catch (e) {
+        // Status not available, ignore
+        console.warn('loadCacheStatus error:', e);
+      }
+    }
+
+    // ── Event Handlers from Main Process ──
+    window.api.onPipelineEvent((event) => {
+      console.log('Pipeline event:', event);
+
+      // Refresh project log selector when a new project starts
+      if (event.type === 'stage' && event.stage === 'research') {
+        setTimeout(() => populateProjectLogSelector(), 1000);
+      }
+
+      switch (event.type) {
+        case 'stage':
+          updateStepper(event.stage, 'running');
+          updateStatusBadge('running');
+          if (event.stage === 'research') {
+            showView('view-research');
+            if (event.substage === 'youtube') {
+              document.getElementById('research-searching').style.display = 'block';
+              document.getElementById('research-analyzing').style.display = 'none';
+            } else if (event.substage === 'gemini') {
+              document.getElementById('research-searching').style.display = 'none';
+              document.getElementById('research-analyzing').style.display = 'block';
+            }
+          }
+          if (event.stage === 'script') {
+            showView('view-script');
+            document.getElementById('script-progress').style.display = 'block';
+            document.getElementById('script-approve-btns').style.display = 'none';
+          }
+          if (event.stage === 'portraits') showGenerationView('Generating Character Portraits...', 'portraits');
+          if (event.stage === 'elements-setup') {
+            // Elements + locations happen under elements-setup stage.
+            // Map to locations stepper tab so it's visible.
+            updateStepper('locations', 'running');
+          }
+          if (event.stage === 'scenes') showGenerationView('Generating Scene Images...', 'scenes');
+          if (event.stage === 'video') showGenerationView('Generating Video Clips (Veo 3.1 Lite)...', 'clips');
+          if (event.stage === 'verify') showVerifyRunning();
+          if (event.stage === 'assembly') showView('view-assembly');
+          if (event.stage === 'publish') showView('view-publish');
+          break;
+
+        case 'research-videos':
+          renderResearchVideos(event.aiOriginals || [], event.remakeCandidates || [], event.fromCache || false);
+          if (event.fromCache) {
+            addLog(`Loaded ${(event.all||[]).length} videos from cache (expires in ${event.cacheStatus?.expiresInHours || '?'}h)`);
+          } else {
+            addLog(`Found ${(event.aiOriginals||[]).length} AI originals + ${(event.remakeCandidates||[]).length} remake candidates`);
+          }
+          break;
+
+        case 'research-complete':
+          document.getElementById('research-searching').style.display = 'none';
+          document.getElementById('research-analyzing').style.display = 'none';
+          document.getElementById('research-results').style.display = 'block';
+          if (event.data?.patterns) {
+            renderResearchPatterns(event.data.patterns);
+          }
+          addLog('Research analysis complete');
+          break;
+
+        case 'titles-ready':
+          showView('view-titles');
+          renderTitles(event.titles);
+          updateStepper('script', 'waiting_approval');
+          updateStatusBadge('waiting_approval');
+          break;
+
+        case 'waiting':
+          const gateStageMap = { title: 'script', script: 'script', research: 'research', 'elements-ready': 'portraits', 'locations-ready': 'locations' };
+          updateStepper(gateStageMap[event.gate] || event.gate, 'waiting_approval');
+          updateStatusBadge('waiting_approval');
+          if (event.gate === 'research') {
+            document.getElementById('research-searching').style.display = 'none';
+            document.getElementById('research-analyzing').style.display = 'none';
+            document.getElementById('research-results').style.display = 'block';
+          }
+          if (event.gate === 'dialogue-triage') {
+            // Show the Dialogue Triage tab before video generation
+            updateStepper('video', 'waiting_approval');
+            showDialogueTriagePanel();
+          } else if (event.gate === 'scenes' && window._sceneVerifyData && window._sceneVerifyData.length > 0) {
+            // Cinematic mode: show the Scene Verification tab instead of generic gen view
+            updateStepper('scenes', 'waiting_approval');
+            showSceneVerifyPanel();
+          } else if (event.gate === 'portraits' || event.gate === 'scenes' || event.gate === 'clips') {
+            // Ensure currentGenGate is set correctly — on resume, showGenerationView()
+            // may not have been called (no progress event), so set the gate here too
+            currentGenGate = event.gate;
+            // Show the generation view if not already visible (resume from approval gate)
+            const genTitles = {
+              portraits: 'Generating Character Portraits...',
+              scenes: 'Generating Scene Images...',
+              clips: 'Generating Video Clips (Veo 3.1 Lite)...',
+            };
+            showGenerationView(genTitles[event.gate], event.gate);
+            document.getElementById('gen-approve-btns').style.display = 'flex';
+          }
+          if (event.gate === 'prompt-preview') {
+            // TEMPORARY — remove when full production starts.
+            // Pre-gen prompt preview: show the final prompt + start frame before Kling generation.
+            // Ensure the generation view is visible (may be coming from dialogue triage or another view)
+            showGenerationView('Generating Video Clips (Kling 3.0)...', 'clips');
+            updateStepper('video', 'running');
+            const panel = document.getElementById('prompt-preview-panel');
+            const label = document.getElementById('prompt-preview-label');
+            const promptText = document.getElementById('prompt-preview-text');
+            const startFrame = document.getElementById('prompt-preview-startframe');
+            label.textContent = `${event.clipLabel || event.clipId} (${event.clipIndex + 1}/${event.clipTotal}) — ${event.durationSeconds || '?'}s`;
+            promptText.textContent = event.prompt || '(no prompt)';
+            if (event.startFramePath) {
+              startFrame.src = 'file://' + event.startFramePath;
+              startFrame.style.display = 'block';
+            } else {
+              startFrame.style.display = 'none';
+            }
+            // Hide clip-review if visible from previous iteration
+            document.getElementById('clip-review-panel').style.display = 'none';
+            panel.style.display = 'block';
+            panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+          if (event.gate === 'clip-review') {
+            // TEMPORARY — remove when full production starts.
+            // Per-clip approval gate — show video player + approve/stop buttons.
+            // Hide prompt-preview if still visible
+            document.getElementById('prompt-preview-panel').style.display = 'none';
+            const panel = document.getElementById('clip-review-panel');
+            const label = document.getElementById('clip-review-label');
+            const video = document.getElementById('clip-review-video');
+            label.textContent = `${event.clipLabel || event.clipId} (${event.clipIndex + 1}/${event.clipTotal})`;
+            if (event.clipPath) {
+              video.src = 'file://' + event.clipPath;
+              video.load();
+            }
+            panel.style.display = 'block';
+            // Scroll into view
+            panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+          if (event.gate === 'script' && event.review) {
+            // Review results arrived with the script approval gate — render panel
+            // and gate the approve buttons accordingly.
+            renderStructuralReview(event.review);
+            document.getElementById('script-approve-btns').style.display = 'flex';
+          }
+          if (event.gate === 'elements-ready') {
+            // Cinematic mode only — element automation completed (or partially
+            // succeeded). User must confirm elements exist in Higgsfield before
+            // proceeding to location generation.
+            showCinematicElementsPanel();
+          }
+          if (event.gate === 'locations-ready') {
+            // Cinematic mode — location images generated. Show thumbnail grid
+            // with orientation badges so user can verify before scene gen.
+            updateStepper('locations', 'waiting_approval');
+            showCinematicLocationsPanel();
+          }
+          if (event.gate === 'scene-images-ready') {
+            // Cinematic mode only — Cinema Studio scene image generation
+            // failed for some scenes; user needs to generate them manually.
+            showCinematicScenesPanel();
+          }
+          if (event.gate === 'verify') {
+            updateStepper('verify', 'waiting_approval');
+            showVerifyTable();
+          }
+          break;
+
+        case 'cinematic-manual-element-checklist':
+          // Pipeline emits this BEFORE the elements-ready gate. Populate the
+          // checklist panel with the names of elements the user needs to create.
+          renderCinematicElementChecklist(event.pending || []);
+          break;
+
+        case 'cinematic-locations-ready':
+          // Pipeline emits this BEFORE the locations-ready gate with image data.
+          // Also switch to the Locations view so the user can see thumbnails
+          // immediately — even if the pipeline errors before the gate fires.
+          renderCinematicLocationsGrid(event.locations || [], event.expectedAspect || '16:9');
+          updateStepper('locations', 'active');
+          showCinematicLocationsPanel();
+          break;
+
+        case 'cinematic-manual-scene-images':
+          // Pipeline emits this BEFORE the scene-images-ready gate. Populate
+          // the checklist with scenes that need manual Cinema Studio gens.
+          renderCinematicScenesChecklist(event.pending || []);
+          break;
+
+        case 'cinematic-scene-verification-data':
+          // Pipeline emits this BEFORE the scenes gate with location-grouped
+          // scene data for the Scene Verification tab.
+          renderSceneVerificationGrid(event.locationGroups || [], event.totalScenes || 0, event.doneScenes || 0);
+          break;
+
+        case 'dialogue-triage-data':
+          // Pipeline emits this BEFORE the dialogue-triage gate with clip
+          // dialogue/silent categorization for the Dialogue Triage tab.
+          window._dialogueTriageData = event;
+          renderDialogueTriage(event.triageItems || [], event.totalClips || 0, event.withDialogue || 0, event.silent || 0);
+          break;
+
+        case 'script-review-ready':
+          // Review lands BEFORE the waiting event in most flows — render panel
+          // pre-emptively so the user sees the result as soon as it's ready.
+          showView('view-script');
+          renderStructuralReview(event.review);
+          break;
+
+        case 'script-progress':
+          showView('view-script');
+          document.getElementById('script-progress').style.display = 'block';
+          // Animate progress bar
+          const len = event.partial?.length || 0;
+          const pct = Math.min(95, Math.round(len / 80)); // rough estimate
+          document.getElementById('script-progress-bar').style.width = pct + '%';
+          break;
+
+        case 'script-ready':
+          showView('view-script');
+          updateStepper('script', 'waiting_approval');
+          document.getElementById('script-progress').style.display = 'none';
+          document.getElementById('script-approve-btns').style.display = 'flex';
+          renderScript(event.script);
+          break;
+
+        case 'progress':
+          if (event.stage === 'verify') {
+            updateVerifyProgress(event.current, event.total);
+          } else {
+            updateGenProgress(event.current, event.total);
+          }
+          break;
+
+        case 'portrait-complete':
+        case 'scene-complete':
+          addAssetThumb(event.index, event.path, 'image');
+          break;
+
+        case 'clip-complete':
+          addAssetThumb(event.index, null, 'video');
+          break;
+
+        case 'assembly-progress':
+          if (event.progress) {
+            const aText = event.progress.step === 'complete' ? 'Complete!' :
+              `${event.progress.step}: ${event.progress.current || 0}/${event.progress.total || '...'}`;
+            document.getElementById('assembly-progress-text').textContent = aText;
+            if (event.progress.step === 'processing') {
+              const pct = Math.round((event.progress.current / event.progress.total) * 80);
+              document.getElementById('assembly-progress-bar').style.width = pct + '%';
+            } else if (event.progress.step === 'complete') {
+              document.getElementById('assembly-progress-bar').style.width = '100%';
+            }
+          }
+          break;
+
+        case 'assembly-complete':
+          // Assembly done but pipeline continues to record story
+          break;
+
+        case 'publish-ready':
+          showPublishView(event);
+          updateStepper('publish', 'running');
+          updateStatusBadge('waiting');
+          break;
+
+        case 'thumbnail-generated':
+        case 'seo-generated':
+          // UI updates handled in the generate functions
+          break;
+
+        case 'publish-status':
+          addLog(event.message || '', 'info');
+          // Update the generate button text if launching browser
+          const genBtn = document.querySelector('[onclick="generatePublishThumbnail()"]');
+          if (genBtn && genBtn.disabled) {
+            genBtn.textContent = event.message || 'Generating...';
+          }
+          break;
+
+        case 'pipeline-complete':
+          showView('view-complete');
+          updateStepper('export', 'complete');
+          updateStatusBadge('complete');
+          if (event.project?.dir) document.getElementById('output-path').textContent = event.project.dir;
+
+          // Mode/aspect/duration badge — mirror values from the research-view
+          // badge (which loadCacheStatus + setResearchProjectBadge populate).
+          try {
+            const m = document.getElementById('research-badge-mode')?.textContent || 'staged';
+            const a = document.getElementById('research-badge-aspect')?.textContent || '16:9';
+            const d = document.getElementById('research-badge-duration')?.textContent || '10 min';
+            const cmBadge = document.getElementById('complete-mode-badge');
+            if (cmBadge) {
+              document.getElementById('complete-badge-mode').textContent = m;
+              document.getElementById('complete-badge-aspect').textContent = a;
+              document.getElementById('complete-badge-duration').textContent = d;
+              cmBadge.style.display = 'inline-block';
+            }
+          } catch (_) {}
+
+          // Show pool status + Next Story button
+          const cs = event.cacheStatus;
+          const cacheDiv = document.getElementById('complete-cache-status');
+          const nextBtn = document.getElementById('btn-next-story');
+          if (cs && cs.hasCache) {
+            const stories = cs.storiesProduced || 0;
+            cacheDiv.innerHTML = `<div class="cache-status active" style="display:inline-block;"><div class="cache-label" style="color:var(--green);">Research Pool Active</div><div class="cache-detail">${cs.totalVideos} videos · ${stories} stories produced · Expires in ${cs.expiresInHours}h</div></div>`;
+            nextBtn.style.display = 'inline-block';
+            nextBtn.textContent = 'Next Story';
+          } else {
+            cacheDiv.innerHTML = '';
+            nextBtn.style.display = 'inline-block';
+            nextBtn.textContent = 'New Story (Fresh Research)';
+          }
+          break;
+
+        case 'error':
+          updateStatusBadge('error');
+          addLog(event.message, 'error');
+          alert(`Pipeline Error: ${event.message}`);
+          break;
+
+        case 'session-expired':
+          updateStatusBadge('paused');
+          addLog('Session expired — log into Higgsfield in the browser, then click Resume.', 'warn');
+          break;
+
+        case 'paused':
+          updateStatusBadge('paused');
+          break;
+
+        case 'resumed':
+          updateStatusBadge('running');
+          break;
+
+        case 'resume-context': {
+          const ctx = event.context;
+          if (ctx?.interruptedAsset) {
+            addLog(`[RESUME] Previous session interrupted during: ${ctx.interruptedAsset.label}`, 'warn');
+          }
+          if (ctx?.sessionStats) {
+            const s = ctx.sessionStats;
+            if (s.completed > 0 || s.failed > 0) {
+              addLog(`[RESUME] Previous session: ${s.completed} completed, ${s.failed} failed, ${s.deduped} deduped`);
+            }
+          }
+          if (ctx?.lastEvent) {
+            addLog(`[RESUME] Last action: ${ctx.lastEvent.type} — ${ctx.lastEvent.label || ctx.lastEvent.stage || ''}`);
+          }
+          break;
+        }
+
+        case 'cancelled':
+          updateStatusBadge('idle');
+          showView('view-launcher');
+          updateStepper('research', 'idle');
+          break;
+
+        case 'dedup-data':
+          renderDedupHistory(event.stories);
+          break;
+      }
+    });
+
+    window.api.onLogMessage((msg) => {
+      addLog(msg.message, msg.level);
+    });
+
+    // ── Dedup History ──
+    function renderDedupHistory(stories) {
+      const container = document.getElementById('dedup-history-list');
+      const wrapper = document.getElementById('dedup-history');
+      if (!stories || stories.length === 0) {
+        wrapper.style.display = 'none';
+        return;
+      }
+      wrapper.style.display = 'block';
+      container.innerHTML = '';
+      stories.slice(-10).reverse().forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'dedup-item';
+        div.innerHTML = `<span class="dedup-title">${s.title}</span><span class="dedup-date">${(s.date || '').slice(0, 10)}</span>`;
+        container.appendChild(div);
+      });
+    }
+
+    async function loadDedupHistory() {
+      try {
+        const stories = await window.api.getProducedStories();
+        renderDedupHistory(stories);
+      } catch (e) {
+        // dedup not available yet, ignore
+      }
+    }
+
+    // ── Init ──
+    loadSettings();
+    loadDedupHistory();
+    loadCacheStatus();
+    populateProjectLogSelector();
+    showView('view-launcher');
+    updateStepper('research', 'idle');
+    updateDurationInfo();  // Populate the duration+aspect summary text on first render
+  </script>
+</body>
+</html>

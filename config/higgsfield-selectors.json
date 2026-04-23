@@ -1,0 +1,163 @@
+{
+  "_instructions": "These selectors were mapped from the live Higgsfield AI interface on April 12, 2026. Update if the UI changes.",
+  "_lastVerified": "2026-04-12",
+  "_notes": {
+    "promptInputs": "Image page uses contenteditable div (#hf:tour-image-prompt), video page uses div[role='textbox']. Both need click→selectAll→delete→type workflow, NOT innerText assignment.",
+    "fileUploads": "File inputs are hidden 1x1 pixel elements. Use Playwright setInputFiles() directly on them.",
+    "modelSelection": "Image: model is baked into the URL path (/image/nano_banana_2). Video: Veo 3.1 Lite may already be selected — check before clicking through model picker.",
+    "audioToggle": "Veo 3.1 Lite: audio is a checkbox input that defaults to ON. Verify checked === true before proceeding.",
+    "imageDownload": "Click history card to open lightbox → Download button in right panel. Images from images.higgs.ai CDN.",
+    "videoDownload": "Videos play inline (no lightbox). Extract <video src> from d8j0ntlcm91z4.cloudfront.net or use hover overlay download button.",
+    "referenceUpload": "Up to 14 dynamic slots (56x56 each) with hidden file inputs. New slots appear as existing ones are filled. Filled slots show img thumbnail + close button (24x24, top-right).",
+    "startFrameUpload": "Single file input in label (259x119) on video page. setInputFiles() directly.",
+    "timing": {
+      "imageGeneration": "~30 seconds per image (Queued → Generating → Complete)",
+      "videoGeneration": "~90 seconds per 8s clip (Queued → Generating → Complete)",
+      "creditCost": "Video: 12 credits per clip (8s, 720p, 16:9, audio). Image: free with Unlimited mode."
+    }
+  },
+
+  "imageGeneration": {
+    "url": "https://higgsfield.ai/ai/image?model=nano-banana-pro",
+    "_urlHistory": [
+      "/image/nano_banana_2 (pre-April 2026)",
+      "/image/nano-banana-pro (April 2026)",
+      "/ai/image?model=nano-banana-pro (April 20 2026 — current)"
+    ],
+    "_modelNote": "Model is pre-selected via query param. Old path-based URLs (/image/nano-banana-pro) now redirect to /ai-image landing page (no gen UI). Always use /ai/image?model=nano-banana-pro.",
+    "promptInput": "#hf\\:tour-image-prompt",
+    "promptInputFallback": "div[role='textbox']",
+    "generateButton": "#hf\\:image-form-submit",
+    "generateButtonFallback": "button[type='submit']",
+    "aspectRatioSelect": "select",
+    "aspectRatioSelectIndex": 0,
+    "_aspectRatioNote": "Nano Banana Pro supports: auto, 1:1, 3:4, 4:3, 2:3, 3:2, 9:16, 16:9, 5:4, 4:5, 21:9. Native <select> is hidden behind a custom dark popup but selectOption() works end-to-end (confirmed Session 8 DevTools test). Caller passes aspectRatio as a parameter to generateImage(). Select index [0] is aspect, [1] is resolution.",
+    "resolutionSelect": "select",
+    "resolutionSelectIndex": 1,
+    "resolutionValue": "2k",
+    "imageReferenceFileInputs": ".size-14 input[type='file'], [class*='shrink-0'][class*='size-14'] input[type='file']",
+    "_imageReferenceFileInputsFallback": "input[type='file'][accept*='image']",
+    "_referenceNote": "Nano Banana supports up to 14 reference image slots. Slots may load dynamically — new empty slots appear as existing ones are filled. Use setInputFiles() on each. They accept: image/jpeg, image/jpg, image/png, image/webp",
+    "_referenceSlotStructure": {
+      "maxSlots": 14,
+      "containerClass": "relative rounded-xl bg-neutral-surface-subtle transition group shrink-0 size-14",
+      "containerSize": "56x56px",
+      "emptyState": "SVG upload icon inside label > button.size-full",
+      "filledState": "img thumbnail in div.absolute.inset-0 + close button (24x24) at top-right",
+      "closeButtonSelector": "slot container > button (not .size-full, width <= 24px)",
+      "thumbnailConfirmation": "Wait for img element to appear inside slot container after upload",
+      "dynamicSlots": "New empty slots appear after filling existing ones — may need to re-query input[type='file'] after each upload"
+    },
+    "historyGrid": ".overflow-x-hidden.grid",
+    "historyCardClick": ".overflow-x-hidden.grid > div:first-child",
+    "_lightboxStructure": {
+      "rightPanel": "Details tab with PROMPT, INFORMATION sections",
+      "overlayContainer": ".fixed.top-0.left-0.w-full.h-full.z-\\[100\\]",
+      "rightPanelSection": ".fixed.top-0 section",
+      "promptTextSelector": ".attribute-text-value",
+      "_promptTextNote": "div.attribute-text-value.w-full.text-wrap.break-words — contains the generation prompt. May be truncated; click 'See all' button to expand.",
+      "seeAllButton": "button:has-text('See all')",
+      "_seeAllNote": "Appears below prompt when text is long. Parent is a <button> with cursor-pointer. Click to expand full prompt text.",
+      "infoLabels": ["Model", "Moodboard", "Quality", "Size"],
+      "_historyCardStructure": {
+        "cardTag": "aside.relative.group",
+        "clickTarget": "aside > button (first button, full card size e.g. 376x501)",
+        "_clickNote": "The full-size invisible button inside aside is the click target to open the lightbox. Single click opens it.",
+        "smallButtons": ["heart count button (67x40)", "Recreate button (67x32)"],
+        "authorLink": "a tag with user profile link"
+      },
+      "actionButtons": ["Animate (yellow, button-brand)", "Publish", "Open in", "Reference", "Download"],
+      "downloadButtonText": "Download",
+      "downloadButtonClass": "button button-md button-secondary-reverted",
+      "closeMethod": "Escape key",
+      "bottomToolbar": ["Overview", "Upscale", "Enhancer", "Relight", "Inpaint", "Angles"]
+    },
+    "_hoverOverlayButtons": {
+      "containerClass": "absolute top-2.5 right-2.5 z-10 pointer-events-auto flex flex-col",
+      "buttonClass": "button button-sm button-primary-reverted rounded-full w-8",
+      "buttonOrder": ["heart (favorite)", "download (arrow down)", "copy", "three-dot menu"],
+      "downloadSvgPathStart": "M3.75 14"
+    },
+    "imageCdnHostname": "images.higgs.ai",
+    "_imageCdnParams": "?default=&output=&url=ORIGINAL_URL&w=WIDTH&q=QUALITY",
+    "generationComplete": ".result-image, [data-testid='result-ready']",
+    "generationError": ".error-message, [data-testid='generation-error']",
+    "downloadButton": "button:has-text('Download'), a[download]",
+    "resultImage": "img[src*='higgs.ai']",
+    "historyTab": "button:has-text('History')"
+  },
+
+  "videoGeneration": {
+    "url": "https://higgsfield.ai/create/video",
+    "_modelNote": "Default model may vary. Check current selection and switch to Veo 3.1 Lite if needed via Model button > Google Veo > Google Veo 3.1 Lite.",
+    "_modelAlreadySelected": "If page shows 'Veo 3.1 Lite' in the model area, skip model selection entirely.",
+    "modelButton": "button:has-text('Model')",
+    "modelArea": "div containing 'Google Veo 3.1 Lite' text in left panel",
+    "modelCategory": "text='Google Veo'",
+    "modelOption": "text='Google Veo 3.1 Lite'",
+    "changeButton": "button:has-text('Change')",
+    "promptInput": "div[role='textbox']",
+    "_promptPlaceholder": "Describe your video scene...",
+    "generateButton": "button[type='submit']",
+    "startFrameFileInput": "input[type='file']",
+    "_startFrameNote": "Single file input accepts: image/jpeg, image/jpg, image/png, image/webp. MUST use filechooser interception (click label → filechooser.setFiles). setInputFiles() bypasses React state.",
+    "_startFrameUploadArea": {
+      "labelSize": "259x119px",
+      "labelText": "Upload image or generate it",
+      "subtext": "PNG, JPG or Paste from clipboard",
+      "confirmationNote": "After upload, image preview appears in the upload area replacing the icon"
+    },
+    "audioToggle": "Speaker icon with 'On' text",
+    "audioCheckbox": "input[type='checkbox']",
+    "_audioNote": "Audio defaults to ON when Veo 3.1 Lite is selected. The checkbox near 'On' text. Verify checked=true.",
+    "_settingsNote": "Video settings (duration, ratio, resolution) use BUTTONS with dropdown menus, NOT native <select> elements. Click the button to open dropdown, then click the option.",
+    "durationButton": "button:has-text('Duration'), button:has-text('8s')",
+    "durationValue": "8s",
+    "aspectRatioButton": "button:has-text('Ratio'), button:has-text('16:9'), button:has-text('Auto')",
+    "_aspectRatioNote": "Veo 3.1 Lite page also has a real native <select> underneath the chip-style popup (confirmed Session 8). generateVideo() uses page.$$('select')[0].selectOption(aspect) as the primary path; the button-based setVideoDropdownOption('Ratio') remains only as a fallback. Veo native select accepts: auto, 16:9, 9:16, 4:3, 3:4, 1:1, 21:9 — but the visible popup only exposes auto/16:9/9:16. Pipeline ships with 16:9 and 9:16 only.",
+    "resolutionButton": "button:has-text('Resolution'), button:has-text('720p')",
+    "resolutionValue": "720p",
+    "_videoDownloadNote": "Videos play inline in History tab (no lightbox). Can extract src from <video> element or use hover download button.",
+    "videoCdnHostname": "d8j0ntlcm91z4.cloudfront.net",
+    "_hoverOverlayButtons": {
+      "buttonClass": "button button-sm button-primary-reverted rounded-full w-8",
+      "buttonOrder": ["heart", "download", "copy", "three-dot menu"],
+      "downloadSvgPathStart": "M3.75 14"
+    },
+    "_bottomRowButtons": ["Rerun", "copy", "trash"],
+    "generationComplete": ".result-video, [data-testid='result-ready']",
+    "generationError": ".error-message, [data-testid='generation-error']",
+    "downloadButton": "button:has-text('Download'), a[download]",
+    "historyTab": "button:has-text('History')"
+  },
+
+  "auth": {
+    "loginIndicator": "a[href*='login'], button:has-text('Sign in'), button:has-text('Log in')",
+    "loggedInIndicator": "a[href='/asset/all'], button:has-text('Assets')"
+  },
+
+  "assetHistory": {
+    "_notes": {
+      "purpose": "Selectors for Higgsfield's Assets/All page used by inline auto-recovery and the CLI recover-from-history.js script. When local generation fails before we capture the CDN URL, the scraper opens this page, finds today's videos, matches them to our pending DB clips by prompt + timestamp, and downloads the orphans — saving credits.",
+      "discovery": "Initial selectors based on screenshots from April 2026. Refine after first live test session in DevTools.",
+      "urlPattern": "Each asset has a stable UUID: /asset/all/<uuid>. Use this as the cross-run dedup key (stored in project_assets.higgsfield_asset_id).",
+      "detailPanel": "Clicking a thumbnail opens a right-side panel with PROMPT, INFORMATION (Model, Quality, Size, Created), and action buttons (Recreate, Publish, Video edit, Download, Heart, Share, more). Likely also fires GET /api/asset/<uuid> with full metadata — check Network tab and prefer JSON over DOM scraping.",
+      "datePartitioning": "Page auto-groups by date with 'Today' / 'Yesterday' / 'X days ago' headers. Use this to scope scraping to a recent window without filtering client-side.",
+      "leftSidebar": "Filters: All Assets / Favorites / Tools (Image, Video, Audio counts shown in badges). Click 'Video' to scope to videos only."
+    },
+    "url": "https://higgsfield.ai/asset/all",
+    "videoFilterLink": "a:has-text('Video'), [class*='sidebar'] a:has-text('Video')",
+    "todaySectionHeader": "h2:has-text('Today'), [class*='date-header']:has-text('Today')",
+    "_todayItemSelector_PHASE1": "PLACEHOLDER — discover the per-thumbnail container selector during Phase 1 DevTools session. Likely something like '.asset-grid > div' or a data-attribute like '[data-asset-id]'.",
+    "thumbnailItem": ".asset-grid > div, [data-asset-id], [data-asset-uuid]",
+    "thumbnailLink": "a[href*='/asset/all/']",
+    "detailPanelOpen": "[role='dialog'], [class*='asset-detail'], [class*='lightbox']",
+    "detailPromptText": "[class*='prompt'] [class*='text'], div:has(> :text('PROMPT')) + *",
+    "detailCreatedAt": "div:has(> :text('Created')) + *, [class*='created']",
+    "detailModelLabel": "div:has(> :text('Model')) + *",
+    "detailDownloadButton": "button:has-text('Download'), a[download]:has-text('Download')",
+    "detailCloseButton": "button[aria-label*='close' i], button[aria-label*='dismiss' i]",
+    "_apiEndpoint_PHASE1": "PLACEHOLDER — check Network tab during Phase 1 for an XHR/fetch like GET /api/asset/<uuid> that returns JSON with cdn_url, prompt, created_at. If found, use this instead of DOM scraping (faster, more reliable).",
+    "videoCdnHostname": "d8j0ntlcm91z4.cloudfront.net"
+  }
+}

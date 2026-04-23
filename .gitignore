@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Project data (per-run outputs — large, user-specific)
+projects/
+
+# Logs
+*.log
+
+# Higgsfield browser session cookies (sensitive)
+higgsfield-session.json
+
+# Branding assets (binary, tracked separately if needed)
+config/branding*.png
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor config
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Electron build artifacts
+out/
+release/
+
+# Temporary test data
+bush-girl-*.json
+
+# Setup script (one-time use)
+setup-git.bat
