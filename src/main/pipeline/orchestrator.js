@@ -5102,21 +5102,9 @@ CRITICAL GUARDRAILS — you MUST follow these:
 4. NEVER make a shot direction LONGER than the original. Aim shorter.
 5. NEVER add new actions, new object interactions, or elaborate choreography.
 6. Keep ALL dialogue, camera directions, tone markers, and @ character references EXACTLY as-is.
-7. If ALL shot directions are physically possible AND grounded, return "NO_CHANGES_NEEDED" (nothing else).
-8. PROP GROUNDING: Any physical object a character interacts with (opens, drops, picks up, holds, slides, places, grabs, sets down, etc.) MUST be clearly visible in the scene image. If a shot direction references a prop/object that is NOT in the image:
-   - REMOVE the prop interaction entirely
-   - Replace with a character-body-only action: facial expression, hand gesture, posture shift, gaze direction
-   - Example: "slides open the vanity drawer and drops the gold earring inside" → "her hand curls on the vanity surface"
-   - The dialogue and emotional tone of the shot must be PRESERVED — only the phantom prop action changes
-   - This rule applies even if the prop is mentioned in the script/dialogue — if it's not VISIBLE in the image, the video model will hallucinate it
+7. If ALL shot directions are physically possible, return "NO_CHANGES_NEEDED" (nothing else).
 
-OUTPUT FORMAT — CRITICAL:
-- Return ONLY the modified prompt text. Nothing else.
-- Do NOT include any reasoning, analysis, step descriptions, headers, audit notes, checkmarks, or explanations.
-- Do NOT include "STEP 1", "STEP 2", "CONFIRMED", "Physically possible", or any commentary.
-- The output goes DIRECTLY to a video generation model — any non-prompt text will confuse it.
-- Start your response with the first line of the prompt (e.g. "Inside the master bedroom...") or "NO_CHANGES_NEEDED" or "BLOCKING_MISMATCH:".
-- Preserve exact formatting, line breaks, and structure of the original prompt. Change ONLY the specific body action phrases that are impossible or reference invisible props.`,
+OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed ones). Preserve exact formatting, line breaks, and structure. Change ONLY the specific body action phrases that are impossible.`,
             },
           ],
         }],
@@ -5133,31 +5121,42 @@ OUTPUT FORMAT — CRITICAL:
         this.log('[SHOT-RECONCILE] Stripped markdown code block wrapping');
       }
 
-      // ── Strip reasoning preamble if Vision included analysis before the actual prompt ──
-      // The actual prompt content starts with either the scene setting line or "Shot 1".
-      // Anything before that (STEP 1, STEP 2, audit notes, headers, ---) is reasoning noise.
-      // We need to strip it so only the clean prompt goes to Kling.
-      if (resultText.includes('STEP 1') || resultText.includes('**STEP') || resultText.includes('Position Check') || resultText.includes('CONFIRMED')) {
-        // Find where the actual prompt content starts
-        // Look for the first line that matches scene setting or Shot direction patterns
-        const promptStartPatterns = [
-          /^(Inside\b|In the\b|The\b|A\b|An\b|Exterior\b|Interior\b)/m,  // Scene setting lines
-          /^(CHARACTER POSITIONS)/m,  // Blocking preamble
-          /^Shot\s*1\s*\(/m,  // First shot direction
-        ];
-        let promptStartIdx = -1;
-        for (const pat of promptStartPatterns) {
-          const match = resultText.match(pat);
-          if (match && match.index !== undefined) {
-            if (promptStartIdx === -1 || match.index < promptStartIdx) {
-              promptStartIdx = match.index;
-            }
-          }
+      // ── Strip reasoning preamble from Vision response ──
+      // Vision often includes STEP 1/STEP 2 analysis before the actual prompt.
+      // The actual Kling prompt starts with "CHARACTER POSITIONS" (blocking preamble).
+      // If that's not in the response, the prompt starts with the scene setting line
+      // (the text right before "Shot 1"). We must preserve CHARACTER POSITIONS.
+      // Look for the actual blocking preamble format: "CHARACTER POSITIONS (matching start frame):"
+      // NOT the echoed instruction "IDENTIFY CHARACTER POSITIONS" from STEP 1
+      const charPosMatch = resultText.match(/CHARACTER POSITIONS \(matching start frame\):/);
+      const charPosIdx = charPosMatch ? resultText.indexOf(charPosMatch[0]) : -1;
+      if (charPosIdx > 0) {
+        // There's reasoning text before CHARACTER POSITIONS — strip it
+        this.log(`[SHOT-RECONCILE] Stripped ${charPosIdx} chars of reasoning preamble (before CHARACTER POSITIONS)`);
+        resultText = resultText.slice(charPosIdx).trim();
+      } else if (charPosIdx === -1) {
+        // Vision didn't include CHARACTER POSITIONS at all — it only returned shot directions.
+        // Find the first Shot direction or scene setting line.
+        const shotIdx = resultText.search(/^Shot\s*1\s*\(/m);
+        // Also look for scene setting lines that appear right before shots
+        const sceneLineIdx = resultText.search(/\n\n(Inside |In the |Exterior |Interior |The |A |An )/);
+        let promptStart = -1;
+        if (sceneLineIdx !== -1) {
+          // +2 to skip the \n\n
+          promptStart = sceneLineIdx + 2;
         }
-        if (promptStartIdx > 0) {
-          const stripped = resultText.slice(promptStartIdx).trim();
-          this.log(`[SHOT-RECONCILE] Stripped ${promptStartIdx} chars of reasoning preamble from response`);
-          resultText = stripped;
+        if (shotIdx !== -1 && (promptStart === -1 || shotIdx < promptStart)) {
+          promptStart = shotIdx;
+        }
+        if (promptStart > 0) {
+          this.log(`[SHOT-RECONCILE] Vision omitted CHARACTER POSITIONS — stripped ${promptStart} chars of reasoning, will re-prepend blocking preamble`);
+          resultText = resultText.slice(promptStart).trim();
+          // Re-prepend the CHARACTER POSITIONS from the original prompt so Kling gets blocking
+          const origCharPosMatch = prompt.match(/^(CHARACTER POSITIONS[^\n]*\.)\s*\n/s);
+          if (origCharPosMatch) {
+            resultText = origCharPosMatch[1] + '\n\n' + resultText;
+            this.log('[SHOT-RECONCILE] Re-prepended CHARACTER POSITIONS from original prompt');
+          }
         }
       }
 
@@ -5171,35 +5170,7 @@ OUTPUT FORMAT — CRITICAL:
 
       // ── Check for no-changes response ──
       if (resultText === 'NO_CHANGES_NEEDED' || resultText.includes('NO_CHANGES_NEEDED')) {
-        this.log('[SHOT-RECONCILE] Vision says no changes needed — checking prop grounding on original...');
-        // Even if Vision says no changes needed, check for phantom props in the original
-        // Vision might have missed them
-        const _quickPhantomCheck = () => {
-          const preambleText = (verifiedPositions || []).map(c => (c.position || '').toLowerCase()).join(' ');
-          const sceneSettingMatch = prompt.match(/^(.*?)(?=Shot\s*1)/s);
-          const sceneSettingText = sceneSettingMatch ? sceneSettingMatch[1].toLowerCase() : '';
-          const contextText = preambleText + ' ' + sceneSettingText;
-          const bodyWords = ['hand', 'hands', 'arm', 'arms', 'head', 'eyes', 'gaze', 'fist', 'finger', 'fingers', 'breath', 'jaw', 'shoulder', 'shoulders', 'lip', 'lips', 'back', 'chin', 'face', 'brow', 'knee', 'knees', 'palm', 'palms', 'wrist', 'chest', 'neck', 'lap', 'door', 'floor', 'wall', 'seat', 'chair', 'table', 'ground', 'surface'];
-          for (const shot of originalShots) {
-            const localPattern = /\b(opens?|closes?|slides?\s+open|drops?|picks?\s+up|grabs?|holds?|places?|sets?\s+down|lifts?|puts?\s+down|pulls?\s+out|takes?\s+out|hands?\s+over|pushes?)\s+(?:the\s+|a\s+|an\s+)?(\w+(?:\s+\w+)?)/gi;
-            let m;
-            while ((m = localPattern.exec(shot.shotBody.toLowerCase())) !== null) {
-              const propObj = m[2].trim();
-              const firstWord = propObj.split(/\s+/)[0];
-              if (bodyWords.includes(firstWord)) continue;
-              if (!contextText.includes(firstWord)) {
-                this.log(`[SHOT-RECONCILE] ⚠ PHANTOM PROP in original prompt: Shot ${shot.shotNum} — "${m[1]} ${propObj}" not in scene. Vision missed it.`);
-                return true;
-              }
-            }
-          }
-          return false;
-        };
-        if (_quickPhantomCheck()) {
-          this.log('[SHOT-RECONCILE] Original has phantom props but Vision said NO_CHANGES_NEEDED — logging for review');
-          // We can't fix it here without another Vision call — log and proceed
-          // The prop will likely cause hallucination but at least we have visibility
-        }
+        this.log('[SHOT-RECONCILE] All shot directions are physically valid — no changes needed');
         return prompt;
       }
 
@@ -5237,58 +5208,8 @@ OUTPUT FORMAT — CRITICAL:
         }
       }
 
-      // ── Prop grounding post-validation ──
-      // Detect prop interactions that reference objects not visible in the scene image.
-      // Checks BOTH reconciled output AND original — if original also has phantom props,
-      // falling back to original doesn't help, so we need a different strategy.
-      const _checkPhantomProps = (shotsToCheck, label) => {
-        const preambleText = (verifiedPositions || []).map(c => (c.position || '').toLowerCase()).join(' ');
-        const sceneSettingMatch = prompt.match(/^(.*?)(?=Shot\s*1)/s);
-        const sceneSettingText = sceneSettingMatch ? sceneSettingMatch[1].toLowerCase() : '';
-        const contextText = preambleText + ' ' + sceneSettingText;
-        const bodyWords = ['hand', 'hands', 'arm', 'arms', 'head', 'eyes', 'gaze', 'fist', 'finger', 'fingers', 'breath', 'jaw', 'shoulder', 'shoulders', 'lip', 'lips', 'back', 'chin', 'face', 'brow', 'knee', 'knees', 'palm', 'palms', 'wrist', 'chest', 'neck', 'lap', 'door', 'floor', 'wall', 'seat', 'chair', 'table', 'ground', 'surface'];
-        const phantoms = [];
-
-        for (const shot of shotsToCheck) {
-          const localPattern = /\b(opens?|closes?|slides?\s+open|drops?|picks?\s+up|grabs?|holds?|places?|sets?\s+down|lifts?|puts?\s+down|pulls?\s+out|takes?\s+out|hands?\s+over|pushes?)\s+(?:the\s+|a\s+|an\s+)?(\w+(?:\s+\w+)?)/gi;
-          let propMatch;
-          while ((propMatch = localPattern.exec(shot.shotBody.toLowerCase())) !== null) {
-            const propObj = propMatch[2].trim();
-            const firstWord = propObj.split(/\s+/)[0];
-            if (bodyWords.includes(firstWord)) continue;
-            if (!contextText.includes(firstWord)) {
-              phantoms.push({ shotNum: shot.shotNum, prop: propObj, verb: propMatch[1] });
-            }
-          }
-        }
-        if (phantoms.length > 0) {
-          for (const p of phantoms) {
-            this.log(`[SHOT-RECONCILE] PHANTOM PROP (${label}): Shot ${p.shotNum} — "${p.verb} ${p.prop}" not in scene`);
-          }
-        }
-        return phantoms;
-      };
-
-      if (!guardrailViolation) {
-        const reconPhantoms = _checkPhantomProps(reconciledShots, 'reconciled');
-        if (reconPhantoms.length > 0) {
-          // Check if the original ALSO has these phantom props
-          const origPhantoms = _checkPhantomProps(originalShots, 'original');
-          if (origPhantoms.length > 0) {
-            // Both have phantom props — Vision didn't strip them. Flag but DON'T fall back
-            // (original is equally bad). The Vision prompt instruction should catch this
-            // on subsequent runs as we iterate. Log for debugging.
-            this.log(`[SHOT-RECONCILE] ⚠ Phantom props in BOTH original (${origPhantoms.length}) and reconciled (${reconPhantoms.length}) — original is no better, proceeding with reconciled`);
-          } else {
-            // Reconciled introduced phantom props that weren't in original — reject
-            this.log('[SHOT-RECONCILE] Reconciled output introduced phantom props not in original — rejecting');
-            guardrailViolation = true;
-          }
-        }
-      }
-
       if (guardrailViolation) {
-        this.log('[SHOT-RECONCILE] Guardrail violated — falling back to original prompt');
+        this.log('[SHOT-RECONCILE] Guardrail violated — falling back to conservative fix (strip impossible actions only)');
         // Conservative fallback: just return the original prompt as-is
         // The preamble (from _injectVisionBlocking) already has correct positions,
         // so Kling will at least see the right CHARACTER POSITIONS even if shot
