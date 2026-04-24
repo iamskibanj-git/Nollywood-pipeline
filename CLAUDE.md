@@ -1870,6 +1870,8 @@ Too much body action competes with dialogue lip sync — observed pattern from c
 4. **Action verb cap:** Max 1 action verb per shot when dialogue is present. Max 2 for non-dialogue shots.
 5. **Character budget:** Reconciled prompt must respect Kling's 2500-char limit. Vision instructed to stay within original shot direction character count.
 6. **Post-validation check:** Code verifies response before accepting — if any shot grew >20% in word count or action verb count increased, reject and fall back to deleting the impossible action while keeping rest of shot intact.
+7. **Prop grounding (Session 26):** Any physical object a character interacts with (opens, drops, picks up, holds, slides, places, grabs, etc.) MUST be visible in the scene image. If a shot direction references a prop/object not in the image, the 3rd Vision pass removes the prop interaction and replaces with a character-body-only action (facial expression, hand gesture, posture shift). Example: "slides open the vanity drawer and drops the gold earring inside" → "her hand curls on the vanity surface." Post-validation code also checks: scans for prop-interaction verb patterns paired with objects not found in the blocking preamble or scene setting text. Three cases handled: (a) reconciled output has phantom props not in original → reject reconciliation; (b) both original AND reconciled have phantom props → proceed with reconciled (original is no better), log warning; (c) Vision says NO_CHANGES_NEEDED but original has phantom props → log warning for visibility. Known "safe" objects (body parts, furniture visible in most scenes like door/floor/wall/chair) are whitelisted to avoid false positives.
+8. **Reasoning preamble stripping (Session 26):** Vision's OUTPUT FORMAT instruction explicitly prohibits including analysis, step headers, audit notes, checkmarks, or any non-prompt text — the output goes directly to Kling. Code-level safety net: if response contains `STEP 1`, `**STEP`, `CONFIRMED`, or `Position Check`, strips everything before the actual prompt start (detected by scene setting patterns like "Inside the...", "CHARACTER POSITIONS", or "Shot 1"). Prevents Vision's internal reasoning from polluting the video model prompt.
 
 **Trigger condition:** Only runs for clips in scenes where `_verifyBlockingWithSceneImage` returned `corrections > 0`. Scenes where verified blocking matched proposed blocking skip this entirely. **Exception:** scenes verified before Session 25 (no `blocking_had_corrections` flag in DB) default to `hadCorrections = true` as a safety measure — a few extra API calls is cheap compared to wrong blocking propagating.
 
@@ -1897,9 +1899,9 @@ This handles the case where the 2nd Vision pass misidentified characters (e.g. s
 
 Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 scenes had corrections × ~3 clips each = 30-45 calls ≈ $0.30-0.90 total for a 150-clip project. Re-verification adds ~$0.02 per scene where mismatch is detected (rare).
 
-### Current Project State (Session 25)
+### Current Project State (Session 26)
 
-- Video generation in progress — clip 11 of 150 done
+- Video generation in progress — clip 15 of 150
 - 3-pass Vision blocking system: propose → verify → reconcile shot directions
 - Self-healing: 3rd pass detects when 2nd pass misidentified characters → auto re-verifies
 - Legacy scenes (pre-Session 25) default to hadCorrections=true for safety
@@ -1909,7 +1911,10 @@ Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 
 - Smart duration working (12-15s bumps confirmed)
 - Credit cost inflation gate + pipeline pause on cost inflation
 - WebP magic bytes detection for scene images
-- Duration/lip-sync observation table being gathered (11 clips so far)
+- Duration/lip-sync observation table being gathered (15 clips so far)
+- Prop grounding guardrail added to 3rd Vision pass (Session 26) — prevents phantom prop hallucination
+- Split-screen compositions confirmed working (ch2_sc1_c1 preserved panels, obeyed shot scale)
+- Shot 3 failure pattern: ~9/12 clips have Shot 3 lip sync issues, not purely action-density related
 
 **Vehicle scene identification fix:** All 3 Vision passes (1st propose, 2nd verify, 3rd reconcile) now include `SPATIAL CONTEXT: Nigerian production, LEFT-HAND DRIVE` with explicit instructions to locate the steering wheel first and use it to anchor driver/passenger identification. Previously, Vision confused driver/passenger in ch1_sc5 despite having character visual descriptions — the amber lighting and side-angle made clothing-based identification unreliable. Steering wheel anchoring provides a definitive spatial reference that doesn't depend on character appearance.
 
