@@ -5121,41 +5121,72 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         this.log('[SHOT-RECONCILE] Stripped markdown code block wrapping');
       }
 
-      // ── Strip reasoning preamble from Vision response ──
-      // Vision often includes STEP 1/STEP 2 analysis before the actual prompt.
-      // The actual Kling prompt starts with "CHARACTER POSITIONS" (blocking preamble).
-      // If that's not in the response, the prompt starts with the scene setting line
-      // (the text right before "Shot 1"). We must preserve CHARACTER POSITIONS.
-      // Look for the actual blocking preamble format: "CHARACTER POSITIONS (matching start frame):"
-      // NOT the echoed instruction "IDENTIFY CHARACTER POSITIONS" from STEP 1
-      const charPosMatch = resultText.match(/CHARACTER POSITIONS \(matching start frame\):/);
-      const charPosIdx = charPosMatch ? resultText.indexOf(charPosMatch[0]) : -1;
-      if (charPosIdx > 0) {
-        // There's reasoning text before CHARACTER POSITIONS — strip it
-        this.log(`[SHOT-RECONCILE] Stripped ${charPosIdx} chars of reasoning preamble (before CHARACTER POSITIONS)`);
-        resultText = resultText.slice(charPosIdx).trim();
-      } else if (charPosIdx === -1) {
-        // Vision didn't include CHARACTER POSITIONS at all — it only returned shot directions.
-        // Find the first Shot direction or scene setting line.
+      // ── Strip reasoning from Vision response ──
+      // Vision echoes STEP 1/STEP 2 analysis mixed into its response.
+      // Strategy: extract the CHARACTER POSITIONS line + scene setting + shot directions,
+      // discard everything else (reasoning, audit notes, markdown headers, dividers).
+      //
+      // The clean prompt structure is always:
+      //   CHARACTER POSITIONS (matching start frame): ...
+      //   <blank line>
+      //   <scene setting line>
+      //   <blank line>
+      //   Shot 1 (...): ...
+      //   Shot 2 (...): ...
+      //   Shot 3 (...): ...
+      {
+        // Step A: Extract or recover CHARACTER POSITIONS line
+        const charPosLineMatch = resultText.match(/^(CHARACTER POSITIONS \(matching start frame\):[^\n]+)/m);
+        let charPosLine = null;
+        if (charPosLineMatch) {
+          charPosLine = charPosLineMatch[1];
+        } else {
+          // Vision omitted it — recover from original prompt
+          const origMatch = prompt.match(/^(CHARACTER POSITIONS[^\n]+)/m);
+          if (origMatch) {
+            charPosLine = origMatch[1];
+            this.log('[SHOT-RECONCILE] Vision omitted CHARACTER POSITIONS — recovering from original prompt');
+          }
+        }
+
+        // Step B: Find everything from the scene setting line through end of shots
+        // Scene setting line is the non-shot, non-blocking line before Shot 1
+        // (e.g. "Inside the living room from the reference image. Soft afternoon light.")
         const shotIdx = resultText.search(/^Shot\s*1\s*\(/m);
-        // Also look for scene setting lines that appear right before shots
-        const sceneLineIdx = resultText.search(/\n\n(Inside |In the |Exterior |Interior |The |A |An )/);
-        let promptStart = -1;
-        if (sceneLineIdx !== -1) {
-          // +2 to skip the \n\n
-          promptStart = sceneLineIdx + 2;
-        }
-        if (shotIdx !== -1 && (promptStart === -1 || shotIdx < promptStart)) {
-          promptStart = shotIdx;
-        }
-        if (promptStart > 0) {
-          this.log(`[SHOT-RECONCILE] Vision omitted CHARACTER POSITIONS — stripped ${promptStart} chars of reasoning, will re-prepend blocking preamble`);
-          resultText = resultText.slice(promptStart).trim();
-          // Re-prepend the CHARACTER POSITIONS from the original prompt so Kling gets blocking
-          const origCharPosMatch = prompt.match(/^(CHARACTER POSITIONS[^\n]*\.)\s*\n/s);
-          if (origCharPosMatch) {
-            resultText = origCharPosMatch[1] + '\n\n' + resultText;
-            this.log('[SHOT-RECONCILE] Re-prepended CHARACTER POSITIONS from original prompt');
+        if (shotIdx > 0) {
+          // Look backwards from Shot 1 for the scene setting line
+          const beforeShots = resultText.slice(0, shotIdx);
+          // Find the last non-empty, non-reasoning line before Shot 1
+          // Reasoning lines contain: **, ---, STEP, CONFIRMED, ✅, →, Physically
+          const lines = beforeShots.split('\n');
+          let sceneSettingStart = -1;
+          for (let li = lines.length - 1; li >= 0; li--) {
+            const line = lines[li].trim();
+            if (!line) continue;
+            // Skip reasoning/formatting lines
+            if (/^(\*\*|---|STEP|CONFIRMED|BLOCKING|✅|→|Physically|Shot\s|The\s+(woman|man|person)\s+in\s+the\s+image|Claimed|Shots?\s+\d.*(:?\s+✅|\s+—)|CHARACTER POSITIONS)/i.test(line)) continue;
+            // This should be the scene setting line
+            sceneSettingStart = beforeShots.lastIndexOf(line);
+            break;
+          }
+
+          let promptBody;
+          if (sceneSettingStart >= 0) {
+            promptBody = resultText.slice(sceneSettingStart).trim();
+          } else {
+            // Couldn't find scene setting — just take from Shot 1
+            promptBody = resultText.slice(shotIdx).trim();
+          }
+
+          // Reassemble: CHARACTER POSITIONS + scene setting + shots
+          if (charPosLine) {
+            const cleaned = charPosLine + '\n\n' + promptBody;
+            if (cleaned.length !== resultText.length) {
+              this.log(`[SHOT-RECONCILE] Stripped reasoning: ${resultText.length} → ${cleaned.length} chars`);
+            }
+            resultText = cleaned;
+          } else {
+            resultText = promptBody;
           }
         }
       }
@@ -6326,33 +6357,42 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       }
 
+      // ── NORMALIZE CURLY/SMART QUOTES → ASCII ──
+      // Vision (3rd pass) sometimes returns dialogue with curly quotes (\u201C \u201D \u2018 \u2019)
+      // which breaks downstream regex patterns that expect ASCII quotes.
+      {
+        const beforeQuoteFix = finalMultiShotPrompt;
+        finalMultiShotPrompt = finalMultiShotPrompt
+          .replace(/[\u201C\u201D]/g, '"')   // " " → "
+          .replace(/[\u2018\u2019]/g, "'");  // ' ' → '
+        if (finalMultiShotPrompt !== beforeQuoteFix) {
+          this.log(`[CINEMATIC] ${clipId}: normalized curly quotes → ASCII`);
+        }
+      }
+
       // ── STRIP @element NAMES FROM DIALOGUE QUOTES ──
       // Characters should speak human names ("I am Okafor"), not element tags
       // ("I am @okafor_otpto_0420"). The @ inside quotes would trigger an
       // autocomplete attempt instead of being spoken as text.
+      // Runs AFTER bare-name fixer (which may add @-refs into dialogue).
+      // Matches dialogue blocks (]: "..."), then replaces ALL @element_name
+      // patterns inside each dialogue string. Handles multiple @-refs per line.
       {
-        // Strip @element names ONLY from dialogue text (the quoted part after speaker tags).
-        // Pattern: `]: "...@element_name..."` — only matches dialogue after `[speaker]: "`.
-        // We intentionally do NOT use a generic "..." regex because it matches across
-        // multi-line shot blocks, stripping @tags from shot descriptions where they're needed.
         const beforeDialogueFix = finalMultiShotPrompt;
         finalMultiShotPrompt = finalMultiShotPrompt.replace(
-          /\]:\s*"([^"]*?)@([a-z0-9_]+)([^"]*?)"/gi,
-          (match, pre, name, post) => {
-            const baseName = name.replace(/_[a-z]{2,6}_\d{4}$/i, '');
-            const humanName = baseName.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-            this.log(`[CINEMATIC] ${clipId}: dialogue fix: @${name} → ${humanName}`);
-            return `]: "${pre}${humanName}${post}"`;
+          /(\]:\s*")([^"]*?)(")/gi,
+          (match, prefix, dialogueText, suffix) => {
+            const cleaned = dialogueText.replace(/@([a-z0-9_]+)/gi, (atMatch, name) => {
+              const baseName = name.replace(/_[a-z]{2,6}_\d{4}$/i, '');
+              const humanName = baseName.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+              this.log(`[CINEMATIC] ${clipId}: dialogue fix: @${name} → ${humanName}`);
+              return humanName;
+            });
+            return prefix + cleaned + suffix;
           }
         );
         if (finalMultiShotPrompt !== beforeDialogueFix) {
           this.log(`[CINEMATIC] ${clipId}: stripped @element references from dialogue → human names`);
-        } else {
-          // Debug: log quote chars around dialogue to diagnose why regex didn't match
-          const dialogueSnippet = finalMultiShotPrompt.match(/accent.{0,5}:.{0,5}.{0,80}@[a-z]/i);
-          if (dialogueSnippet) {
-            this.log(`[CINEMATIC] ${clipId}: dialogue fix NO-OP — snippet charCodes: ${[...dialogueSnippet[0]].map(c => c.charCodeAt(0)).join(',')}`);
-          }
         }
       }
 
