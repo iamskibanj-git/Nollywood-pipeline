@@ -1781,42 +1781,81 @@ Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.
 | ch1_sc3_c2 | 20 | 5/8/8 | 3 | 10s | 13s | ⚠ S1 ✓ perfect, S2 unknown (push-in risk). S3: **dialogue replaced entirely** — scripted "She is always busy. You know how it is." became "ok ok good bye". Kling interpreted "already turning away" action as departure cue and generated contextually fitting but wrong dialogue. Static camera on S3 but action verb ("turning away") competed with dialogue. Blocking now correct (vision verified). | S1: "Yes. I am coming." S2: "I will call you this week, Ada." S3: "She is always busy. You know how it is." |
 | ch1_sc4_c1 | 20 | 7/6/7 | 3 | 10s | 13s | ✓ All 3 shots delivered perfectly — dialogue, lip sync, camera, expressions all correct. BUT **American accent** instead of Nigerian English. Voice tone binding issue on elements, not a prompt problem. S3 had slow push-in + dialogue yet lip sync worked — 2-char car interior with minimal body movement may reduce competing action. | S1: "You were looking sad again in there." S2: "I was not. I was smiling." S3: "A dead smile. People notice these things." |
 | ch1_sc4_c2 | 18 | 8/8/2 | 3 | 10s | 12s | ✓ Perfect. All 3 shots correct — lip sync, dialogue, expressions. S3: ECU + slow push-in + only 2 words ("I understand") — worked flawlessly. Seated car interior = push-in safe even with ECU and ultra-short dialogue. Confirms: minimal body movement negates the push-in risk. | S1: "I am sorry. I did not mean to—" S2: "You embarrass me when you look like that." S3: "I understand." |
+| ch1_sc5_c1 | ~20 | ~7/7/6 | 3 | 10s | 13s | ⚠ S1-S2 fine. S3: complex physical action + dialogue — "wait I dropped something" delivered, "what now we are going" + gesture toward dash, car starts. Ada doesn't get her reaction line, no narration, no lip sync. She picks item from car floor, hands on lap, cut. Physical choreography consumed the animation budget. | S1-S3: (car interior, driver/passenger scene with manual blocking swap) |
+| ch2_sc1_c1 | ~20 | ~7/7/6 | 3 | 10s | 15s | ✓ All 3 shots perfect. Split-screen composition preserved — no panel merging, no morphing. Shot scale (closeup/medium) obeyed. Lip sync intact including S3 (push-in + subtle facial action "eyes down, hands pressing"). Ifeoma pronunciation off (expected TTS limitation). | S1-S3: (split-screen bedroom, Ada at vanity, Emeka standing) |
+| ch2_sc1_c2 | ~20 | ~7/6/7 | 3 | 10s | 15s | ⚠ S1-S2 ✓. S3: push-in + "turns slightly toward door" + dialogue "I'll handle it" — lip sync crashed. Accent flipped to American. Even minimal physical action in S3 with push-in = failure. | S1: "You cannot manage simple money." S2: "I am asking for our daughter." S3: "I will handle it. Stop bringing this to me every morning." |
+| ch2_sc1_c3 | ~20 | ~7/6/7 | 3 | 10s | 13s | ⚠ S1-S2 ✓. S3: physical action executed (opened drawer, reached in, cut) but dialogue "Yes. We are done." never delivered. Two complex physical actions in dialogue shot consumed animation budget. Drawer IS in scene image (grounded). No morphs. Split-screen preserved. | S1: "You said that last week. And the week before." S2: "My phone is ringing. We are done here." S3: "Yes. We are done." |
+| ch2_sc2_c1 | 24 | 10/9/5 | 3 | 10s | 15s | ⚠ S1-S2 ✓ (both static). S3: push-in + facial action + 5 words — lip sync doesn't match on "Since when." Short dialogue + push-in = consistent failure. | S1: "Ada. Talk to me. You look like you have not slept." S2: "I am fine. Just tired. The house does not run itself." S3: "Tired. You are always tired. Since when?" |
+| ch2_sc2_c2 | 18 | 5/9/4 | 3 | 10s | 12s | ⚠ S1-S2 ✓ (both static). S3: push-in + facial expression + 7 words — lip sync fell apart on "Lagos people talk too much." | S1: "Ngozi. Please. Not today." S2: "I heard something. About Emeka. From Chioma's cousin." S3: "People talk. Lagos people talk too much." |
+| ch2_sc2_c3 | 22 | 7/7/8 | 3 | 10s | 15s | ✓ Lip sync + dialogue delivered across all 3 shots including S3. S3 had INSERT→PULL BACK camera change + prop (paper) + dialogue — lip sync survived. BUT prop duplication: one paper became two. INSERT shot may reset animation state, avoiding temporal degradation. | S1: "Ada. This is not gossip. I am your friend." S2: "Then be my friend and leave it alone." S3: "Fine. But take this. His name is Tunde Afolabi." |
+| ch2_sc3_c1 | ~15 | ~5/5/1 | 3 | 10s | 13s | ✓ All 3 shots perfect. Single character scene — no attribution ambiguity. S2 had push-in + dialogue and delivered. Solo character may negate push-in lip sync degradation. | S1: "Barrister Tunde Afolabi. What do you know, Ngozi?" S2: "Nothing is wrong. Nothing is wrong with my home." S3: "Nothing." |
+| ch2_sc4_c1 | 22 | 7/8/7 | 3 | 10s | 15s | ✓ All 3 shots perfect. All static cameras, minimal grounded actions (stirring, pencil). Adult/child pairing = no attribution confusion. | S1: "Mummy. Why is Daddy always angry?" S2: "Daddy is not angry. He is just busy. Men get tired." S3: "He does not look tired. He looks angry." |
+| ch2_sc4_c2 | 14 | 6/7/0 | 3 | 10s | 11s | ✓ S1 static + dialogue perfect. S2 push-in + dialogue on single character framing — delivered. S3 no dialogue: INSERT on spoon hand → tilt up to face, perfectly executed. Camera movement without dialogue = safe. | S1: "Ifeoma. Focus on your homework, my love." S2: "Mummy. I do not want to marry someone like Daddy." S3: (no dialogue — visual only) |
+| ch2_sc5_c1 | 29 | 9/10/10 | 3 | 10s | 15s | ⚠ S1-S2 delivered. S3: dialogue delivered but off-screen — Kling cut to INSERT of hands on bedpost instead of showing face. 29 words total high for 15s (~2 words/sec). Single character, not attention-split — model ran out of visual budget. | S1: "I said handle it. I do not repeat myself." S2: "The account must be clean before Friday. You hear me?" S3: "Nobody will find anything. I have made sure of that." |
+| ch2_sc6_c1 | 22 | 6/8/8 | 3 | 10s | 14s | ⚠ S1-S2 delivered. S3: ECU on eyes — dialogue delivered off-screen because framing excluded the mouth. Kling can't lip sync what it can't show. Single char. New rule: ECU on eyes + dialogue = voiceover at best. | S1: "Clean. He said clean the account." S2: "What account? He never told me about any account." S3: "Who is he talking to at this hour?" |
+| ch2_sc7_c1 | 22 | 6/8/2 | 3 | 12s | 12s | ✓ All dialogue delivered with lip sync, mouth visible. S2 push-in + dialogue worked (single char). S3 ECU on face (not just eyes) = lip sync intact. Phantom props: paper + drawer hallucinated but didn't compete with dialogue. 2-word S3 delivered cleanly. | S1: "Abuja Grand Prestige Hotel. November the fourteenth." S2: "He was in Port Harcourt. He told me Port Harcourt." S3: "He lied." |
+| ch3_sc1_c1 | 20 | 6/7/7 | 3 | 10s | 13s | ✓ All 3 shots perfect. All static, two characters well-separated (foreground/mid-ground), minimal body actions. | S1: "Ada, relax. It is just a party." S2: "Emeka said he might come tonight." S3: "So? You are allowed to be here too." |
+| ch3_sc1_c2 | 21 | 7/6/8 | 3 | 10s | 13s | ⚠ S1 ✓ (static). S2 push-in on single char framing in multi-char scene — delivered. S3: static CU + 8 words — lip sync fell apart. Push-in in S2 may have depleted budget for S3 even though S3 was static. | S1: "You know it is never that simple." S2: "Tonight, let it be simple. Come." S3: "Wait. Ada. Wait — do not look left." |
+| ch3_sc2_c1 | 20 | 7/6/7 | 3 | 10s | 14s | ⚠ S1-S2 ✓ (both static). S3: push-in + dialogue + multi-char — lip sync fell apart. Pattern holds. | S1: "You always look good in white, Emeka." S2: "And you always know what to say." S3: "I mean it. You belong in rooms like this." |
+| ch3_sc2_c2 | 20 | 8/5/7 | 3 | 10s | 13s | ✓ All 3 shots perfect lip sync. All static. Minor hand morphing on Chidinma — cosmetic only. | S1: "We both do. That is why I chose you." S2: "Chosen. That is a big word." S3: "Do not ruin the night, Chidinma." |
+| ch3_sc3_c1 | 20 | 6/7/7 | 3 | 10s | 13s | ✓ All dialogue delivered. All static. 3-char scene — visually distinct, well-separated. S3: Kling added its own insert shot of Ada after Emeka's gesture — creative improvisation, dialogue still landed. | S1: "Adaeze. I did not expect you here." S2: "Ngozi invited me. Is that a problem?" S3: "Of course not. Come, meet someone." |
+| ch3_sc3_c2 | 18 | 7/6/5 | 3 | 10s | 12s | ✓ All 3 shots perfect. All static, 3-char scene. Light word density. | S1: "This is Chidinma Obi. My business associate." S2: "Mrs. Okafor. I have heard so much." S3: "Have you. How interesting." |
+| ch3_sc3_c3 | 19 | 6/6/7 | 3 | 10s | 13s | ⚠ S1 ✓. S3: ECU on eyes — dialogue "Yes. I know exactly who he is." not delivered at all (dropped entirely, not even voiceover). Silent reaction shot only. Kling also repositioned Chidinma from standing to seated — blocking drift in 3-char scene. | S1: "Chidinma handles our Port Harcourt contracts." S2: "Your husband is a very brilliant man." S3: "Yes. I know exactly who he is." |
+| ch3_sc4_c1 | ~20 | ?/?/? | 3 | 10s | ~13s | ⚠ ALL STATIC multi-char — S3 dialogue completely ignored. No narration, no lip sync. Transition to S3 executed but dialogue dropped. FIRST all-static multi-char failure — breaks the "all-static = safe" rule. | S3 dialogue dropped entirely |
+| ch3_sc4_c2 | 22 | ?/?/? | 3 | 10s | 15s | ⚠ S2 slow push-in in multi-char scene. S3: dialogue REPLACED — Kling fabricated "I will move" instead of scripted line. Worse than lip sync failure — model substituted its own words. Second dialogue-replaced instance. | S3: Kling said "I will move" instead of scripted dialogue |
+| ch3_sc4_c3 | 20 | 10/4/6 | 3 | 10s | 14s | ✓ All dialogue lip synced well. All static. S3 INSERT→CU static — INSERT cut likely reset animation state. Phantom prop: "folded paper receipt" morphed out of thin air (not in scene image). | S1: "I do not know why. I just — I kept it." S2: "What is it? Show me." S3: "A hotel receipt. From his jacket." |
+| ch3_sc4_c4 | 8 | 8 | 1 | 10s | 11s | ✓ Perfect. Single shot, static, wide, 8 words. Name mispronunciation (constant). Phantom prop: paper/receipt from thin air (continuity ref, not in scene image). | S1: "Ada. You need to call Tunde tonight." |
 
-**Emerging patterns:**
-- **Camera movement + dialogue = lip sync breaks.** Every shot with a push-in, dolly, or dynamic camera AND dialogue has lip sync issues. Every static shot with dialogue lip-syncs correctly. (ch1_sc1_c3 S3: push-in + 5 words = wonky. ch1_sc2_c1 S3: push-in + action + 7 words = narrated. ch1_sc2_c3 S3: push-in + 11 words = broken. ch1_sc1_c1/c2: all static = perfect.)
-- **Departure/movement action + dialogue = Kling makes up its own words.** ch1_sc3_c2 S3: "already turning away" → Kling generated "ok ok good bye" instead of the scripted line. It understood the semantic context (leaving) and substituted dialogue that fit the action. This is WORSE than lip sync issues — the actual words are wrong.
-- **Shot 3 is consistently fragile.** 7 out of 9 clips had Shot 3 issues. The only 2 that worked perfectly (ch1_sc1_c1, c2) had ALL shots static with NO action verbs. Possible temporal degradation: Kling's dialogue fidelity drops after ~6-8s into a clip. By Shot 3, the "attention budget" for faithful dialogue is depleted.
-- **Short dialogue (≤5 words) amplifies the problem.** ch1_sc1_c3 S3 (5 words + push-in) and ch1_sc2_c2 S3 (5 words) both had lip sync issues. Kling may not invest lip animation effort for very short lines.
-- **EXTREME CLOSE-UP amplifies visibility.** ch1_sc2_c3 S3 was ECU — at that zoom, any desync is glaringly obvious. A medium shot with the same desync might pass.
-- **Narration-as-inner-monologue.** ch1_sc2_c1 Shot 3 (7 words, push-in + jaw tightens + fury) → narrated instead of lip-synced. Worked dramatically but may not always be desirable.
-- **Blocking text ↔ scene image mismatch = wrong character speaks.** ch1_sc3_c1 S2: blocking text vs scene image conflict. **RESOLVED** by `_verifyBlockingWithSceneImage()` in Session 24.
-- **Double @ref is safe when characters are visually distinct.** ch1_sc3_c1 S3 referenced @emeka (speaking) and @adaeze (glance target) — delivered perfectly. Male vs. female = no confusion. The risk is with same-gender pairs where Kling relies on position/clothing.
+**Emerging patterns (updated Session 26, 34 clips):**
+- **Push-in + dialogue in multi-character scenes = near-certain lip sync failure.** 13/17 multi-char clips with push-in S3 failed. Exceptions: car interior (ch1_sc4_c1/c2), INSERT→PULL BACK (ch2_sc2_c3).
+- **Single-character scenes are push-in safe.** ch2_sc3_c1, ch2_sc4_c2, ch2_sc7_c1 all delivered push-in + dialogue. No second character to split attention.
+- **Camera movement WITHOUT dialogue = always safe.** ch2_sc4_c2 S3 INSERT→tilt, no dialogue — perfect. Full budget when not lip syncing.
+- **ECU on eyes + dialogue = dialogue dropped.** ch2_sc6_c1: voiceover only. ch3_sc3_c3: dialogue not delivered at all. Framing excludes mouth = no lip sync possible. ECU on face (mouth visible) works fine (ch2_sc7_c1).
+- **Push-in in S2 can deplete S3 budget.** ch3_sc1_c2: S2 push-in delivered, but S3 (static) still failed lip sync. Budget depletion carries across shots.
+- **Word density ceiling emerging.** ch2_sc5_c1: 29 words / 15s = dialogue delivered off-screen. Model ran out of visual budget at ~2 words/sec density.
+- **Blocking drift in 3-char scenes.** ch3_sc3_c3: Kling repositioned Chidinma from standing to seated. More characters = more spatial decisions = more drift risk.
+- **Kling creative improvisation.** ch3_sc3_c1: model added its own insert shot after a gesture direction. Dialogue still landed — improvisation not always negative.
+- **INSERT shot may reset animation state.** ch2_sc2_c3 S3 had INSERT→PULL BACK + prop + dialogue — lip sync survived. Camera cut may give Kling a fresh start vs continuous push-in degradation.
+- **Split-screen compositions preserved.** ch2_sc1_c1/c2/c3 all maintained two-panel split-screen. No merging or morphing.
+- **Prop duplication failure mode.** ch2_sc2_c3: one paper became two. Kling understands prop concept but doubles the action.
+- **Physical action + dialogue in S3 = dialogue dropped.** ch1_sc5_c1 and ch2_sc1_c3 both executed actions but dropped dialogue entirely.
+- **All-static + well-separated characters = mostly safe but not guaranteed.** ch2_sc4_c1 (adult at stove, child at table) perfect. ch3_sc4_c1: FIRST all-static multi-char failure — S3 dialogue dropped entirely. 7/8 all-static multi-char clips succeed, but it's not a guarantee.
+- **Departure action + dialogue = Kling substitutes its own words.** ch1_sc3_c2 S3. WORSE than lip sync issues.
+- **Accent flip (American) is a recurring constant.** Not prompt-fixable. Igbo/Yoruba name pronunciation also consistently off.
 
-**Shot 3 failure taxonomy (from 9 clips):**
-| Type | Count | Example | Cause |
+**Shot 3 failure taxonomy (34 clips):**
+| Type | Count | Examples | Cause |
 |------|-------|---------|-------|
-| Perfect | 2 | ch1_sc1_c1, c2 | All static, no action verbs |
-| Lip sync wonky | 3 | ch1_sc1_c3, ch1_sc2_c2, ch1_sc2_c3 | Camera movement and/or short dialogue |
+| Perfect (all static) | 7 | ch1_sc1_c1/c2, ch2_sc4_c1/c2, ch3_sc1_c1, ch3_sc2_c2, ch3_sc3_c1/c2 | All static cameras OR no dialogue in S3 |
+| All-static failure | 1 | ch3_sc4_c1 | All static multi-char but S3 dialogue dropped — first outlier |
+| Perfect (single char) | 3 | ch2_sc3_c1, ch2_sc1_c1, ch2_sc7_c1 | Single character, push-in safe |
+| Perfect (INSERT cut) | 2 | ch2_sc2_c3, ch3_sc4_c3 | INSERT cut may reset animation state |
+| Lip sync wonky | 7 | ch1_sc1_c3, ch1_sc2_c2/c3, ch2_sc2_c1/c2, ch3_sc1_c2, ch3_sc2_c1 | Push-in + dialogue in multi-char scene |
+| Dialogue dropped | 2 | ch1_sc5_c1, ch2_sc1_c3 | Complex physical action consumed budget |
+| Dialogue off-screen | 3 | ch2_sc5_c1, ch2_sc6_c1, ch3_sc3_c3 | ECU on eyes (no mouth) or word density ceiling |
 | Narrated (no lip sync) | 1 | ch1_sc2_c1 | Push-in + heavy action |
 | Wrong character | 1 | ch1_sc3_c1 | Blocking mismatch (fixed) |
-| Dialogue replaced | 1 | ch1_sc3_c2 | Departure action verb |
-| Perfect (3-char) | 1 | ch1_sc3_c1 S3 | Static + visually distinct chars |
+| Dialogue replaced | 2 | ch1_sc3_c2, ch3_sc4_c2 | Departure action verb or push-in budget depletion |
 
-**Actionable rules emerging:**
-> 1. If a shot has dialogue, keep the camera STATIC. Reserve camera movements for non-dialogue moments.
-> 2. Shot 3 should have the SIMPLEST dialogue line — fewest words, no action verbs that imply motion/departure.
-> 3. Avoid action verbs that imply departure in dialogue shots ("turning away", "walking off", "leaving"). Kling interprets these semantically and may substitute its own contextual dialogue.
-> 4. CHARACTER POSITIONS must describe the scene image as-rendered, not as-intended. **RESOLVED:** `_verifyBlockingWithSceneImage()` now corrects this automatically.
-> 5. Double @ref per shot is acceptable for visually distinct characters (different gender). Avoid for same-gender pairs.
+**Actionable rules (refined, Session 26, 31 clips):**
+> 1. If a shot has dialogue AND multiple characters, keep the camera STATIC. Push-in + dialogue only safe in single-character scenes or with INSERT camera cuts.
+> 2. Reserve camera movements (push-in, tilt, dolly) for non-dialogue shots — they execute perfectly without lip sync competition.
+> 3. NEVER pair ECU on eyes/hands/body parts with dialogue. If no mouth is visible, dialogue will be dropped or delivered off-screen. ECU on face (mouth visible) is fine.
+> 4. Shot 3 should have the SIMPLEST dialogue line — fewest words, no action verbs that imply motion/departure.
+> 5. Avoid complex physical action + dialogue in the same shot. If both are needed, split into two clips.
+> 6. Avoid departure action verbs ("turning away", "walking off"). Kling substitutes its own dialogue.
+> 7. Push-in in S2 can deplete animation budget for S3 even if S3 is static. Consider all-static when S3 dialogue is critical.
+> 8. Word density: keep under ~1.5 words/sec. 29 words / 15s caused off-screen delivery.
+> 9. CHARACTER POSITIONS must describe scene image as-rendered. **RESOLVED:** `_verifyBlockingWithSceneImage()`.
+> 10. Split-screen and non-standard compositions are safe if source image framing is clear.
 
-**Open questions for later analysis:**
-- **Temporal threshold:** Is there a hard ~8-10s mark where Kling's dialogue fidelity drops off? The 2 perfect Shot 3s had 12s effective duration — same as the failures. May be cumulative attention budget, not purely temporal.
-- Would splitting "dialogue + push-in" into two sub-beats (dialogue static → then push-in silent) fix it, or does multi-shot Auto not support that granularity?
-- Is there a word count threshold below which Kling skips lip animation entirely (≤5 words)?
-- Is the narration-as-inner-monologue pattern reliable enough to be intentional?
-- Consider per-shot action density scoring (camera movement + character action + dialogue = more time needed)
-- **Dynamic shot count:** Could reduce to 2 shots per clip when dialogue is sparse (≤15 words total). Script engine currently hard-enforces 3 shots. Would require touching script prompt, review rubric, and gen logic — defer until more data.
-- **Script engine constraint:** Should Shot 3 direction be restricted to "static camera, no motion verbs" at the prompt engineering level?
+**Open questions:**
+- Does INSERT camera cut genuinely reset animation state, or was ch2_sc2_c3 an outlier?
+- Is the push-in failure purely about multi-character attention splitting, or also temporal budget depletion?
+- Word count threshold below which Kling skips lip animation (≤5 words)?
+- Is narration-as-inner-monologue reliable enough to be intentional?
+- At what clip count do we have enough data to implement automated rules in the script prompt?
+- 3-char blocking drift: is it cumulative across clips in the same scene, or random?
 
 ### Session 24 — Vision Blocking Verification, Resolution Enforcement
 
@@ -1859,7 +1898,7 @@ Cost: ~1 Sonnet call per scene with pending clips. Cached in-memory per run + pe
 
 Position-independent actions need no fix: "gestures with hand", "narrows eyes", "crosses arms", "nods slowly."
 
-**Fix: `_reconcileShotDirectionsWithImage(sceneImagePath, verifiedPositions, prompt, imageData, mimeType)`** — 3rd Vision pass, per-clip. Sends the scene image + verified character positions + full shot directions to Claude Vision. Asks: "Are any body actions physically impossible given where these characters actually are? If so, rewrite ONLY those actions." Runs ONLY when the 2nd Vision pass made corrections (corrections > 0).
+**Fix: `_reconcileShotDirectionsWithImage(sceneImagePath, verifiedPositions, prompt, imageData, mimeType)`** — 3rd Vision pass, per-clip. Sends the scene image + verified character positions + full shot directions to Claude Vision. Checks for TWO types of problems: (A) physically impossible actions given character positions, and (B) visual-state contradictions — wardrobe, props, or appearance described in shot directions that contradict what's visible in the scene image (the start frame). Kling cannot change wardrobe or conjure props not in the start frame. For visual-state contradictions, the fix is always STRIP (remove the contradicting phrase) — never invent a replacement. Runs ONLY when the 2nd Vision pass made corrections (corrections > 0).
 
 **Critical guardrails (action density vs lip sync trade-off):**
 Too much body action competes with dialogue lip sync — observed pattern from clip generation data. The 3rd Vision pass must simplify, never elaborate.
@@ -1872,6 +1911,7 @@ Too much body action competes with dialogue lip sync — observed pattern from c
 6. **Post-validation check:** Code verifies response before accepting — if any shot grew >20% in word count or action verb count increased, reject and fall back to deleting the impossible action while keeping rest of shot intact.
 7. **Reasoning stripping (Session 26):** Vision's STEP 1/STEP 2 anti-anchoring prompt causes it to echo reasoning (analysis, audit notes, checkmarks, markdown headers, dividers) mixed into its response — before, between, and after the actual prompt content. This reasoning noise must be stripped before the prompt goes to Kling. Approach: reconstruct the clean prompt by extracting the three structural components: (a) CHARACTER POSITIONS line — extracted from Vision's response if present (matched via exact `CHARACTER POSITIONS (matching start frame):`), otherwise recovered from the original input prompt; (b) scene setting line — found by scanning backwards from Shot 1, skipping reasoning lines (identified by patterns: `**`, `---`, `STEP`, `CONFIRMED`, `✅`, `→`, `Physically`, `The woman/man in the image`, etc.); (c) shot directions (Shot 1 onwards). These three pieces are reassembled into a clean `CHARACTER POSITIONS + scene setting + shots` prompt. Handles reasoning appearing anywhere: before blocking, between blocking and shots, or interleaved with shots.
 8. **Curly quote normalization (Session 26):** Vision (3rd pass) sometimes returns dialogue with Unicode curly/smart quotes (`\u201C` `\u201D` `\u2018` `\u2019`) instead of ASCII quotes. This broke the downstream dialogue @-stripping regex which only matched ASCII `"`. Fix: normalize all curly quotes to ASCII before the @-strip runs. Placed immediately before the dialogue @-strip block.
+10. **Visual-state contradiction stripping (Session 27):** Shot directions may describe wardrobe, props, or appearance states that contradict the scene image (the Kling start frame). Examples: "jacket off, sleeves rolled" when the character wears a jacket in the image; "holding a briefcase" when no briefcase is visible; "hair down" when hair is pinned up. Kling cannot change what's already rendered in the start frame — it will either ignore the direction or produce morphing artifacts. Fix: expanded the 3rd Vision pass prompt (STEP 2) to check for visual-state contradictions alongside physically impossible actions. The guardrail is STRIP — remove the contradicting phrase entirely, never invent a replacement. The character will appear as they do in the start frame, which is correct. This is lighter than the abandoned prop grounding approach (Session 26) which tried to add a separate validation step and broke the prompt structure.
 9. **Dialogue @-strip multi-match fix (Session 26):** The original dialogue @-strip regex (`/\]:\s*"([^"]*?)@([a-z0-9_]+)([^"]*?)"/gi`) only caught the FIRST `@element_name` per dialogue line — the second @-ref was inside the non-greedy capture group and passed through unchanged. New approach: match dialogue blocks (`]: "..."`), then run a second inner replace on the dialogue text to convert ALL `@element_name` patterns to human-readable names. Also fixed ordering bug: the dialogue @-strip MUST run AFTER the bare-name fixer (which converts bare names like "Tunde" → `@tunde_towwf_0421` throughout the prompt, including inside dialogue). Moving it earlier caused the @-strip to run when there were no @-refs yet, then the bare-name fixer would add them with no cleanup after. Correct order: (1) generic @-ref sanitizer, (2) bare-name fixer, (3) curly quote normalizer, (4) dialogue @-strip.
 
 **Trigger condition:** Only runs for clips in scenes where `_verifyBlockingWithSceneImage` returned `corrections > 0`. Scenes where verified blocking matched proposed blocking skip this entirely. **Exception:** scenes verified before Session 25 (no `blocking_had_corrections` flag in DB) default to `hadCorrections = true` as a safety measure — a few extra API calls is cheap compared to wrong blocking propagating.
@@ -1892,7 +1932,7 @@ This handles the case where the 2nd Vision pass misidentified characters (e.g. s
 **Architecture — where it fits in the flow:**
 1. Scene-level: `_verifyBlockingWithSceneImage()` → corrects CHARACTER POSITIONS → cached/persisted (unchanged)
 2. Clip-level: `_injectVisionBlocking()` → rewrites preamble + Shot 1 posture verbs (unchanged)
-3. **NEW — clip-level:** `_reconcileShotDirectionsWithImage()` → Vision sees scene image + corrected positions + shot directions → cross-checks positions first, then fixes physically impossible actions
+3. **NEW — clip-level:** `_reconcileShotDirectionsWithImage()` → Vision sees scene image + corrected positions + shot directions → cross-checks positions first, then fixes physically impossible actions AND strips visual-state contradictions (wardrobe/props/appearance not matching scene image)
 4. **NEW — clip-level (conditional):** If BLOCKING_MISMATCH detected → re-run 2nd Vision pass → re-inject → re-reconcile
 5. Clip-level: prompt sanitization (@-ref cleanup, bare name fix, dialogue @-strip) (unchanged)
 

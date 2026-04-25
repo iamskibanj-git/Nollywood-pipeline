@@ -4928,10 +4928,13 @@ Output ONLY the JSON array.`,
    * After _verifyBlockingWithSceneImage corrects CHARACTER POSITIONS and
    * _injectVisionBlocking rewrites the preamble, shot body actions may still
    * reference physically impossible actions (e.g. "turns toward the ignition"
-   * when the character isn't in the driver's seat).
+   * when the character isn't in the driver's seat) or visual-state contradictions
+   * (e.g. "jacket off, sleeves rolled" when the character is wearing a jacket
+   * in the scene image, or referencing props not visible in the start frame).
    *
    * This method sends the scene image + verified positions + full prompt to
-   * Claude Vision and asks it to fix ONLY physically impossible body actions.
+   * Claude Vision and asks it to fix physically impossible actions AND strip
+   * visual-state contradictions (wardrobe, props, appearance).
    *
    * GUARDRAILS (action density vs lip sync trade-off):
    * - Word count ceiling: replacement ≤ original per shot
@@ -5084,27 +5087,36 @@ If your independent assessment CONTRADICTS the claimed positions (e.g., you see 
 BLOCKING_MISMATCH: <describe what's wrong — who is actually where vs what was claimed>
 Do NOT attempt to fix shot directions if the positions are wrong.
 
-STEP 2 — IF POSITIONS ARE CORRECT, check each shot's body action directions in this prompt:
+STEP 2 — IF POSITIONS ARE CORRECT, check each shot's directions against the scene image:
 
 ${prompt}
 
-If a body action is PHYSICALLY IMPOSSIBLE given where the character actually is (e.g., "turns toward the ignition" but the character isn't in the driver's seat), fix it.
+Check for TWO types of problems:
+
+A) PHYSICALLY IMPOSSIBLE ACTIONS — body actions that can't happen given where the character is (e.g., "turns toward the ignition" but the character isn't in the driver's seat).
+
+B) VISUAL-STATE CONTRADICTIONS — shot directions that describe a wardrobe, prop, or appearance state that CONTRADICTS what's visible in the scene image. The scene image is the start frame — Kling cannot change what's already rendered. Examples:
+   - "jacket off, sleeves rolled" but the character is wearing a jacket in the image
+   - "holding a briefcase" but no briefcase is visible anywhere in the image
+   - "hair down" but the character's hair is pinned up in the image
+   - "standing" but the character is clearly seated in the image
 
 CRITICAL GUARDRAILS — you MUST follow these:
-1. ONLY change actions that are physically impossible. Leave everything else EXACTLY as-is.
-2. For shots WITH dialogue (containing [@character, speaking...]: "..."):
+1. ONLY fix physically impossible actions (A) or visual-state contradictions (B). Leave everything else EXACTLY as-is.
+2. For VISUAL-STATE CONTRADICTIONS: STRIP the contradicting detail entirely — do NOT invent a replacement. If "jacket off, sleeves rolled" contradicts the image, just remove that phrase. The character will appear as they do in the start frame, which is correct.
+3. For shots WITH dialogue (containing [@character, speaking...]: "..."):
    - PREFER removing the impossible action entirely over replacing it
    - If you must replace, use a SUBTLE gesture only: "nods", "glances down", "shifts slightly", "sits still"
    - MAX 1 action verb in the entire shot direction when dialogue is present
-3. For shots WITHOUT dialogue:
+4. For shots WITHOUT dialogue:
    - Replace with a SIMPLER action that works from the character's actual position
    - MAX 2 action verbs
-4. NEVER make a shot direction LONGER than the original. Aim shorter.
-5. NEVER add new actions, new object interactions, or elaborate choreography.
-6. Keep ALL dialogue, camera directions, tone markers, and @ character references EXACTLY as-is.
-7. If ALL shot directions are physically possible, return "NO_CHANGES_NEEDED" (nothing else).
+5. NEVER make a shot direction LONGER than the original. Aim shorter.
+6. NEVER add new actions, new object interactions, or elaborate choreography.
+7. Keep ALL dialogue, camera directions, tone markers, and @ character references EXACTLY as-is.
+8. If ALL shot directions are valid (no impossible actions AND no visual contradictions), return "NO_CHANGES_NEEDED" (nothing else).
 
-OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed ones). Preserve exact formatting, line breaks, and structure. Change ONLY the specific body action phrases that are impossible.`,
+OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed ones). Preserve exact formatting, line breaks, and structure. Change ONLY the specific phrases that are impossible or contradictory.`,
             },
           ],
         }],
