@@ -173,8 +173,9 @@ class ClipVerifier {
    *   transcript,                   // all detected speech concatenated
    *   linesVerified: Array<{
    *     line_number, expected, expected_speaker, transcribed_segment,
-   *     similarity, speaker_match, tier
+   *     similarity, speaker_match, accent_detected, accent_match, tier
    *   }>,
+   *   accentConsistent,              // boolean — false if any accent drift detected
    *   shotCutsObserved,             // integer
    *   mouthSync, artifacts, notes,
    *   similarity,                   // aggregate 0-100
@@ -190,6 +191,7 @@ class ClipVerifier {
       linesVerified: [],
       shotCutsObserved: null,
       mouthSync: 'unknown',
+      accentConsistent: true,
       artifacts: [],
       characterCount: null,
       notes: '',
@@ -229,9 +231,13 @@ class ClipVerifier {
         idx: i,
         transcript: (d.transcript || '').trim(),
         speaker_visible: (d.speaker_visible || '').toLowerCase().trim(),
+        accent: (d.accent || '').trim(),
         startMs: d.approximate_start_ms || 0,
         consumed: false,
       }));
+
+      // Extract accent consistency signal
+      const accentConsistent = analysis.accent_consistent !== false; // default true if missing
 
       for (const exp of expectedLines) {
         const expectedText = (exp.dialogue || '').trim();
@@ -249,9 +255,18 @@ class ClipVerifier {
         const transcribedSegment = best?.d?.transcript || '';
         const similarity = best?.sim || 0;
         const detectedSpeaker = best?.d?.speaker_visible || '';
+        const detectedAccent = best?.d?.accent || '';
         const speakerMatch = !expectedSpeaker || !detectedSpeaker
           || detectedSpeaker.includes(expectedSpeaker)
           || expectedSpeaker.includes(detectedSpeaker);
+
+        // Accent match: Nigerian English or West African English are acceptable.
+        // Anything else (American, British, etc.) is a mismatch.
+        const accentNorm = detectedAccent.toLowerCase();
+        const accentMatch = !detectedAccent
+          || accentNorm.includes('nigerian')
+          || accentNorm.includes('west african')
+          || accentNorm.includes('unclear');
 
         const lineTier = this._tierForScore(similarity, result.mouthSync, result.artifacts);
 
@@ -262,6 +277,8 @@ class ClipVerifier {
           transcribed_segment: transcribedSegment,
           similarity: Math.round(similarity),
           speaker_match: speakerMatch,
+          accent_detected: detectedAccent || null,
+          accent_match: accentMatch,
           tier: lineTier,
         });
 
@@ -282,7 +299,26 @@ class ClipVerifier {
       const anySpeakerMiss = result.linesVerified.some(l => !l.speaker_match);
       if (anySpeakerMiss && result.tier === 'accept') result.tier = 'review';
 
-      console.log(`[VERIFY-CINEMATIC] ${clipLabel}: agg similarity=${result.similarity}% tier=${result.tier} (lines: ${result.linesVerified.map(l => l.tier[0].toUpperCase()).join('')})${anySpeakerMiss ? ' SPEAKER-MISS' : ''}`);
+      // ── Accent drift detection ──
+      // Any line with a non-Nigerian accent = auto-reject (redo trigger).
+      // Accent drift is worse than lip sync failure — it breaks immersion entirely.
+      const anyAccentMiss = result.linesVerified.some(l => l.accent_match === false);
+      const accentDriftArtifact = (result.artifacts || []).includes('accent drift');
+      result.accentConsistent = accentConsistent && !anyAccentMiss && !accentDriftArtifact;
+
+      if (anyAccentMiss || !accentConsistent || accentDriftArtifact) {
+        result.tier = 'reject';
+        if (!result.artifacts.includes('accent drift')) {
+          result.artifacts.push('accent drift');
+        }
+        const driftLines = result.linesVerified
+          .filter(l => l.accent_match === false)
+          .map(l => `L${l.line_number}:${l.accent_detected}`)
+          .join(', ');
+        console.log(`[VERIFY-CINEMATIC] ${clipLabel}: ⚠ ACCENT DRIFT DETECTED → auto-reject (${driftLines || 'inconsistent'})`);
+      }
+
+      console.log(`[VERIFY-CINEMATIC] ${clipLabel}: agg similarity=${result.similarity}% tier=${result.tier} accent=${result.accentConsistent ? '✓' : '⚠DRIFT'} (lines: ${result.linesVerified.map(l => l.tier[0].toUpperCase()).join('')})${anySpeakerMiss ? ' SPEAKER-MISS' : ''}`);
     } catch (e) {
       result.error = e.message;
       result.tier = 'reject';
@@ -343,6 +379,7 @@ class ClipVerifier {
     return `You are verifying a short AI-generated cinematic video clip that contains MULTIPLE shots cut together with dialogue from MULTIPLE characters.
 
 Expected: roughly ${expectedLines.length} dialogue line(s), spoken by character(s): ${expectedSpeakerList.join(', ') || '(unknown)'}.
+Expected accent: Nigerian English (West African English). Any sudden switch to American, British, or other non-Nigerian accent is a critical defect.
 
 Return ONLY a JSON object with this exact schema (no prose, no markdown):
 
@@ -351,24 +388,28 @@ Return ONLY a JSON object with this exact schema (no prose, no markdown):
     {
       "approximate_start_ms": <integer milliseconds when this line begins>,
       "speaker_visible": "<character name or descriptor of the speaker visible on screen, e.g. 'woman in green dress' or 'man in suit' or 'unclear'>",
-      "transcript": "<exact verbatim words spoken in this line>"
+      "transcript": "<exact verbatim words spoken in this line>",
+      "accent": "<accent classification for THIS specific line>"
     }
   ],
   "shot_cuts_observed": <integer count of visible shot cuts within the clip>,
   "mouth_sync_quality": "matches" | "off" | "partial" | "silent",
-  "artifacts": ["silence", "background music", "wrong language", "foreign accent", "echo", "static", "speaker shifts mid-line", "last word cut off", "stutter"],
+  "accent_consistent": <boolean: true if all spoken lines maintain the same accent throughout, false if accent switches between lines>,
+  "artifacts": ["silence", "background music", "wrong language", "accent drift", "echo", "static", "speaker shifts mid-line", "last word cut off", "stutter"],
   "character_count": <integer: distinct people visible across the whole clip>,
-  "notes": "<freeform observations: cuts mistimed, character drift across cuts, mismatched lip-sync per line>"
+  "notes": "<freeform observations: cuts mistimed, character drift across cuts, mismatched lip-sync per line, accent issues>"
 }
 
 Critical rules:
 - spoken_lines: ONE entry per distinct dialogue line. If a character speaks 2 sentences in the same shot, those count as 1 line. If 2 characters speak in the same shot, that's 2 lines. Order chronologically.
 - speaker_visible: describe the speaker by visible characteristics. Match against the expected speakers above when possible. Use 'unclear' if you can't tell from the visuals.
 - transcript: VERBATIM. No paraphrasing. If a word is unclear, put [unclear].
+- accent: classify the accent of EACH line independently. Use one of: "Nigerian English", "West African English", "American English", "British English", "neutral/unclear", or another specific accent if clearly identifiable. Pay close attention to sudden shifts — a character speaking Nigerian English in one line and American English in the next is a critical defect ("accent drift").
+- accent_consistent: false if ANY line's accent differs from the others. This is the primary accent drift signal.
 - shot_cuts_observed: count visible cuts (not camera moves). 0 = single continuous shot.
 - mouth_sync_quality: aggregate across the whole clip — does the audio align with visible lip movement throughout?
-- artifacts: only include observed issues; empty array if none.
-- notes: highlight inconsistencies useful for human review (character face drift across cuts, dialogue from wrong character, audio gaps, etc.).
+- artifacts: only include observed issues; empty array if none. Include "accent drift" if accent switches between lines.
+- notes: highlight inconsistencies useful for human review (character face drift across cuts, dialogue from wrong character, audio gaps, accent switches, etc.).
 
 Do NOT include prose, markdown, or commentary. Output ONLY the JSON object.`;
   }
