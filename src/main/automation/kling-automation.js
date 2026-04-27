@@ -305,14 +305,19 @@ class KlingAutomation {
 
     // ── Step 2: Click to toggle ON if currently OFF ──
     if (!isOn) {
+      // Dismiss any blocking overlay (agreement modal, consent dialog) BEFORE clicking.
+      // The "Media upload agreement" modal uses fixed inset-0 z-[1000] and intercepts
+      // all pointer events. Must be removed before the switch can be clicked.
+      await this._dismissBlockingOverlays();
       await switchEl.click({ timeout: 3000 });
       await page.waitForTimeout(1000);
 
       // Verify it actually toggled
       const newState = await switchEl.getAttribute('data-state');
       if (newState !== 'on') {
-        // Retry once
+        // Retry once — dismiss overlays again in case the first click triggered one
         this.log(`Multi-shot still ${newState} after click — retrying...`);
+        await this._dismissBlockingOverlays();
         await switchEl.click({ timeout: 3000 });
         await page.waitForTimeout(1000);
         const retryState = await switchEl.getAttribute('data-state');
@@ -1424,6 +1429,80 @@ class KlingAutomation {
       }
     } catch (e) {
       // Non-fatal — if no modal present, this is a no-op
+    }
+  }
+
+  /**
+   * Aggressively dismiss ANY full-screen blocking overlay that intercepts pointer events.
+   *
+   * Called right before critical clicks (e.g. multi-shot toggle) as a last line of
+   * defense. Uses multiple strategies:
+   *   1. Look for agreement/consent buttons and click them
+   *   2. Try pressing Escape to close modal dialogs
+   *   3. Force-remove any fixed inset-0 overlay via DOM manipulation (nuclear option)
+   *
+   * This is more aggressive than _dismissAgreementModal because it runs at the exact
+   * point of failure and will force-remove overlays if button-clicking doesn't work.
+   */
+  async _dismissBlockingOverlays() {
+    const page = this.automation.page;
+    if (!page) return;
+
+    try {
+      const result = await page.evaluate(() => {
+        // Strategy 1: Find and click agreement/consent buttons
+        const overlays = document.querySelectorAll('div.fixed');
+        for (const overlay of overlays) {
+          const style = window.getComputedStyle(overlay);
+          // Must be covering the viewport (position fixed, large enough)
+          if (style.position !== 'fixed') continue;
+          const rect = overlay.getBoundingClientRect();
+          if (rect.width < window.innerWidth * 0.5 || rect.height < window.innerHeight * 0.5) continue;
+
+          const text = (overlay.textContent || '').toLowerCase();
+          if (text.includes('agree') || text.includes('consent') || text.includes('agreement') || text.includes('terms of service')) {
+            // Click the agree/continue button
+            const buttons = overlay.querySelectorAll('button');
+            for (const btn of buttons) {
+              const btnText = (btn.textContent || '').trim().toLowerCase();
+              if (btnText.includes('agree') || btnText.includes('continue') || btnText.includes('accept')) {
+                btn.click();
+                return { action: 'clicked', button: btn.textContent.trim() };
+              }
+            }
+          }
+        }
+
+        // Strategy 2: Force-remove any fixed inset-0 overlay with high z-index
+        // that's blocking pointer events (nuclear option)
+        const blockers = document.querySelectorAll('div[class*="inset-0"]');
+        for (const blocker of blockers) {
+          const style = window.getComputedStyle(blocker);
+          if (style.position !== 'fixed') continue;
+          const z = parseInt(style.zIndex, 10) || 0;
+          if (z >= 200) {
+            // Check if it contains an agreement/dialog
+            const text = (blocker.textContent || '').toLowerCase();
+            if (text.includes('agree') || text.includes('upload') || text.includes('terms')) {
+              blocker.remove();
+              return { action: 'removed', z };
+            }
+          }
+        }
+
+        return null;
+      });
+
+      if (result) {
+        this.log(`Blocking overlay dismissed: ${result.action} (${result.button || 'z=' + result.z})`);
+        await page.waitForTimeout(500);
+      }
+    } catch (_) {
+      // Try Escape as final fallback
+      try {
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(500);
+      } catch (__) {}
     }
   }
 
