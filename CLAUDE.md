@@ -1096,6 +1096,48 @@ wait 3s → dismiss → wait 2.5s → dismiss → wait 2s → dismiss → wait 1
 - `clearVideoStartFrame()` after homepage navigation, before `selectVideoModel()` clicks
 - `selectVideoModel()` at entry (short 2-round version) to protect all call sites
 
+## Agreement Modal Auto-Dismissal (kling-automation.js)
+
+**Problem:** After re-login to Higgsfield, a full-screen "Media upload agreement" overlay appears (`fixed inset-0 z-[1000]`) that blocks ALL pointer events on the page. The overlay is skipped by `_dismissPromoAd()` (which filters out viewport-sized elements), causing generation failures when clicks intended for multi-shot toggle or other controls get intercepted by the invisible modal.
+
+**Observed trigger:** ch5_sc3_c3 (clip 64) failed twice — the modal appeared after session recreation and intercepted the multi-shot toggle click mid-animation, leaving the page in an inconsistent state.
+
+**Fix:** `_dismissAgreementModal()` — new handler added to the dismissal chain in `_dismissAdsWithPatience()`. Runs BEFORE `_dismissPromoAd()` to clear blocking overlays before they can intercept clicks.
+
+**Detection strategy:**
+- Scans for `fixed`/`absolute` positioned overlays with `z-index >= 1000` (browser modal range)
+- Checks for text content: "Media upload agreement" or "I agree, continue" (case-insensitive substring match)
+- Identifies the agree button (highest-confidence match: contains "agree" or "continue" text, small button-like element, positioned bottom-right of modal)
+
+**Button click:** Uses real mouse click on the agree button. Modal closes, pointer events resume normal.
+
+**Execution order in `_dismissAdsWithPatience()`:**
+```
+1. _dismissAgreementModal()   ← NEW: full-screen blocking overlays
+2. _dismissPromoAd() × 5      ← existing: smaller promo panels
+```
+
+**Impact:** Eliminates modal-interception failures during clip generation. No credit waste (modal appears after page is interactive, before generation starts). Negligible latency (<100ms detection + click).
+
+## Failed Clip Backfill Pass (orchestrator.js)
+
+**Problem:** When the main video generation loop finishes with `failed > 0`, those clips remain failed. Transient failures (agreement modals, browser crashes, ad interception) could recover if retried with a fresh context, but no automatic backfill existed. Users had to manually reset failed clips via script or run the entire pipeline again.
+
+**Fix:** After the main loop completes (line ~6838), a new `_backfillFailedClips()` pass sweeps the DB for all clips marked `failed` in the current project. For each failed clip:
+
+1. **Disk check:** Scans the output directory for the expected file (matches clip ID or asset basename). If file exists and is >10KB, mark it `done` immediately (manual intervention recovered it).
+2. **Fresh retry:** If no file found, reset clip to `pending` and retry with a completely fresh browser context (separate from the main loop context to isolate transient issues).
+3. **Approval prep:** Successfully recovered clips are logged with filename + details and shown for user approval (not auto-approved to preserve safety gate).
+
+**Execution:** Only runs when `failed > 0` after main loop. Prevents needing a full pipeline restart for individual transient failures. Most common recovery: agreement modal intercepted a retry, disk file appeared from prior successful generation.
+
+**Performance:** ~10-30s per failed clip (new context spawn + generation wait). Applied only to clips that failed, not all 150.
+
+**DB state:**
+- Backfilled clips marked `done` with `recovered_from_backfill: true` metadata (audit trail)
+- Re-tried clips follow normal CDN-recovery-first path if generation succeeds
+- Pipeline stage remains `videos-done` after backfill (no stage regression)
+
 ## Page-State Guard
 
 Higgsfield can redirect us to wrong pages (`/create/edit`, Motion Control, homepage) at unexpected times. Before prompt typing, `generateVideo()` runs a guard:
@@ -1831,8 +1873,11 @@ Data from first production run. Formula: `ceil(words / 2.0) + (transitions × 0.
 | ch5_sc1_c3 | 23 | 8/7/8 | 3 | 12s | 14s | ⚠ Same apartment continuation. S1 WIDE static Tunde "Ngozi. Adaeze's signature is on seven filings." (8 words) — face visible, landed. S2 ECU static Ngozi "Her signature? She signed for his fraud?" (7 words) — lip sync failed on "her signature", facial expression direction ("face drains, eyes widening in horror") competed with dialogue. S3 CU slow push-in Tunde "She did not sign. Someone signed for her." (8 words) — LANDED. Push-in with minimal body direction ("eyes hold steady") worked. Insight: push-in succeeds when body language is minimal/static despite camera movement. | S1: "Ngozi. Adaeze's signature is on seven filings." S2: "Her signature? She signed for his fraud?" S3: "She did not sign. Someone signed for her." |
 | ch5_sc2_c1 | 21 | 9/6/6 | 3 | 10s | 13s | ⚠ Ngozi's apartment, Adaeze on sofa, Ngozi by window. All static. S1 WIDE ESTABLISHING static Ngozi "Ada. I need you to look at something." (9 words) — lip sync failed on "something", Ngozi's face turned away from camera. S2 MEDIUM static Adaeze "You called me urgently. What happened?" (6 words) — pronunciation issue "urgently" became "urgencently" (TTS issue). S3 MEDIUM static Ngozi "Tunde brought documents. About Emeka's company." (6 words) — lip sync failed, "turns slightly toward Adaeze" direction may have eaten budget. Face position matters more than camera angle for lip sync — dialogue fails when speaking character's face turned away even in static shot. | S1: "Ada. I need you to look at something." S2: "You called me urgently. What happened?" S3: "Tunde brought documents. About Emeka's company." |
 | ch5_sc2_c2 | 18 | 5/5/8 | 3 | 10s | 12s | ⚠ Same apartment continuation. S1 WIDE slow push-in, Adaeze leaning forward, two chars. "What kind of documents, Ngozi?" (5 words) — Kling morphed documents into her hands (prop improvisation) but dialogue LANDED despite push-in. S2 CU static Ngozi "Company filings. Fraud filings. Look at page three." (8 words) — no issues, clean. S3 ECU static Adaeze "That is my name. That is my signature." (9 words) — dialogue NEVER DELIVERED. "Face goes pale, lips barely moving" direction implicitly suppressed lip sync. NEW category: shot directions describing suppressed emotional states can contradict lip sync animation requirements, causing dialogue dropout. | S1: "What kind of documents, Ngozi?" S2: "Company filings. Fraud filings. Look at page three." S3: "That is my name. That is my signature." |
+| ch5_sc2_c3 | 23 | 9/8/10 | 3 | 10s | 13s | ⚠ Same apartment continuation. S1 WIDE static Chidinma "I thought you would be different. I thought —" (9 words + trail off) — landed clean. S2 MEDIUM on Emeka static "You thought wrong. We are not doing this." (8 words) — landed clean. S3 ECU on Chidinma slow push-in "Do I mean nothing to you? Nothing at all?" (10 words) — gibberish at 12s instead of dialogue, clip ended at 14s. Push-in + tears + emotional direction ("tears streaming, voice breaking") corrupted output. New pattern: emotional action directions (crying, laughter, vocal emotion) in S3 push-in shots degrade dialogue quality even when lip sync nominally "works". | S1: "I thought you would be different. I thought —" S2: "You thought wrong. We are not doing this." S3: "Do I mean nothing to you? Nothing at all?" |
+| ch5_sc3_c1 | 19 | 4/6/9 | 3 | 10s | 12s | ✓ Emeka's office, Chidinma + Emeka. All static. S1 WIDE static Chidinma "Emeka. I am pregnant." (4 words) — no issues. S2 MEDIUM on Emeka static "Close the door behind you first." (6 words) — no issues (dialogue-scene mismatch noted: no door context in scene image, characters already positioned at desk). S3 CU on Chidinma static "Did you hear what I said to you?" (9 words) — 95% accurate, clean delivery. All static + few words = reliable. Blocking consistency: static camera protects dialogue even with multi-character scenes when shot scales and word counts are balanced. | S1: "Emeka. I am pregnant." S2: "Close the door behind you first." S3: "Did you hear what I said to you?" |
+| ch5_sc3_c2 | 21 | 5/8/8 | 3 | 10s | 13s | ✓ Same office continuation. All static. S1 WIDE static Emeka "I heard you. Handle it." (5 words) — clean despite arms crossing + Chidinma stepping forward. S2 CU on Chidinma static "Handle it? That is all you can say?" (8 words) — clean despite "mouth drops open" direction. S3 MEDIUM on Emeka static "This is not the time for this, Chidinma." (8 words) — clean despite paper straightening + not looking up. All shots landed with micro delay on S3 only (1-2 frame slip visible but dialogue intact). Inconsistent with earlier clips (ch5_sc2_c2 where idle posture actions killed dialogue). Pattern emerging: ACTIVE intentional body actions (arms crossing, opening mouth, not looking up) execute cleanly even in multi-char dialogue shots; PASSIVE emotional states ("face goes pale", "tears streaming") degrade lip sync. Action quality and intention may matter more than action type. | S1: "I heard you. Handle it." S2: "Handle it? That is all you can say?" S3: "This is not the time for this, Chidinma." |
 
-**Emerging patterns (updated Session 26, 45 clips):**
+**Emerging patterns (updated Session 26, 48 clips):**
 - **Push-in + dialogue in multi-character scenes = near-certain lip sync failure.** 13/17 multi-char clips with push-in S3 failed. Exceptions: car interior (ch1_sc4_c1/c2), INSERT→PULL BACK (ch2_sc2_c3).
 - **Single-character scenes are push-in safe.** ch2_sc3_c1, ch2_sc4_c2, ch2_sc7_c1 all delivered push-in + dialogue. No second character to split attention.
 - **Camera movement WITHOUT dialogue = always safe.** ch2_sc4_c2 S3 INSERT→tilt, no dialogue — perfect. Full budget when not lip syncing.

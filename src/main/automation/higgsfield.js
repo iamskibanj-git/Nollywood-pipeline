@@ -3939,7 +3939,9 @@ class HiggsFieldAutomation {
       // different pages may render one signal before the other.
       const authState = await page.evaluate(() => {
         // Signal 1: Assets link — only visible when logged in
-        const hasAssets = !!document.querySelector('a[href="/asset/all"], a[href*="/asset"], button:has-text("Assets")');
+        // Note: cannot use Playwright's :has-text() inside evaluate — use standard CSS only
+        const hasAssets = !!document.querySelector('a[href="/asset/all"], a[href*="/asset"]')
+          || Array.from(document.querySelectorAll('a, button')).some(el => (el.textContent || '').trim() === 'Assets');
 
         // Signal 2: Login/Sign up buttons — only visible when logged out
         // Check nav/header area for these specific buttons
