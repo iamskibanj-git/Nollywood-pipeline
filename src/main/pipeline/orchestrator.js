@@ -5245,34 +5245,47 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         reconciledShots.push({ shotNum, shotBody, wordCount, actionVerbs });
       }
 
-      // Validate each shot against original
-      let guardrailViolation = false;
+      // Validate each shot against original — per-shot granular guardrails.
+      // Shots that got shorter/simpler are accepted (visual-state stripping).
+      // Shots that grew or gained verbs are rejected (Vision adding choreography)
+      // and fall back to the ORIGINAL shot direction for that shot only.
+      let anyViolation = false;
       for (const recon of reconciledShots) {
         const orig = originalShots.find(o => o.shotNum === recon.shotNum);
         if (!orig) continue;
 
+        let shotViolated = false;
+
         // Check word count ceiling (20% tolerance)
         if (recon.wordCount > orig.wordCount * 1.2) {
-          this.log(`[SHOT-RECONCILE] GUARDRAIL VIOLATION: Shot ${recon.shotNum} grew from ${orig.wordCount} → ${recon.wordCount} words (>${Math.round(orig.wordCount * 1.2)} limit)`);
-          guardrailViolation = true;
-          break;
+          this.log(`[SHOT-RECONCILE] GUARDRAIL: Shot ${recon.shotNum} grew from ${orig.wordCount} → ${recon.wordCount} words — reverting this shot to original`);
+          shotViolated = true;
         }
 
         // Check action verb count didn't increase
-        if (recon.actionVerbs > orig.actionVerbs) {
-          this.log(`[SHOT-RECONCILE] GUARDRAIL VIOLATION: Shot ${recon.shotNum} action verbs increased from ${orig.actionVerbs} → ${recon.actionVerbs}`);
-          guardrailViolation = true;
-          break;
+        if (!shotViolated && recon.actionVerbs > orig.actionVerbs) {
+          this.log(`[SHOT-RECONCILE] GUARDRAIL: Shot ${recon.shotNum} action verbs increased from ${orig.actionVerbs} → ${recon.actionVerbs} — reverting this shot to original`);
+          shotViolated = true;
+        }
+
+        if (shotViolated) {
+          anyViolation = true;
+          // Replace just this shot's body with the original in resultText
+          // Find the reconciled shot in resultText and swap its body back
+          const shotHeaderPattern = new RegExp(
+            `(Shot\\s*${recon.shotNum}\\s*\\([^)]*\\)\\s*:\\s*)([\\s\\S]*?)(?=Shot\\s*\\d+\\s*\\(|$)`,
+            'i'
+          );
+          const origBody = orig.shotBody;
+          resultText = resultText.replace(shotHeaderPattern, (match, header) => {
+            return header + origBody + '\n\n';
+          });
+          this.log(`[SHOT-RECONCILE] Shot ${recon.shotNum}: reverted to original direction (kept other shots' fixes)`);
         }
       }
 
-      if (guardrailViolation) {
-        this.log('[SHOT-RECONCILE] Guardrail violated — falling back to conservative fix (strip impossible actions only)');
-        // Conservative fallback: just return the original prompt as-is
-        // The preamble (from _injectVisionBlocking) already has correct positions,
-        // so Kling will at least see the right CHARACTER POSITIONS even if shot
-        // directions have stale actions. Kling's improvisation is usually acceptable.
-        return prompt;
+      if (anyViolation) {
+        this.log('[SHOT-RECONCILE] Per-shot guardrail applied — accepted valid fixes, reverted violating shots to originals');
       }
 
       // Validate shot count matches
