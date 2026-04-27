@@ -5095,11 +5095,26 @@ Check for TWO types of problems:
 
 A) PHYSICALLY IMPOSSIBLE ACTIONS — body actions that can't happen given where the character is (e.g., "turns toward the ignition" but the character isn't in the driver's seat).
 
-B) VISUAL-STATE CONTRADICTIONS — shot directions that describe a wardrobe, prop, or appearance state that CONTRADICTS what's visible in the scene image. The scene image is the start frame — Kling cannot change what's already rendered. Examples:
+B) VISUAL-STATE CONTRADICTIONS — shot directions that describe a wardrobe, prop, spatial position, or appearance state that CONTRADICTS what's visible in the scene image. The scene image is the start frame — Kling cannot change what's already rendered. Check ALL of these categories:
+
+   WARDROBE: Does the shot describe clothing that doesn't match the image?
    - "jacket off, sleeves rolled" but the character is wearing a jacket in the image
+
+   PROPS IN HAND: Does the shot reference a prop the character isn't holding/near in the image?
+   - "hand tightens on her handbag strap" but the character is holding a mug in the image
    - "holding a briefcase" but no briefcase is visible anywhere in the image
-   - "hair down" but the character's hair is pinned up in the image
+
+   SPATIAL POSITION: Does the shot place a character somewhere they aren't in the image?
+   - "standing near the door" but the character is seated on the sofa in the image
+   - "has risen from the chair, standing now" but the character is clearly seated
    - "standing" but the character is clearly seated in the image
+
+   FACING DIRECTION: Does the shot require a face angle that's impossible given how the character faces in the image?
+   - EXTREME CLOSE-UP on character's face but the character's back is partially to the camera in the image
+   - "looks directly into camera" but the character is in profile view
+
+   APPEARANCE: Does the shot describe a look that doesn't match?
+   - "hair down" but the character's hair is pinned up in the image
 
 CRITICAL GUARDRAILS — you MUST follow these:
 1. ONLY fix physically impossible actions (A) or visual-state contradictions (B). Leave everything else EXACTLY as-is.
@@ -6168,18 +6183,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         this.log(`[CINEMATIC] ${clipId}: injected vision-refined blocking into multi_shot_prompt`);
       }
 
-      // ── 3RD VISION PASS: RECONCILE SHOT DIRECTIONS WITH VERIFIED BLOCKING ──
-      // After preamble injection, shot body actions may still reference physically
-      // impossible positions (e.g. "turns toward the ignition" when the character
-      // isn't in the driver's seat). Only runs when the 2nd Vision pass made
-      // corrections to this scene's blocking — OR when hadCorrections is unknown
-      // (legacy scenes verified before Session 25, defaults to true for safety).
+      // ── 3rd Vision Pass: reconcile shot directions with scene image ──
+      // Runs for EVERY clip (not gated on sceneHadCorrections) because visual-state
+      // contradictions (wardrobe, props in hand, position, facing direction) exist
+      // regardless of whether the 2nd pass corrected blocking positions.
+      // DB cache prevents re-running on previously reconciled clips.
       if (visionRefinedChars && visionRefinedChars.length > 0 && !shotReconcileCache[clipId]) {
         const sceneKey = `ch${chapter}_sc${scene}`;
-        const cachedScene = verifiedBlockingCache[sceneKey];
-        const sceneHadCorrections = cachedScene?.hadCorrections === true;
 
-        if (sceneHadCorrections) {
+        {
           // Check if this clip was already reconciled in a previous run (persisted in DB)
           const clipAsset = existingClips.find(a => a.kling_clip_id === clipId);
           let alreadyReconciled = false;
@@ -6195,7 +6207,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[SHOT-RECONCILE] ${clipId}: already reconciled (persisted in DB) — skipping`);
             shotReconcileCache[clipId] = true;
           } else {
-            this.log(`[SHOT-RECONCILE] ${clipId}: scene had blocking corrections — reconciling shot directions with scene image...`);
+            this.log(`[SHOT-RECONCILE] ${clipId}: reconciling shot directions with scene image...`);
             let reconcileResult = await this._reconcileShotDirectionsWithImage(
               startFramePath,
               visionRefinedChars,
@@ -6297,8 +6309,6 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
             shotReconcileCache[clipId] = true;
           }
-        } else {
-          this.log(`[SHOT-RECONCILE] ${clipId}: scene blocking matched proposed — no shot reconciliation needed`);
         }
       }
 
