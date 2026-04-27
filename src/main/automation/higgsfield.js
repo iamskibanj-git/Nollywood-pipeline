@@ -3929,18 +3929,71 @@ class HiggsFieldAutomation {
 
   async isLoggedIn() {
     try {
-      const sel = this.selectors.auth;
-      // Look for the Assets link which is only visible when logged in
-      // Try twice with a wait — freshly loaded pages may take a moment to render auth state
-      let loggedIn = await this.page.$(sel.loggedInIndicator);
-      if (!loggedIn) {
-        console.log('[SESSION] Login indicator not found on first check, waiting 3s for page render...');
-        await this.page.waitForTimeout(3000);
-        loggedIn = await this.page.$(sel.loggedInIndicator);
+      const page = this.page;
+      if (!page) return true; // No page = can't check, assume logged in
+
+      // Two-signal check: positive (Assets link = logged in) AND negative
+      // (Login/Sign up buttons = logged out). Either signal is definitive.
+      // The Assets link only appears when authenticated. The Login/Sign up
+      // buttons only appear when NOT authenticated. Check both because
+      // different pages may render one signal before the other.
+      const authState = await page.evaluate(() => {
+        // Signal 1: Assets link — only visible when logged in
+        const hasAssets = !!document.querySelector('a[href="/asset/all"], a[href*="/asset"], button:has-text("Assets")');
+
+        // Signal 2: Login/Sign up buttons — only visible when logged out
+        // Check nav/header area for these specific buttons
+        const allLinks = Array.from(document.querySelectorAll('a, button'));
+        const hasLoginBtn = allLinks.some(el => {
+          const text = (el.textContent || '').trim().toLowerCase();
+          return text === 'login' || text === 'log in';
+        });
+        const hasSignUpBtn = allLinks.some(el => {
+          const text = (el.textContent || '').trim().toLowerCase();
+          return text === 'sign up' || text === 'signup';
+        });
+
+        // Signal 3: Login page redirect
+        const isLoginPage = window.location.pathname.includes('/login') || window.location.pathname.includes('/signin');
+
+        return { hasAssets, hasLoginBtn, hasSignUpBtn, isLoginPage };
+      });
+
+      // Definitive logged-out signals
+      if (authState.isLoginPage || (authState.hasLoginBtn && authState.hasSignUpBtn)) {
+        console.log(`[SESSION] isLoggedIn: FALSE — ${authState.isLoginPage ? 'on login page' : 'Login/Sign up buttons visible'}`);
+        return false;
       }
-      const url = this.page.url();
-      console.log(`[SESSION] isLoggedIn check: ${!!loggedIn} (URL: ${url})`);
-      return !!loggedIn;
+
+      // Definitive logged-in signal
+      if (authState.hasAssets) {
+        console.log('[SESSION] isLoggedIn: TRUE — Assets link visible');
+        return true;
+      }
+
+      // Neither signal found — wait for page to render and retry
+      console.log('[SESSION] Login state ambiguous on first check, waiting 3s...');
+      await page.waitForTimeout(3000);
+
+      const retry = await page.evaluate(() => {
+        const hasAssets = !!document.querySelector('a[href="/asset/all"], a[href*="/asset"]');
+        const allLinks = Array.from(document.querySelectorAll('a, button'));
+        const hasLoginBtn = allLinks.some(el => (el.textContent || '').trim().toLowerCase() === 'login' || (el.textContent || '').trim().toLowerCase() === 'log in');
+        const hasSignUpBtn = allLinks.some(el => (el.textContent || '').trim().toLowerCase() === 'sign up' || (el.textContent || '').trim().toLowerCase() === 'signup');
+        return { hasAssets, hasLoginBtn, hasSignUpBtn };
+      });
+
+      if (retry.hasLoginBtn && retry.hasSignUpBtn) {
+        console.log('[SESSION] isLoggedIn: FALSE — Login/Sign up buttons visible (retry)');
+        return false;
+      }
+      if (retry.hasAssets) {
+        console.log('[SESSION] isLoggedIn: TRUE — Assets link visible (retry)');
+        return true;
+      }
+
+      console.log('[SESSION] isLoggedIn: AMBIGUOUS — assuming true (no definitive signal)');
+      return true;
     } catch (e) {
       console.warn(`[SESSION] isLoggedIn check error: ${e.message}`);
       return true; // Assume logged in if check fails

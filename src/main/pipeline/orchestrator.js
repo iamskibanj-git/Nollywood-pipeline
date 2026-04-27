@@ -863,8 +863,19 @@ class PipelineOrchestrator {
           // path). The generic resume can't reconstruct this — clear the gate
           // and let the video gen loop re-encounter the clip naturally.
           const PER_CLIP_GATES = ['prompt-preview', 'clip-review'];
-          if (PER_CLIP_GATES.includes(pendingGate)) {
-            this.log(`[RESUME] Pending per-clip gate "${pendingGate}" — clearing (video loop will re-fire with clip data)`);
+
+          // ── STALE GATE CHECK ──
+          // If clips have already been generated, earlier gates (scenes, dialogue-triage)
+          // are stale — the user already passed them in a previous session. Clear them
+          // and skip, same as per-clip gates. This prevents re-showing dialogue triage
+          // after 60+ clips are generated just because the DB still has the gate stored.
+          const existingDoneClips = db.getAssets(projectId, { type: 'video_clip_cinematic' })
+            .filter(a => a.status === 'done');
+          const STALE_GATES_WHEN_CLIPS_EXIST = ['dialogue-triage', 'scenes'];
+          const isStaleGate = existingDoneClips.length > 0 && STALE_GATES_WHEN_CLIPS_EXIST.includes(pendingGate);
+
+          if (PER_CLIP_GATES.includes(pendingGate) || isStaleGate) {
+            this.log(`[RESUME] Pending ${isStaleGate ? 'stale' : 'per-clip'} gate "${pendingGate}" — clearing (${isStaleGate ? existingDoneClips.length + ' clips already done' : 'video loop will re-fire with clip data'})`);
             try {
               delete settings.pending_approval_gate;
               db.updateProject(projectId, { settings: JSON.stringify(settings) });
@@ -6672,6 +6683,37 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       } catch (e) {
         this.log(`[CINEMATIC] ${clipId} failed: ${e.message}`, 'warn');
+
+        // ── SESSION EXPIRED: pause pipeline, relaunch browser, wait for login ──
+        // Must be checked BEFORE any retry logic — no point retrying without auth.
+        if (e.message && e.message.startsWith('SESSION_EXPIRED')) {
+          this.log('[CINEMATIC] Session expired — pausing for re-authentication...', 'warn');
+          this.paused = true;
+          this.state.status = 'session_expired';
+          this.emit({ type: 'session-expired', message: e.message });
+
+          // Relaunch browser so user can log in
+          if (this.automation) {
+            try {
+              await this.automation.close();
+            } catch (_) {}
+            await this.automation.ensureBrowser();
+            await this.automation.page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+            this.log('Fresh browser opened — please log into Higgsfield, then click Resume.');
+          }
+
+          // Wait for user to log in and click Resume
+          await new Promise((resolve) => { this._pauseResolver = resolve; });
+          if (this.cancelled) return;
+
+          this.paused = false;
+          this.state.status = 'running';
+          this.log('[CINEMATIC] Resumed after re-authentication — retrying clip...');
+          // Retry this clip (don't increment i)
+          i--;
+          continue;
+        }
+
         let shouldRetry = false;
 
         // ── KLING RECOVERY: attempt to recover from Asset library ──

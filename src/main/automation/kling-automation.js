@@ -147,7 +147,10 @@ class KlingAutomation {
     // The Kling page loads even when logged out (shows Login/Sign up buttons),
     // and page readiness checks pass because the form elements exist in DOM.
     // Must explicitly check login state to avoid wasting a generation attempt.
+    // Uses the unified isLoggedIn() which checks both positive (Assets link)
+    // and negative (Login/Sign up buttons) signals.
     if (!(await this.automation.isLoggedIn())) {
+      this.log('SESSION_EXPIRED: user is not logged in');
       throw new Error('SESSION_EXPIRED: Please log into Higgsfield AI in the browser, then click Resume.');
     }
 
