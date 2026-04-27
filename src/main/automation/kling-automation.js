@@ -1343,6 +1343,11 @@ class KlingAutomation {
       const page = this.automation.page;
       if (!page) return;
 
+      // ── Agreement / consent modals (full-screen overlays with z-[1000]) ──
+      // These appear after re-login and block ALL pointer events until dismissed.
+      // Must be handled BEFORE ads because ads sit behind the overlay.
+      await this._dismissAgreementModal(tag);
+
       this.log(`${tag} Waiting 3s for any ads to render before dismissing...`);
       await page.waitForTimeout(3000);
 
@@ -1360,6 +1365,65 @@ class KlingAutomation {
       this.log(`${tag} Ad dismissal complete, proceeding`);
     } catch (e) {
       this.log(`${tag} Ad dismissal failed (non-fatal): ${e.message.split('\n')[0]}`);
+    }
+  }
+
+  /**
+   * Dismiss Higgsfield's "Media upload agreement" modal.
+   *
+   * This full-screen overlay (fixed inset-0 z-[1000]) appears after re-login
+   * or first visit. It blocks ALL pointer events on the page, preventing any
+   * interaction with the form. The overlay contains consent text and an
+   * "I agree, continue" button.
+   *
+   * Unlike promo ads, this modal is viewport-sized so _dismissPromoAd() skips
+   * it (widthRatio > 0.85 filter). We detect it by looking for the specific
+   * button text or the agreement-related keywords in the overlay.
+   *
+   * @param {string} tag - log prefix for tracing
+   */
+  async _dismissAgreementModal(tag) {
+    try {
+      const page = this.automation.page;
+      if (!page) return;
+
+      const dismissed = await page.evaluate(() => {
+        // Look for full-screen overlay with agreement/consent content
+        const overlays = document.querySelectorAll('div[class*="fixed"][class*="inset-0"]');
+        for (const overlay of overlays) {
+          const text = (overlay.textContent || '').toLowerCase();
+          // Match known agreement modals by content keywords
+          if (text.includes('media upload agreement') ||
+              text.includes('i agree, continue') ||
+              text.includes('terms of service') && text.includes('i agree')) {
+            // Find and click the "I agree, continue" button
+            const buttons = overlay.querySelectorAll('button');
+            for (const btn of buttons) {
+              const btnText = (btn.textContent || '').trim().toLowerCase();
+              if (btnText.includes('i agree') || btnText.includes('agree') && btnText.includes('continue')) {
+                btn.click();
+                return 'agreement';
+              }
+            }
+            // Fallback: click any non-cancel button
+            for (const btn of buttons) {
+              const btnText = (btn.textContent || '').trim().toLowerCase();
+              if (!btnText.includes('cancel')) {
+                btn.click();
+                return 'agreement-fallback';
+              }
+            }
+          }
+        }
+        return null;
+      });
+
+      if (dismissed) {
+        this.log(`${tag} Dismissed ${dismissed} modal — waiting for overlay to close`);
+        await page.waitForTimeout(1000);
+      }
+    } catch (e) {
+      // Non-fatal — if no modal present, this is a no-op
     }
   }
 

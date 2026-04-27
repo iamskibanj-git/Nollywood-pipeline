@@ -6836,6 +6836,107 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
 
     this.log(`[CINEMATIC] Video stage complete — ${generated} generated, ${skipped} resumed, ${dialogueSkipped} dialogue-skipped, ${failed} failed`);
+
+    // ── BACKFILL PASS: retry any clips that failed during the main loop ──
+    // Failures from transient issues (agreement modals, browser crashes, ad
+    // interception) leave clips marked as 'failed' in the DB. Rather than
+    // requiring a full restart, sweep through and retry each failed clip once.
+    if (failed > 0 && !this.cancelled) {
+      const failedAssets = db.getAssets(projectId, { type: 'video_clip_cinematic' })
+        .filter(a => a.status === 'failed' && a.kling_clip_id);
+
+      if (failedAssets.length > 0) {
+        this.log(`[CINEMATIC] ── BACKFILL PASS: ${failedAssets.length} failed clip(s) to retry ──`);
+        let backfillSuccess = 0;
+        let backfillFail = 0;
+
+        for (const failedAsset of failedAssets) {
+          if (this.cancelled) break;
+
+          const failedClipId = failedAsset.kling_clip_id;
+          // Find the matching clip definition from allKlingClips
+          const matchIdx = allKlingClips.findIndex(item => {
+            const cid = item.clipDef.clip_id || `ch${item.chapter}_sc${item.scene}_c${allKlingClips.indexOf(item) + 1}`;
+            return cid === failedClipId;
+          });
+
+          if (matchIdx === -1) {
+            this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: no matching clip definition found — skipping`);
+            backfillFail++;
+            continue;
+          }
+
+          // Check if file appeared on disk since the failure (manual intervention, etc.)
+          const expectedPath = path.join(clipsDir, `${failedClipId}_cinematic.mp4`);
+          if (fs.existsSync(expectedPath) && fs.statSync(expectedPath).size > 50000) {
+            this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: file found on disk (${(fs.statSync(expectedPath).size / 1024 / 1024).toFixed(2)} MB) — marking done`);
+            db.markAssetDone(failedAsset.id, expectedPath, { model: 'kling-3.0' });
+            backfillSuccess++;
+            continue;
+          }
+
+          const item = allKlingClips[matchIdx];
+          const { chapter, scene, clipDef, startFramePath: sfPath, visionRefinedChars } = item;
+          const label = `${failedClipId} (Ch${chapter} Sc${scene}, ${clipDef.duration_seconds || 10}s, ${(clipDef.line_refs || []).length} line(s))`;
+
+          this.log(`[CINEMATIC] [BACKFILL] Retrying ${label}...`);
+
+          // Reset asset status for retry
+          db.resetAsset(failedAsset.id);
+
+          try {
+            // Fresh browser context for clean slate
+            this.log(`[CINEMATIC] [BACKFILL] Recreating browser context for ${failedClipId}...`);
+            await this.automation.recreateContext();
+
+            const clipPath = path.join(clipsDir, `${failedClipId}_cinematic.mp4`);
+            const result = await this.klingAutomation.generateClip({
+              startFramePath: sfPath,
+              startFrameGenId: item.startFrameGenId,
+              multiShotPrompt: failedAsset.prompt ? JSON.parse(failedAsset.prompt).prompt || clipDef.multi_shot_prompt : clipDef.multi_shot_prompt,
+              durationSeconds: clipDef.duration_seconds || 10,
+              outputPath: clipPath,
+              validElements: clipDef.valid_elements || [],
+            });
+
+            db.markAssetDone(failedAsset.id, result.path, {
+              model: 'kling-3.0',
+              sourceGenId: result.generationId,
+              cdnUrl: result.cdnUrl,
+            });
+            backfillSuccess++;
+            this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: SUCCESS — ${(fs.statSync(result.path).size / 1024 / 1024).toFixed(2)} MB`);
+
+            // Show for approval
+            this.log(`[CINEMATIC] [BACKFILL] Waiting for clip approval: ${failedClipId}`);
+            this.emit({
+              type: 'waiting',
+              gate: 'clip-review',
+              clipId: failedClipId,
+              clipPath: result.path,
+              clipIndex: matchIdx,
+              clipTotal: allKlingClips.length,
+              clipLabel: `[BACKFILL] ${label}`,
+            });
+            const decision = await this.waitForApproval('clip-review');
+            if (decision === 'stop') {
+              this.log(`[CINEMATIC] [BACKFILL] User stopped after ${failedClipId}`);
+              break;
+            }
+          } catch (backfillErr) {
+            this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: retry failed — ${backfillErr.message}`, 'warn');
+            db.markAssetFailed(failedAsset.id, `backfill: ${backfillErr.message}`);
+            backfillFail++;
+          }
+        }
+
+        this.log(`[CINEMATIC] ── BACKFILL COMPLETE: ${backfillSuccess} recovered, ${backfillFail} still failed ──`);
+        generated += backfillSuccess;
+        failed = failed - backfillSuccess;
+      }
+    }
+
+    this.log(`[CINEMATIC] Video stage final tally — ${generated} generated, ${skipped} resumed, ${dialogueSkipped} dialogue-skipped, ${failed} failed`);
   }
 
   /**
