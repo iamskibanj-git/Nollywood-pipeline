@@ -143,6 +143,14 @@ class KlingAutomation {
     this.log(`Page readiness: ${readyCount}/${REQUIRED_CHECKS} checks in ${(elapsedMs / 1000).toFixed(1)}s — waiting ${bufferMs}ms buffer`);
     await page.waitForTimeout(bufferMs);
 
+    // ── LOGIN CHECK: verify user is authenticated before proceeding ──
+    // The Kling page loads even when logged out (shows Login/Sign up buttons),
+    // and page readiness checks pass because the form elements exist in DOM.
+    // Must explicitly check login state to avoid wasting a generation attempt.
+    if (!(await this.automation.isLoggedIn())) {
+      throw new Error('SESSION_EXPIRED: Please log into Higgsfield AI in the browser, then click Resume.');
+    }
+
     // ── AD DISMISSAL: ads can appear 1-3s after page load and cover the UI ──
     await this._dismissAdsWithPatience('[KLING-NAV]');
 
