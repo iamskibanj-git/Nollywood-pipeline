@@ -1549,6 +1549,8 @@ class KlingAutomation {
       await this._typeMultiShotPrompt(multiShotPrompt, validElements);
       await this.automation.page.waitForTimeout(800);
     } catch (setupErr) {
+      // Don't wrap SESSION_EXPIRED — orchestrator needs to match it directly
+      if (setupErr.message && setupErr.message.includes('SESSION_EXPIRED')) throw setupErr;
       throw new Error(`[PRE-GEN] ${setupErr.message}`);
     }
 

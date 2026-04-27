@@ -2238,7 +2238,7 @@ class PipelineOrchestrator {
               // Don't throw — mark as failed and continue to the next clip.
               // Failed clips can be retried later via redo-scenes.js or on resume.
               // Only abort if SESSION_EXPIRED (user needs to re-login).
-              if (err.message.startsWith('SESSION_EXPIRED')) throw err;
+              if (err.message.includes('SESSION_EXPIRED')) throw err;
 
               this.log(`Continuing to next clip (${roundIncomplete.length - (clipIndex - (totalClips - roundIncomplete.length))} remaining in this round)...`, 'warn');
               continue;
@@ -2387,7 +2387,7 @@ class PipelineOrchestrator {
                     if (err.detectedCdnUrl) db.markAssetCdnUrl(asset.id, err.detectedCdnUrl);
                     db.markAssetFailed(asset.id, err.message);
                     this.log(`[VERIFY-REDO] Clip failed: ${clipLabel}: ${err.message}`, 'error');
-                    if (err.message.startsWith('SESSION_EXPIRED')) throw err;
+                    if (err.message.includes('SESSION_EXPIRED')) throw err;
                   }
                 }
                 db.updateProjectStage(projectId, 'videos-done');
@@ -6686,7 +6686,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
         // ── SESSION EXPIRED: pause pipeline, relaunch browser, wait for login ──
         // Must be checked BEFORE any retry logic — no point retrying without auth.
-        if (e.message && e.message.startsWith('SESSION_EXPIRED')) {
+        if (e.message && e.message.includes('SESSION_EXPIRED')) {
           this.log('[CINEMATIC] Session expired — pausing for re-authentication...', 'warn');
           this.paused = true;
           this.state.status = 'session_expired';
@@ -7009,7 +7009,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     if (this._historyAttempted && this._historyAttempted.has(asset.id)) return false;
     if (this.cancelled) return false;
     if (!err || !err.message) return false;
-    if (err.message.startsWith('SESSION_EXPIRED')) return false;
+    if (err.message.includes('SESSION_EXPIRED')) return false;
     if (err.message.includes('Target') && err.message.includes('closed')) return false;
     // If we already rescued the CDN URL, the normal restart-recovery path handles it
     if (err.detectedCdnUrl) return false;
@@ -8858,7 +8858,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     try {
       return await fn();
     } catch (err) {
-      if (err.message && err.message.startsWith('SESSION_EXPIRED')) {
+      if (err.message && err.message.includes('SESSION_EXPIRED')) {
         this.log(`Session expired during ${label}. Relaunching browser for re-authentication...`, 'warn');
         this.paused = true;
         this.state.status = 'session_expired';

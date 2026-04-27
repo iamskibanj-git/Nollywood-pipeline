@@ -960,7 +960,7 @@ class HiggsFieldAutomation {
       return genMeta;
 
     } catch (err) {
-      if (err.message.startsWith('SESSION_EXPIRED')) throw err;
+      if (err.message.includes('SESSION_EXPIRED')) throw err;
 
       // Attach CDN URL for recovery (before any re-throw)
       if (this._lastDetectedUrl) {
@@ -1576,7 +1576,7 @@ class HiggsFieldAutomation {
       return genMeta;
 
     } catch (err) {
-      if (err.message.startsWith('SESSION_EXPIRED')) throw err;
+      if (err.message.includes('SESSION_EXPIRED')) throw err;
 
       // Attach the detected CDN URL to the error so the orchestrator can save it
       // for retry on restart (generation succeeded but download may have failed)
