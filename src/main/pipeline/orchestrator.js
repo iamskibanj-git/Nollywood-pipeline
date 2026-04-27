@@ -1939,9 +1939,18 @@ class PipelineOrchestrator {
           // Before expensive Kling generation, let the user review which clips
           // have dialogue vs. silent/b-roll. Silent clips default to 'skipped'
           // because Kling fabricates gibberish speech on no-dialogue scenes.
-          // Skip if the generic resume already handled this or a later gate.
+          // Skip if:
+          //   1. The generic resume already handled this or a later gate, OR
+          //   2. Any clips have already been generated (user already triaged in a
+          //      previous session — re-showing triage after 60+ clips is pointless)
           const TRIAGE_GATE_ORDER = 1;
-          if (!isResume || this._resumedGateOrder < TRIAGE_GATE_ORDER) {
+          const existingDoneClips = db.getAssets(projectId, { type: 'video_clip_cinematic' })
+            .filter(a => a.status === 'done');
+          const triageAlreadyDone = existingDoneClips.length > 0;
+
+          if (triageAlreadyDone) {
+            this.log(`[RESUME] Skipping dialogue triage — ${existingDoneClips.length} clips already generated (triage was done in a previous session)`);
+          } else if (!isResume || this._resumedGateOrder < TRIAGE_GATE_ORDER) {
             this._emitDialogueTriageData(projectId);
             this.state.status = 'waiting_approval';
             this.emit({ type: 'waiting', gate: 'dialogue-triage' });
