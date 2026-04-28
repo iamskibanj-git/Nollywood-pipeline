@@ -6465,7 +6465,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
       // ── SMART DURATION — ensure dialogue fits ──
       // Count dialogue words from the prompt and calculate minimum needed time.
-      // Formula: (words / 2.0) + (shotTransitions * 0.5) + 1.5s buffer
+      // Formula: (words / 2.5) + (shotTransitions * 0.5) + 1.0s buffer
       // If the calculated duration exceeds the script's requested duration,
       // bump up. Kling supports 3-15s; cap at 15.
       const effectiveDuration = (() => {
@@ -6480,8 +6480,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         // Count shot transitions (number of shots - 1)
         const shotCount = (finalMultiShotPrompt.match(/Shot \d+/gi) || []).length;
         const transitions = Math.max(0, shotCount - 1);
-        // Conservative speaking rate: 2.0 words/sec for accented delivery
-        const minDuration = Math.ceil((wordCount / 2.0) + (transitions * 0.5) + 1.5);
+        // Observed speaking rate: ~2.5 words/sec for Kling's accented delivery
+        // (was 2.0 — too conservative, caused 3-4s dead air where Kling fills with phantom animations)
+        const minDuration = Math.ceil((wordCount / 2.5) + (transitions * 0.5) + 1.0);
         const effective = Math.min(15, Math.max(5, Math.max(scriptDur, minDuration)));
         if (effective > scriptDur) {
           this.log(`[DURATION] ${clipId}: script says ${scriptDur}s but dialogue needs ~${minDuration}s (${wordCount} words, ${shotCount} shots) → bumped to ${effective}s`);
