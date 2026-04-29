@@ -6142,8 +6142,28 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           : `error="${(existingAsset.error_message || '').slice(0, 60)}"`;
         this.log(`[CINEMATIC] ${clipId}: Generate was already clicked (${signal}) — attempting recovery instead of re-generating`);
 
-        // Sanitize prompt for recovery matching (same as the normal flow)
+        // Use the ACTUAL prompt that was submitted to Kling (stored by markAssetGenerating).
+        // This includes the vision-blocking preamble, shot reconciliation, posture fixes,
+        // dialogue sanitization, etc. — all the transforms applied before submission.
+        // Without this, recovery compares the original script prompt against the tile's
+        // prompt (which has the CHARACTER POSITIONS preamble), causing ~74% similarity
+        // on exact matches instead of ~100%.
         let recoveryPrompt = clipDef.multi_shot_prompt || '';
+        if (existingAsset.prompt_used) {
+          try {
+            const parsed = JSON.parse(existingAsset.prompt_used);
+            if (parsed.prompt && parsed.prompt.length > 50) {
+              recoveryPrompt = parsed.prompt;
+              this.log(`[CINEMATIC] ${clipId}: using stored prompt_used for recovery matching (${recoveryPrompt.length} chars)`);
+            }
+          } catch (_) {
+            // Legacy: prompt_used might be raw string
+            if (existingAsset.prompt_used.length > 50) {
+              recoveryPrompt = existingAsset.prompt_used;
+              this.log(`[CINEMATIC] ${clipId}: using raw prompt_used for recovery matching (${recoveryPrompt.length} chars)`);
+            }
+          }
+        }
         const elemMap2 = this.state.cinematicElementNames || {};
         const validNames2 = new Set(Object.values(elemMap2).map(n => n.toLowerCase()));
         recoveryPrompt = recoveryPrompt.replace(/@([a-z0-9_]+)/gi, (match, name) => {

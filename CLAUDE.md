@@ -1313,10 +1313,19 @@ Applied to both `cinema-studio-automation.js` (Higgsfield scene images) and `kli
 
 Total wait time before failure: ~7 minutes of recovery windows. Videos that complete in Kling's queue during any of these windows are caught. The second recovery (step 2) is the key addition — it catches videos that were still generating when the first recovery ran, without burning credits on an unnecessary re-gen.
 
-### Recovery SESSION_EXPIRED Detection (kling-automation.js, orchestrator.js) — Session 27
+### Recovery SESSION_EXPIRED Detection (kling-automation.js, orchestrator.js) — Session 27-28
 **Problem:** When recovery navigates to `higgsfield.ai/asset/video` and finds zero video tiles (empty page / "Project Not Found"), it means the user is not logged in. Previously recovery returned `null` (no match), which caused the orchestrator to re-generate — wasting credits on a gen that would also fail due to no session.
 
-**Fix:** `recoverTimedOutClip()` now throws `SESSION_EXPIRED` when zero video tiles are found after 4 polling attempts. Both recovery catch blocks in the orchestrator (`recoveryErr` and `finalRecErr`) re-throw `SESSION_EXPIRED` instead of swallowing it, allowing it to bubble up to the outer catch which pauses the pipeline, opens a fresh browser, and waits for the user to log in. No credits wasted, no moving on without auth.
+**Fix (Session 27):** `recoverTimedOutClip()` now throws `SESSION_EXPIRED` when zero video tiles are found after 4 polling attempts. The post-timeout recovery catch blocks (`recoveryErr` and `finalRecErr`) re-throw `SESSION_EXPIRED` to bubble up to the outer catch which pauses the pipeline.
+
+**Fix (Session 28 — two additional bugs):**
+1. **Pre-gen recovery catch swallowed SESSION_EXPIRED.** The pre-gen recovery path (when `gen_clicked_at` is set) had its own catch block at ~line 6202 that logged "will re-generate" without checking for SESSION_EXPIRED. This catch block sits OUTSIDE the main try/catch (line ~6610) that contains the SESSION_EXPIRED handler, so `throw` would escape the for-loop entirely. Fix: handle SESSION_EXPIRED inline in the pre-gen recovery catch with the same pause-wait-retry logic (pause, emit `session-expired`, relaunch browser, wait for Resume, `i--; continue`).
+2. **Recovery prompt mismatch — 74% on exact matches.** Pre-gen recovery compared `clipDef.multi_shot_prompt` (original script prompt) against the Kling tile prompt. But the actual prompt submitted to Kling included the CHARACTER POSITIONS preamble (vision-blocking injection), shot reconciliation, posture fixes, and dialogue sanitization — all applied after the script prompt. Result: 74% Dice coefficient on prompts that should be identical. Fix: recovery now reads `existingAsset.prompt_used` (the actual prompt stored by `markAssetGenerating` before clicking Generate) and uses that for comparison. Similarity jumps from ~74% to near-100% on true matches. Falls back to `clipDef.multi_shot_prompt` only when `prompt_used` is unavailable.
+
+**Architecture of SESSION_EXPIRED handling across all three catch blocks:**
+- **Pre-gen recovery catch** (line ~6202): inline pause-wait-retry (can't throw — outside the main try/catch)
+- **Post-timeout recovery catch** (line ~6830): re-throws to outer catch (inside the main try/catch)
+- **Outer generation catch** (line ~6690): pause pipeline, relaunch browser, wait for user Resume, `i--; continue`
 
 ### Vision-Refined Blocking — Bare Character Names (orchestrator.js)
 **Problem:** Claude Vision API returns blocking text with bare character names ("toward son_emeka") without `@` prefix. These don't become @-mention pills in Higgsfield.
