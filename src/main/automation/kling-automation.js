@@ -1043,14 +1043,16 @@ class KlingAutomation {
    * @param {string} submittedPrompt - the exact multi_shot_prompt submitted to Kling
    * @param {string} outputPath      - where to save the recovered mp4
    * @param {Object} [opts]
-   * @param {number} [opts.minSimilarity=85] - minimum prompt similarity (0-100)
+   * @param {number} [opts.minSimilarity=92] - minimum prompt similarity (0-100)
    * @param {number} [opts.maxTilesToCheck=8] - max tiles to click before giving up
    * @param {number} [opts.timeoutMs=60000]   - total recovery timeout
    * @returns {Promise<{path, sourceGenId, cdnUrl, assetUuid}|null>}
    */
   async recoverTimedOutClip(submittedPrompt, outputPath, opts = {}) {
     const fs = require('fs');
-    const minSimilarity = opts.minSimilarity || 85;
+    // Raised from 85% to 92% — consecutive scenes with same characters/location
+    // produce 84-86% similarity, causing false positive matches on wrong clips.
+    const minSimilarity = opts.minSimilarity || 92;
     const maxTilesToCheck = opts.maxTilesToCheck || 8;
     const timeoutMs = opts.timeoutMs || 60000;
     const startedAt = Date.now();

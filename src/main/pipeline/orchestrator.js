@@ -6154,7 +6154,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         const recoveryOutputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
         try {
           const recovered = await kling.recoverTimedOutClip(recoveryPrompt, recoveryOutputPath, {
-            minSimilarity: 75,  // lower threshold — prompt may have been modified by Kling
+            minSimilarity: 88,  // was 75 — raised to prevent false matches on same-location scenes
             maxTilesToCheck: 8,
             timeoutMs: 90000,
           });
@@ -6732,7 +6732,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.log(`[CINEMATIC] ${clipId}: wait complete — attempting Asset library recovery...`);
           try {
             const recovered = await kling.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
-              minSimilarity: 85,
+              minSimilarity: 92,
               maxTilesToCheck: 6,
               timeoutMs: 60000,
             });
@@ -6774,9 +6774,55 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               }
               continue; // skip the failure path — clip is done
             } else {
-              this.log(`[CINEMATIC] ${clipId}: recovery found no match — will re-generate`);
-              // Not in local folder, not in Higgsfield → re-generate
-              shouldRetry = true;
+              // ── SECOND RECOVERY ATTEMPT ──
+              // Video may still be generating in Kling. Wait again, then retry recovery
+              // before burning credits on a re-generation.
+              this.log(`[CINEMATIC] ${clipId}: recovery found no match — waiting 120s for second recovery attempt...`);
+              await new Promise(r => setTimeout(r, 120000));
+              this.log(`[CINEMATIC] ${clipId}: second recovery attempt (6 tiles, 92%)...`);
+              const recovered2 = await kling.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
+                minSimilarity: 92,
+                maxTilesToCheck: 6,
+                timeoutMs: 60000,
+              });
+              if (recovered2) {
+                this.log(`[CINEMATIC] ✓ ${clipId} RECOVERED on second attempt (similarity=${recovered2.similarity}%, uuid=${recovered2.assetUuid || 'unknown'})`);
+                if (clipAsset) {
+                  db.markAssetDone(clipAsset.id, recovered2.path, {
+                    model: 'kling-3.0',
+                    sourceGenId: recovered2.sourceGenId,
+                    cdnUrl: recovered2.cdnUrl,
+                  });
+                }
+                generated++;
+                this.state.videoClips = this.state.videoClips || [];
+                this.state.videoClips.push({
+                  chapter, scene, clipId, path: recovered2.path, status: 'complete',
+                });
+                this.emit({ type: 'clip-complete', index: i, path: recovered2.path });
+
+                if (i < allKlingClips.length - 1) {
+                  this.log(`[CINEMATIC] Waiting for clip approval (2nd recovery): ${clipId}`);
+                  this.emit({
+                    type: 'waiting',
+                    gate: 'clip-review',
+                    clipId,
+                    clipPath: recovered2.path,
+                    clipIndex: i,
+                    clipTotal: allKlingClips.length,
+                    clipLabel: label,
+                  });
+                  const decision = await this.waitForApproval('clip-review');
+                  if (decision === 'stop') {
+                    this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
+                    break;
+                  }
+                }
+                continue; // second recovery succeeded
+              } else {
+                this.log(`[CINEMATIC] ${clipId}: second recovery also found no match — will re-generate`);
+                shouldRetry = true;
+              }
             }
           } catch (recoveryErr) {
             this.log(`[CINEMATIC] ${clipId}: recovery error — ${recoveryErr.message} — will re-generate`, 'warn');
@@ -6879,6 +6925,62 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             continue; // retry succeeded — skip failure path
           } catch (retryErr) {
             this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
+
+            // ── DOUBLE-TIMEOUT FINAL RECOVERY ──
+            // Both attempts timed out — videos may still be generating in Kling.
+            // Wait longer, then sweep more tiles with a slightly relaxed threshold.
+            const isRetryTimeout = retryErr.message.includes('Timeout') || retryErr.message.includes('timeout');
+            if (isRetryTimeout && finalMultiShotPrompt) {
+              this.log(`[CINEMATIC] ${clipId}: double timeout — waiting 180s then final recovery sweep (6 tiles, 88%)...`);
+              await new Promise(r => setTimeout(r, 180000)); // 3 minutes
+              try {
+                const finalRecovered = await kling.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
+                  minSimilarity: 88,    // slightly relaxed — we know the video exists
+                  maxTilesToCheck: 6,
+                  timeoutMs: 90000,
+                });
+                if (finalRecovered) {
+                  this.log(`[CINEMATIC] ✓ ${clipId} RECOVERED on final sweep (similarity=${finalRecovered.similarity}%, uuid=${finalRecovered.assetUuid || 'unknown'})`);
+                  if (clipAsset) {
+                    db.markAssetDone(clipAsset.id, finalRecovered.path, {
+                      model: 'kling-3.0',
+                      sourceGenId: finalRecovered.sourceGenId,
+                      cdnUrl: finalRecovered.cdnUrl,
+                    });
+                  }
+                  generated++;
+                  this.state.videoClips = this.state.videoClips || [];
+                  this.state.videoClips.push({
+                    chapter, scene, clipId, path: finalRecovered.path, status: 'complete',
+                  });
+                  this.emit({ type: 'clip-complete', index: i, path: finalRecovered.path });
+
+                  // Approval gate after final recovery
+                  if (i < allKlingClips.length - 1) {
+                    this.log(`[CINEMATIC] Waiting for clip approval (final recovery): ${clipId}`);
+                    this.emit({
+                      type: 'waiting',
+                      gate: 'clip-review',
+                      clipId,
+                      clipPath: finalRecovered.path,
+                      clipIndex: i,
+                      clipTotal: allKlingClips.length,
+                      clipLabel: label,
+                    });
+                    const decision = await this.waitForApproval('clip-review');
+                    if (decision === 'stop') {
+                      this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
+                      break;
+                    }
+                  }
+                  continue; // final recovery succeeded
+                } else {
+                  this.log(`[CINEMATIC] ${clipId}: final recovery sweep found no match — marking failed`);
+                }
+              } catch (finalRecErr) {
+                this.log(`[CINEMATIC] ${clipId}: final recovery error — ${finalRecErr.message}`, 'warn');
+              }
+            }
           }
         }
 
