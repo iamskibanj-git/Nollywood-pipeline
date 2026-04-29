@@ -1150,8 +1150,11 @@ class KlingAutomation {
     }
 
     if (videoTiles.length === 0) {
-      this.log('[RECOVERY] No video tiles found on asset page — giving up');
-      return null;
+      // No tiles at all = not logged in. "Project Not Found" page shown when session expired.
+      // Throw SESSION_EXPIRED so the orchestrator pauses for re-authentication instead of
+      // wasting credits on a re-gen that will also fail.
+      this.log('[RECOVERY] No video tiles found on asset page — likely not logged in');
+      throw new Error('SESSION_EXPIRED: No video tiles on asset page. Please log into Higgsfield AI in the browser, then click Resume.');
     }
     this.log(`[RECOVERY] Found ${videoTiles.length} video tile(s) — checking up to ${Math.min(maxTilesToCheck, videoTiles.length)}`);
 

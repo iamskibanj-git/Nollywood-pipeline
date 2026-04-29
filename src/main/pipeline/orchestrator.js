@@ -6825,6 +6825,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               }
             }
           } catch (recoveryErr) {
+            // If recovery detected no session (no tiles at all), bubble up as SESSION_EXPIRED
+            // instead of wasting credits on a re-gen that will also fail.
+            if (recoveryErr.message && recoveryErr.message.includes('SESSION_EXPIRED')) {
+              throw recoveryErr;
+            }
             this.log(`[CINEMATIC] ${clipId}: recovery error — ${recoveryErr.message} — will re-generate`, 'warn');
             shouldRetry = true;
           }
@@ -6978,6 +6983,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                   this.log(`[CINEMATIC] ${clipId}: final recovery sweep found no match — marking failed`);
                 }
               } catch (finalRecErr) {
+                if (finalRecErr.message && finalRecErr.message.includes('SESSION_EXPIRED')) {
+                  throw finalRecErr;
+                }
                 this.log(`[CINEMATIC] ${clipId}: final recovery error — ${finalRecErr.message}`, 'warn');
               }
             }

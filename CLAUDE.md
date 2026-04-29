@@ -1299,6 +1299,25 @@ Applied to both `cinema-studio-automation.js` (Higgsfield scene images) and `kli
 
 **Fix:** After recovery fails (not in local folder, not in Higgsfield), the pipeline now automatically retries generation once (fresh browser context). Also retries on pre-gen failures and browser-dead errors since no credits were burned. Only marks `failed` after retry also fails.
 
+### 3-Stage Recovery with Progressive Waits (orchestrator.js) — Session 27
+**Problem:** ch8_sc5_c1 double-timed out (480s × 2). Both generated videos existed in Kling's Asset library but recovery missed them — the first recovery ran too early (videos still generating), and after retry timeout there was NO second recovery attempt. Pipeline marked as failed and moved on, wasting 42 credits.
+
+**Root cause:** Single recovery attempt after first timeout, then re-gen with no recovery after retry timeout. Videos that take >480s+120s to appear in Kling's asset library were permanently lost.
+
+**Fix:** 3-stage progressive recovery before marking failed:
+1. Gen 1 timeout → wait 120s → recovery (6 tiles, 92%)
+2. No match → wait 120s → **second recovery** (6 tiles, 92%) — NEW
+3. Still no match → retry gen
+4. Retry timeout → wait 180s → **final recovery** (6 tiles, 88%) — NEW
+5. Still no match → mark failed
+
+Total wait time before failure: ~7 minutes of recovery windows. Videos that complete in Kling's queue during any of these windows are caught. The second recovery (step 2) is the key addition — it catches videos that were still generating when the first recovery ran, without burning credits on an unnecessary re-gen.
+
+### Recovery SESSION_EXPIRED Detection (kling-automation.js, orchestrator.js) — Session 27
+**Problem:** When recovery navigates to `higgsfield.ai/asset/video` and finds zero video tiles (empty page / "Project Not Found"), it means the user is not logged in. Previously recovery returned `null` (no match), which caused the orchestrator to re-generate — wasting credits on a gen that would also fail due to no session.
+
+**Fix:** `recoverTimedOutClip()` now throws `SESSION_EXPIRED` when zero video tiles are found after 4 polling attempts. Both recovery catch blocks in the orchestrator (`recoveryErr` and `finalRecErr`) re-throw `SESSION_EXPIRED` instead of swallowing it, allowing it to bubble up to the outer catch which pauses the pipeline, opens a fresh browser, and waits for the user to log in. No credits wasted, no moving on without auth.
+
 ### Vision-Refined Blocking — Bare Character Names (orchestrator.js)
 **Problem:** Claude Vision API returns blocking text with bare character names ("toward son_emeka") without `@` prefix. These don't become @-mention pills in Higgsfield.
 
