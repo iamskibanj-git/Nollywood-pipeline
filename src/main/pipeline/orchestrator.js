@@ -6200,6 +6200,32 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             // Fall through to normal generation flow
           }
         } catch (recoveryErr) {
+          // If recovery detected no session (no tiles at all), pause pipeline
+          // and wait for user to log in — no point falling through to re-generate.
+          if (recoveryErr.message && recoveryErr.message.includes('SESSION_EXPIRED')) {
+            this.log('[CINEMATIC] Session expired during pre-gen recovery — pausing for re-authentication...', 'warn');
+            this.paused = true;
+            this.state.status = 'session_expired';
+            this.emit({ type: 'session-expired', message: recoveryErr.message });
+
+            // Relaunch browser so user can log in
+            if (this.automation) {
+              try { await this.automation.close(); } catch (_) {}
+              await this.automation.ensureBrowser();
+              await this.automation.page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+              this.log('Fresh browser opened — please log into Higgsfield, then click Resume.');
+            }
+
+            // Wait for user to log in and click Resume
+            await new Promise((resolve) => { this._pauseResolver = resolve; });
+            if (this.cancelled) return;
+
+            this.paused = false;
+            this.state.status = 'running';
+            this.log('[CINEMATIC] Resumed after re-authentication — retrying clip...');
+            i--;
+            continue;
+          }
           this.log(`[CINEMATIC] ${clipId}: recovery error — ${recoveryErr.message} — will re-generate`, 'warn');
           // Fall through to normal generation flow
         }
