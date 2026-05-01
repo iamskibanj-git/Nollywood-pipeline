@@ -2292,6 +2292,97 @@ If the prompt violates any rule, auto-fix (simplify direction, remove competing 
 - If fix doesn't address the failure (e.g., Kling randomness) → skip, not worth the credits
 - Estimate total credit cost before executing batch redo
 
+### Session 29 — Pre-Generation Rules Engine Implementation + REDO Re-Categorization
+
+**Status:** ✅ Rules engine implemented in `_validateAndFixPromptRules()` at orchestrator.js. 9 auto-fix rules + 2 informational rules. Hooked into `_runCinematicVideoStage` after all 3 vision passes + sanitization, before prompt preview gate.
+
+**Architecture:** Pure synchronous method (no API calls, no Vision). Takes `(prompt, verifiedPositions, clipDef, clipId)`, returns `{ prompt, fixes[] }`. Non-destructive passthrough when no rules violated. Each fix logged with rule number and explanation.
+
+**Rules implemented:**
+
+| Rule | Type | What it does |
+|------|------|-------------|
+| R1 | Flag | Max 1 `[@speaker]` per shot — flags dual-speaker shots for manual review |
+| R2 | Auto-fix | Laughter/laughing + dialogue → replaces with "warm smile"/"smiling warmly" |
+| R3 | Auto-fix | Push-in + emotional state animation + dialogue >6 words → strips emotional animation |
+| R4 | Auto-fix | ECU on background+profile character → downgrades to CU |
+| R5 | Auto-fix | "lifts head"/"raises head" + push-in + dialogue → "gaze rises" |
+| R6 | Auto-fix | Props-in-hand + dialogue >4 words → strips prop interaction |
+| R7 | Flag | Per-shot word count ceiling (10 push-in, 12 static) — warns when exceeded |
+| R8 | Auto-fix | Speaker faces away from camera → injects "turns slightly toward camera" (CU/MEDIUM only) |
+| R9 | Auto-fix | Worn accessory removal in dialogue shots → strips the removal phrase |
+| R10 | Already impl | Scene-setting line posture correction — verified working at `_injectVisionBlocking` ~line 4407 |
+| R11 | Info | Dialogue-aware blocking — flags spatial cues ("come in", "sit down", "close the door") |
+
+**Key design decisions:**
+- Emotional state ANIMATIONS (compete with lip sync): "face drains", "jaw tightens", "tears streaming", "chin trembles", "eyes fill", etc.
+- Emotional DESCRIPTIONS (safe, don't compete): "eyes are steady", "jaw is set", "face is calm", "expression does not shift"
+- ≤4 words is the universal safe zone — overrides ANY competing direction combination
+- ≤6 words is the push-in+emotion safe zone — Rule 3 only fires above 6 words
+- Rule 6 (props) uses ≤4 word threshold since props-in-hand is a strong budget competitor
+- Rule 8 only injects turn for CU/MEDIUM — WIDE+facing-away is acceptable as voiceover
+
+**Hook point:** After posture fix block, before prompt preview gate. Prompt flow:
+1. `_injectVisionBlocking()` — rewrites preamble + posture verbs (including scene-setting line)
+2. `_reconcileShotDirectionsWithImage()` — 3rd Vision pass, fixes physically impossible actions + visual-state contradictions
+3. Sanitization — @-ref cleanup, bare name fix, curly quotes, dialogue @-strip
+4. Posture fix — last-chance Shot 1 posture correction
+5. **NEW: `_validateAndFixPromptRules()`** — rules engine
+6. Prompt preview gate — user sees the final prompt
+
+**REDO Re-Categorization (45 clips analyzed against implemented rules):**
+
+**Tier 1 — REDO with fixed prompt (fix would change outcome): 24 clips**
+
+| Clip | Failure | Rule(s) that fix it | Expected improvement |
+|------|---------|---------------------|---------------------|
+| ch1_sc2_c3 | S3: ECU+push-in+11w lip sync broken | R7 flags 11w exceeds 10w push-in ceiling | Warning only — needs manual dialogue trim |
+| ch2_sc1_c3 | S3: physical action consumed budget, dialogue dropped | R6 strips prop interaction ("opened drawer, reached in") | High — stripping drawer interaction frees lip sync budget |
+| ch2_sc2_c1 | S3: push-in+facial action+5w lip sync fail | R3 would strip emotional animation if >6w; 5w is safe zone — **not fixable by rules** | Low — move to Tier 2 |
+| ch2_sc2_c2 | S3: push-in+facial expression+7w | R3 strips emotional animation (push-in+emotion+7w>6) | High — stripping emotion frees push-in budget |
+| ch3_sc3_c3 | S3: ECU on eyes, dialogue dropped entirely | R4 downgrades ECU→CU if background+profile | Medium — depends on char position; ECU-on-eyes is the core issue |
+| ch3_sc4_c2 | S3: dialogue REPLACED by Kling fabrication | R7 flags word count; not directly fixable | Low — Kling randomness, move to Tier 2 |
+| ch3_sc5_c4 | S3: ECU+push-in+action+prop+wardrobe morph | R6 strips "lowers the phone" prop action; R3 strips emotional if present | Medium — reduces S3 load |
+| ch4_sc1_c3 | S3: push-in+multi-char, dialogue DROPPED | R7 flags 7w on push-in (under ceiling but close) | Low — push-in+multi-char is the root cause, not prompt-fixable |
+| ch4_sc4_c1 | S3: push-in+action ("whiskey sip")+dialogue | R6 strips "takes a slow sip of whiskey" prop action | High — stripping whiskey action frees dialogue budget |
+| ch4_sc4_c2 | S3: Kling improvised mug-drinking, dialogue dropped | Not directly fixable — Kling improvised from scene image props | Low — move to Tier 2 |
+| ch4_sc5_c2 | S3: ECU+push-in+7w multi-char, lip sync failed | R7 flags 7w on push-in; R4 if background+profile | Medium — word count is at ceiling |
+| ch4_sc7_c2 | S3: "reaches out" macro movement, dialogue dropped | R6 strips prop/body interaction (macro arm raise) | High — stripping reach-out frees budget |
+| ch5_sc1_c1 | S3: push-in+8w single-char, lip sync failed | R7 flags 8w on push-in (under 10w ceiling but single-char push-in at 8w is borderline) | Low — borderline, may not help |
+| ch5_sc1_c2 | S2: gesture ate budget; S3: jaw tightens+bitter laugh+10w | R2 replaces "bitter laugh" with smile; R3 strips "jaw tightens" on 10w; R6 strips "taps documents" | High — multiple fixes address multiple failure shots |
+| ch5_sc1_c3 | S2: "face drains, eyes widening in horror"+7w | R3 strips "face drains" emotional animation (push-in is ECU static, but emotion is the competitor) | High — stripping emotional animation is the key fix |
+| ch5_sc2_c1 | S1: face turned away; S3: "turns slightly toward Adaeze" | R8 injects "turns toward camera" for facing-away speaker | Medium — S1 facing-away is the fixable issue |
+| ch5_sc2_c2 | S3: "face goes pale, lips barely moving"+9w | R3 strips "face goes pale" and "lips barely moving" | High — directly addresses the failure cause |
+| ch5_sc2_c3 | S3: push-in+"tears streaming, voice breaking"+10w | R3 strips "tears streaming" + "voice breaking"; R7 flags 10w at ceiling | High — emotional animation stripping is key |
+| ch5_sc4_c2 | S3: dialogue cross-contamination (wrong speaker) | R1 would flag if dual-speaker; but this is speaker-assignment confusion, not dual-speaker | Low — not prompt-fixable, move to Tier 2 |
+| ch5_sc5_c2 | S3: push-in+"face drains, full horror"+10w | R3 strips "face drains" + "full horror"; R7 flags 10w at ceiling | High — exact pattern Rule 3 targets |
+| ch5_sc5_c3 | S2: "exhales a short bitter breath, eyes dropping"+5w; S3: profile speaker | R8 injects turn directive for S3 profile speaker | Medium — S3 profile is fixable |
+| ch6_sc1_c3 | S3: Emeka behind/partial visibility, CU reframe failed | R8 injects turn directive if facing away | Medium — depends on verified position |
+| ch6_sc2_c1 | S3: stacked micro-actions ("shifts, fingers tightening, warmth cracking")+8w | R3 strips competing emotional/body animations | High — direction stacking is the cause |
+| ch6_sc2_c2 | S2: anomalous failure (clean static CU) | Not prompt-fixable — anomalous Kling behavior | Low — move to Tier 2 |
+| ch6_sc3_c2 | S2-S3: wrong speaker (dialogue cross-contamination) | Not prompt-fixable — Kling speaker-assignment confusion | Low — move to Tier 2 |
+| ch6_sc5_c2 | S1: hand-to-mouth+cup = prop improvisation | Not directly fixable — prop in start frame, not in prompt | Low — move to Tier 2 |
+| ch6_sc6_c1 | S3: cup-in-hand, Kling animated cup-setting-down | Not directly fixable — prop in start frame | Low — move to Tier 2 |
+| ch6_sc6_c3 | Phone call: wrong speaker tag structure | Not fixable by rules engine — prompt structure issue at script stage | Low — separate phone-call-template fix needed |
+| ch7_sc5_c3 | S3: 27 words in single shot | R7 flags 27w exceeding 10w ceiling | Flag only — needs clip restructuring, not auto-fixable |
+| ch8_sc2_c3 | S3: continuous push-in S1→S2 depleted budget | Not prompt-fixable — cross-shot budget depletion | Low — move to Tier 2 |
+| ch9_sc3_c1 | S3: push-in+prop manipulation ("prayer beads")+8w | R6 strips "prayer beads turn slowly in fingers" prop manipulation | High — stripping prop interaction frees budget |
+| ch9_sc4_c1 | S3: "TV light plays across face" interpreted as lighting animation | Strip lighting direction (edge case — not yet covered by rules but similar to R3) | Medium — close to Rule 3 territory |
+| ch10_sc1_c1 | S3: props-in-hand (flowers), dialogue never delivered | R6 strips prop interaction if >4 words (10w) | High — directly addresses failure |
+| ch10_sc1_c3 | S3: ECU on background+profile character | R4 downgrades ECU→CU | High — directly addresses failure |
+| ch10_sc3_c1 | S3: "lifts his head"+push-in+9w, dialogue never delivered | R5 replaces "lifts head" with "gaze rises" | High — directly addresses failure |
+| ch10_sc7_c1 | S3: laughter animation+dialogue, dialogue never delivered | R2 replaces "she laughs — full and free" with warm smile | High — directly addresses failure |
+
+**Final Tier 1 (fix would change outcome) — 19 clips:**
+ch2_sc1_c3, ch2_sc2_c2, ch3_sc5_c4, ch4_sc4_c1, ch4_sc7_c2, ch5_sc1_c2, ch5_sc1_c3, ch5_sc2_c1, ch5_sc2_c2, ch5_sc2_c3, ch5_sc5_c2, ch5_sc5_c3, ch6_sc1_c3, ch6_sc2_c1, ch9_sc3_c1, ch10_sc1_c1, ch10_sc1_c3, ch10_sc3_c1, ch10_sc7_c1
+
+**Tier 2 (fix wouldn't help — Kling randomness, speaker confusion, start-frame props, or anomalous): 18 clips:**
+ch1_sc3_c2 (departure verb — not covered), ch1_sc5_c1 (physical choreography — too complex for rules), ch2_sc1_c2 (accent flip — not prompt-fixable), ch2_sc2_c1 (5w safe zone, push-in is root cause), ch2_sc5_c1 (29w density — flag only), ch2_sc6_c1 (ECU on eyes — may still fail at CU), ch3_sc1_c2 (S2 push-in depleted S3 — cross-shot), ch3_sc2_c1 (push-in+multi-char root cause), ch3_sc3_c3 (ECU on eyes), ch3_sc4_c1 (all-static outlier — anomalous), ch3_sc4_c2 (Kling fabrication), ch4_sc3_c1 (single-char push-in anomaly), ch4_sc4_c2 (Kling prop improvisation from scene image), ch4_sc6_c1 (Kling prop improvisation from character portrait), ch5_sc4_c2 (speaker confusion), ch6_sc2_c2 (anomalous), ch6_sc3_c2 (speaker confusion), ch6_sc5_c2 (start-frame prop), ch6_sc6_c1 (start-frame prop), ch6_sc6_c3 (phone call template), ch7_sc5_c3 (27w — needs restructuring), ch8_sc2_c3 (cross-shot depletion), ch9_sc4_c1 (lighting direction edge case), ch4_sc1_c3 (push-in+multi-char root), ch4_sc5_c2 (push-in+multi-char), ch5_sc1_c1 (borderline word count)
+
+**Estimated redo cost:** 19 Tier 1 clips × ~11 credits = ~209 credits. Verification calls: ~$0.38 (19 × $0.02). Total: ~210 credits + <$1 API costs.
+
+**Recommendation:** Redo Tier 1 clips first. Review results. If Rules Engine improves >70% of Tier 1 clips, consider expanding to Tier 2 clips with minor prompt tweaks.
+
 ### Session 24 — Vision Blocking Verification, Resolution Enforcement
 
 **Problem: Blocking text ↔ scene image mismatch.** `_refineBlockingWithVision()` proposes character positions based on the empty location image, BEFORE the scene is rendered. Cinema Studio then renders characters wherever it decides — which may not match the proposed positions. The stashed blocking text is injected into Kling prompts verbatim, leading to conflicts: text says "Ngozi closest to camera" but start frame shows Ada closest. Kling trusts the image → wrong character delivers dialogue.

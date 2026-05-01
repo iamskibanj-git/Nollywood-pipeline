@@ -644,9 +644,33 @@ function setVerifyHumanDecision(assetId, decision) {
     [decision, assetId]
   );
   if (decision === 'rejected') {
-    // Reset the asset so the video loop regenerates it on next run
+    // Delete the old clip file from disk so the video stage can't short-circuit
+    // with "found existing file on disk — marking done". Without this, rejected
+    // clips get re-adopted instead of regenerated.
+    const fs = require('fs');
+    const path = require('path');
+    const asset = queryOne(`SELECT file_path FROM project_assets WHERE id = ?`, [assetId]);
+    if (asset?.file_path && fs.existsSync(asset.file_path)) {
+      try {
+        // Soft delete: rename to .redo_backup so the video stage can't re-adopt
+        // the old file, but it's still recoverable if needed.
+        const dir = path.dirname(asset.file_path);
+        const ext = path.extname(asset.file_path);
+        const base = path.basename(asset.file_path, ext);
+        const backupPath = path.join(dir, `${base}_redo_backup_${Date.now()}${ext}`);
+        fs.renameSync(asset.file_path, backupPath);
+        console.log(`[VERIFY] Soft-deleted old clip for redo: ${asset.file_path} → ${path.basename(backupPath)}`);
+      } catch (e) {
+        console.warn(`[VERIFY] Could not soft-delete old clip file: ${e.message}`);
+      }
+    }
+    // Reset the asset so the video loop regenerates it FRESH — not recovered.
+    // Clear gen_clicked_at so the video stage doesn't try to recover the old
+    // generation from Higgsfield's asset library instead of submitting a new one.
+    // Clear prompt_used so the rules engine builds a fresh prompt.
     runSql(
-      `UPDATE project_assets SET status = 'pending', file_path = NULL, error_message = NULL
+      `UPDATE project_assets SET status = 'pending', file_path = NULL, error_message = NULL,
+       gen_clicked_at = NULL, prompt_used = NULL, cdn_url = NULL
        WHERE id = ?`,
       [assetId]
     );
@@ -695,6 +719,18 @@ function safeJsonParse(s, fallback) {
 function resetAsset(assetId) {
   runSql(
     `UPDATE project_assets SET status = 'pending', error_message = NULL WHERE id = ?`,
+    [assetId]
+  );
+}
+
+/**
+ * Clear generation metadata on a pending asset so the video stage generates
+ * fresh instead of trying to recover from Higgsfield/Kling history.
+ * Used by pre-stage redo recovery on resume.
+ */
+function clearAssetGenerationMeta(assetId) {
+  runSql(
+    `UPDATE project_assets SET gen_clicked_at = NULL, prompt_used = NULL, cdn_url = NULL WHERE id = ?`,
     [assetId]
   );
 }
@@ -1373,6 +1409,7 @@ module.exports = {
   markAssetCdnUrl,
   markAssetFailed,
   resetAsset,
+  clearAssetGenerationMeta,
   updateAssetPromptUsed,
   getAssets,
   getIncompleteAssets,

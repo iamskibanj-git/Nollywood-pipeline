@@ -262,11 +262,13 @@ class ClipVerifier {
 
         // Accent match: Nigerian English or West African English are acceptable.
         // Anything else (American, British, etc.) is a mismatch.
-        const accentNorm = detectedAccent.toLowerCase();
-        const accentMatch = !detectedAccent
-          || accentNorm.includes('nigerian')
+        // STRICT: empty/missing accent = mismatch (forces Gemini to classify).
+        // "neutral/unclear" no longer auto-passes — it triggers review so humans
+        // can listen for accent flips that Gemini hedged on.
+        const accentNorm = (detectedAccent || '').toLowerCase().trim();
+        const accentMatch = accentNorm.includes('nigerian')
           || accentNorm.includes('west african')
-          || accentNorm.includes('unclear');
+          || accentNorm.includes('african english');
 
         const lineTier = this._tierForScore(similarity, result.mouthSync, result.artifacts);
 
@@ -404,7 +406,7 @@ Critical rules:
 - spoken_lines: ONE entry per distinct dialogue line. If a character speaks 2 sentences in the same shot, those count as 1 line. If 2 characters speak in the same shot, that's 2 lines. Order chronologically.
 - speaker_visible: describe the speaker by visible characteristics. Match against the expected speakers above when possible. Use 'unclear' if you can't tell from the visuals.
 - transcript: VERBATIM. No paraphrasing. If a word is unclear, put [unclear].
-- accent: classify the accent of EACH line independently. Use one of: "Nigerian English", "West African English", "American English", "British English", "neutral/unclear", or another specific accent if clearly identifiable. Pay close attention to sudden shifts — a character speaking Nigerian English in one line and American English in the next is a critical defect ("accent drift").
+- accent: classify the accent of EACH line independently. You MUST commit to a specific accent — do NOT use "neutral" or "unclear". Use one of: "Nigerian English", "West African English", "American English", "British English", or another specific regional accent. Nigerian English has distinctive intonation patterns, syllable-timed rhythm, and Igbo/Yoruba/Hausa phonological influence — if those markers are absent and the delivery sounds like standard American broadcast English, classify as "American English". Pay close attention to sudden shifts — a character speaking Nigerian English in one line and American English in the next is a critical defect ("accent drift"). When in doubt between Nigerian and American, lean toward "American English" — false positives are cheaper than missed accent flips.
 - accent_consistent: false if ANY line's accent differs from the others. This is the primary accent drift signal.
 - shot_cuts_observed: count visible cuts (not camera moves). 0 = single continuous shot.
 - mouth_sync_quality: aggregate across the whole clip — does the audio align with visible lip movement throughout?

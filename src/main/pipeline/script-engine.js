@@ -882,6 +882,67 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
       if (maxCharsPerScene > 3) {
         console.warn(`[SCRIPT] ⚠ Max characters in a single scene: ${maxCharsPerScene} (Kling limit is 3)`);
       }
+
+      // ── OVERSIZED CLIP AUTO-SPLIT ──
+      // Hard rule: max 3 lines per clip. If Claude packed 4+ lines into one clip,
+      // split it into multiple clips of 3 (with a possible remainder of 1-2).
+      // The multi_shot_prompt can't be auto-split (would need re-prompting), so
+      // we fix line_refs only and flag the prompt as needing regeneration.
+      let oversizedFixed = 0;
+      for (const ch of (script.chapters || [])) {
+        for (const sc of (ch.scenes || [])) {
+          const clips = sc.kling_clips || [];
+          const newClips = [];
+          for (const clip of clips) {
+            const refs = clip.line_refs || [];
+            if (refs.length <= 3) {
+              newClips.push(clip);
+              continue;
+            }
+            // Split oversized clip into chunks of 3
+            console.warn(`[SCRIPT] ⚠ OVERSIZED CLIP: ${clip.clip_id} has ${refs.length} line_refs (max 3) — auto-splitting`);
+            oversizedFixed++;
+            for (let i = 0; i < refs.length; i += 3) {
+              const chunkRefs = refs.slice(i, i + 3);
+              const chunkIdx = Math.floor(i / 3) + 1;
+              const baseId = clip.clip_id.replace(/_c(\d+)$/, '');
+              // Recompute clip_id: find highest existing cN index in this scene
+              const existingIds = [...clips, ...newClips].map(c => c.clip_id);
+              const scenePrefix = baseId; // e.g. "ch7_sc5"
+              let maxCN = 0;
+              for (const eid of existingIds) {
+                const m = eid.match(new RegExp(`^${scenePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_c(\\d+)$`));
+                if (m) maxCN = Math.max(maxCN, parseInt(m[1], 10));
+              }
+              const newClipId = i === 0 ? clip.clip_id : `${scenePrefix}_c${maxCN + chunkIdx}`;
+
+              newClips.push({
+                clip_id: newClipId,
+                duration_seconds: 10,
+                line_refs: chunkRefs,
+                multi_shot_prompt: i === 0
+                  ? clip.multi_shot_prompt  // first chunk keeps original prompt (best effort)
+                  : `[AUTO-SPLIT from ${clip.clip_id} — prompt needs regeneration for lines ${chunkRefs.join(',')}]`,
+              });
+            }
+          }
+          if (newClips.length !== clips.length) {
+            sc.kling_clips = newClips;
+          }
+        }
+      }
+      if (oversizedFixed > 0) {
+        console.warn(`[SCRIPT] Auto-split ${oversizedFixed} oversized clip(s). Prompts marked [AUTO-SPLIT] need vision pass regeneration.`);
+        // Update total clip count after splits
+        totalClips = 0;
+        for (const ch of (script.chapters || [])) {
+          for (const sc of (ch.scenes || [])) {
+            totalClips += (sc.kling_clips || []).length;
+          }
+        }
+        console.log(`[SCRIPT] Adjusted clip count after splits: ${totalClips}`);
+      }
+
       const totalCharacters = (script.character_bible || []).length;
       console.log(`[SCRIPT] Characters: ${totalCharacters} (unlimited — all get portraits)`);
     } else {
@@ -1454,8 +1515,9 @@ This project runs the CINEMATIC pipeline (Cinema Studio 2.0 scene images + Kling
    - Empty array if no prop elements needed. Only include objects that RECUR across scenes OR serve as structural setup/payoff — not every item in the environment.
 
 4. KLING_CLIPS — ordered array of multi-shot video generations that cover this scene's dialogue.
-   - Each clip covers 1-3 dialogue lines, 6-12 seconds total. Target 10s. Never exceed 12s.
-   - Each clip has EXACTLY 3 shots. This is a hard rule — not 2, not 4, not 6. Kling 3.0 renders 4+ shots unreliably (skipped shots, misattributed dialogue). 3 shots is the proven sweet spot for 10-12s clips. If a scene needs more than 3 shots to fully tell its story, split it into multiple clips (each with exactly 3 shots) rather than cramming 4+ shots into one clip.
+   - Each clip covers EXACTLY 3 dialogue lines. Not 1, not 2, not 4, not 5 — exactly 3. The ONLY exception is the LAST clip in a scene when the remaining lines don't divide evenly by 3 (e.g. 7 lines = clip of 3 + clip of 3 + clip of 1). Even then, the final clip must have at minimum 1 line and at maximum 3. NEVER pack 4+ lines into a single clip — this is a hard structural failure that causes dialogue to be dropped.
+   - Each clip has EXACTLY 3 shots, one dialogue line per shot. This is a hard rule — not 2, not 4, not 6. Kling 3.0 renders 4+ shots unreliably (skipped shots, misattributed dialogue). 3 shots is the proven sweet spot for 10-12s clips. If a clip has fewer than 3 lines (allowed only for the last clip in a scene), it still gets exactly 3 shots — distribute the dialogue across shots and use the extra shot(s) for reaction beats or silent continuation.
+   - Duration: 10-12 seconds per clip. Target 10s. Never exceed 12s.
    - Shots within a clip are continuous beats of the same scene (same location, same lighting) — not "cuts between different scenes."
    - Each clip's \`multi_shot_prompt\` must stay under 2500 characters.
    - Use Kling's dialogue syntax: [@character, speaking in a <tone> Nigerian English accent]: "<dialogue>"
@@ -1512,7 +1574,7 @@ CHARACTER ELEMENT NAMING (CRITICAL — CONSISTENCY REQUIRED):
 ${storyBrief.storyDriven ? `
 STORY-DRIVEN STRUCTURE (CINEMATIC ONLY):
 - SCENES PER CHAPTER: UNLIMITED. Each chapter gets as many scenes as the story needs. A scene is a conversation beat — a distinct grouping of characters in dialogue. Same or different location.
-- LINES PER SCENE: UNLIMITED. A scene can be 2 lines (a quick reaction) or 15 lines (an extended confrontation). Lines are grouped into clips of exactly 3 lines each. A 9-line scene = 3 clips, all sharing the same scene image as start frame.
+- LINES PER SCENE: UNLIMITED. A scene can be 2 lines (a quick reaction) or 15 lines (an extended confrontation). Lines are grouped into clips of exactly 3 lines each — NEVER more than 3 lines per clip. A 9-line scene = 3 clips. A 7-line scene = 2 clips of 3 + 1 clip of 1. All clips share the same scene image as start frame.
 - CHARACTERS PER PROJECT: UNLIMITED. Every speaking character gets a portrait and Higgsfield element. Create as many characters as the story needs — a 30-min drama might have 8-12 speaking roles.
 - CHARACTERS PER SCENE: MAX 3. This is a hard Kling constraint — more than 3 characters in a scene degrades lip-sync and positioning quality. If 4+ characters need to interact, split into separate scenes or have characters enter/exit.
 - TARGET CLIPS: ~${storyBrief.targetClips || 50} total across the entire script. Each clip = 10-12 seconds of footage. Distribute clips across chapters based on dramatic weight — a climactic chapter might get more clips than a transitional one.

@@ -821,7 +821,7 @@ class PipelineOrchestrator {
       this.emit({ type: 'dedup-data', stories: producedStories });
 
       // ── Determine starting stage for resume ──
-      const resumeStage = isResume ? activeProject.stage : null;
+      let resumeStage = isResume ? activeProject.stage : null;
 
       // Stage ordering for resume: skip stages already completed
       const shouldRunStage = (stage) => {
@@ -895,7 +895,48 @@ class PipelineOrchestrator {
             if (this.cancelled) return { success: false, reason: 'cancelled' };
             this._resumedGateOrder = GATE_ORDER[pendingGate] ?? -1;
             this.log(`[RESUME] Pending gate "${pendingGate}" approved (order=${this._resumedGateOrder}) — continuing pipeline`);
+
+            // ── VERIFY GATE REDO FIX ──
+            // After the verify gate resolves on resume, check if any clips were
+            // rejected (status=pending). If so, reset the project stage to
+            // 'scenes-done' so shouldRunStage('videos-done') returns true and
+            // the redo loop at the verify stage actually fires. Without this,
+            // the pipeline skips straight to assembly because stage='verified'
+            // is past 'videos-done' in the stage ordering.
+            if (pendingGate === 'verify') {
+              const isCinematic = (this.state.generatorMode || 'staged') === 'cinematic';
+              const redoType = isCinematic ? 'video_clip_cinematic' : 'video_clip';
+              const pendingClips = db.getAssets(projectId, { type: redoType, status: 'pending' });
+              if (pendingClips.length > 0) {
+                this.log(`[RESUME] ${pendingClips.length} ${redoType} clip(s) pending redo — resetting stage to scenes-done so redo loop fires`);
+                db.updateProjectStage(projectId, 'scenes-done');
+                resumeStage = 'scenes-done';
+              }
+            }
           }
+        }
+      }
+
+      // ── PRE-STAGE REDO RECOVERY ──
+      // If resuming at 'scenes-done' or later but there are still pending clips
+      // from a previous redo rejection, ensure stage is 'scenes-done' and clear
+      // stale gen_clicked_at so the video stage generates fresh. Covers:
+      //   - scenes-done: previous restart set stage but crashed before clearing metadata
+      //   - verified/assembled: app killed after rejection but before regeneration
+      if (isResume && resumeStage && ['scenes-done', 'verified', 'assembled'].includes(resumeStage)) {
+        const isCinematic = (this.state.generatorMode || 'staged') === 'cinematic';
+        const redoType = isCinematic ? 'video_clip_cinematic' : 'video_clip';
+        const pendingRedoClips = db.getAssets(projectId, { type: redoType, status: 'pending' });
+        if (pendingRedoClips.length > 0) {
+          this.log(`[RESUME] Found ${pendingRedoClips.length} pending ${redoType} clip(s) at stage '${resumeStage}' — resetting to scenes-done for redo`);
+          db.updateProjectStage(projectId, 'scenes-done');
+          resumeStage = 'scenes-done';
+          // Clear stale gen_clicked_at on pending redo clips so the video stage
+          // generates fresh instead of trying to recover old clips from Higgsfield
+          for (const clip of pendingRedoClips) {
+            db.clearAssetGenerationMeta(clip.id);
+          }
+          this.log(`[RESUME] Cleared gen_clicked_at on ${pendingRedoClips.length} pending clip(s) — will generate fresh`);
         }
       }
 
@@ -2486,8 +2527,12 @@ class PipelineOrchestrator {
                   if (!item) continue;
                   if (r.error) { errors++; continue; }
                   db.saveClipVerification(item.assetId, r);
-                  if (r.tier === 'accept') accepts++;
-                  else if (r.tier === 'review') reviews++;
+                  if (r.tier === 'accept') {
+                    accepts++;
+                    // Auto-persist accept so redo iterations skip already-verified clips
+                    // instead of re-running all 150 through Gemini every time
+                    db.setVerifyHumanDecision(item.assetId, 'accepted');
+                  } else if (r.tier === 'review') reviews++;
                   else if (r.tier === 'reject') rejects++;
                 }
                 this.log(`[VERIFY] Results: ${accepts} accept, ${reviews} review, ${rejects} reject${errors ? `, ${errors} error` : ''}`);
@@ -2562,6 +2607,23 @@ class PipelineOrchestrator {
           if (allDoneClips.length === 0) {
             throw new Error(`No done ${clipType} clips found — assembly cannot proceed`);
           }
+
+          // ── CLIP COUNT + FILE INTEGRITY GATE ──
+          // Ensure every expected clip is done and its file exists on disk.
+          const allClipsOfType = db.getAssets(projectId, { type: clipType });
+          const expectedCount = allClipsOfType.length;
+          const pendingClips = allClipsOfType.filter(a => a.status !== 'done');
+          const missingFiles = allDoneClips.filter(a => !a.file_path || !fs.existsSync(a.file_path));
+
+          if (pendingClips.length > 0) {
+            const names = pendingClips.slice(0, 10).map(a => a.kling_clip_id || `ch${a.chapter}_sc${a.scene}_L${a.line}`).join(', ');
+            throw new Error(`Assembly blocked: ${pendingClips.length}/${expectedCount} clip(s) not done (${names}${pendingClips.length > 10 ? '...' : ''})`);
+          }
+          if (missingFiles.length > 0) {
+            const names = missingFiles.slice(0, 10).map(a => a.kling_clip_id || `ch${a.chapter}_sc${a.scene}_L${a.line}`).join(', ');
+            throw new Error(`Assembly blocked: ${missingFiles.length} clip(s) missing file on disk (${names}${missingFiles.length > 10 ? '...' : ''})`);
+          }
+          this.log(`[ASSEMBLY] Integrity check passed: ${allDoneClips.length}/${expectedCount} clips done, all files present on disk`);
 
           // Build clipList with a sortKey that handles both modes:
           //   Staged:    chapter * 1e6 + scene * 1e3 + line
@@ -4545,6 +4607,460 @@ class PipelineOrchestrator {
     }
 
     return preamble + rewritten;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PRE-GENERATION RULES ENGINE — Upstream Prompt Fixes (150-clip observations)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Validate and fix a Kling multi_shot_prompt against known failure patterns
+   * observed across 150 clips. Runs AFTER all 3 vision passes and sanitization,
+   * BEFORE prompt submission to Kling.
+   *
+   * Non-destructive: if no rules are violated, the prompt passes through unchanged.
+   * Every fix is logged for traceability.
+   *
+   * Rules implemented (from CLAUDE.md observations):
+   *  1. Max 1 [@speaker] tag per shot direction — flag dual-speaker shots
+   *  2. No laughter/laughing + dialogue in same shot — replace with "warm smile"
+   *  3. No push-in + emotional state animation + dialogue >6 words — strip animation or push-in
+   *  4. No ECU on chars that are background AND profile in start frame — downgrade to CU
+   *  5. No "lifts head"/"raises head" macro movement + dialogue on push-in — replace with description
+   *  6. No props-in-hand + dialogue unless ≤4 words — strip prop interaction
+   *  7. Word count ceiling: ~10 words max for push-in shots, ~12 for static
+   *  8. Speaker must face camera — inject turn directive when speaker faces away
+   *  9. No worn accessory removal in dialogue shots — flag for non-dialogue shot
+   *
+   * @param {string} prompt - The final multi_shot_prompt after vision passes + sanitization
+   * @param {Array|null} verifiedPositions - Vision-refined character positions [{name, position, baseName}]
+   * @param {Object} clipDef - The clip definition from the script (has line_refs, duration_seconds, etc.)
+   * @param {string} clipId - Clip identifier for logging
+   * @returns {{ prompt: string, fixes: string[] }} Corrected prompt + list of fixes applied
+   */
+  _validateAndFixPromptRules(prompt, verifiedPositions, clipDef, clipId) {
+    if (!prompt) return { prompt, fixes: [] };
+
+    const fixes = [];
+    let fixed = prompt;
+
+    // ── Helper: parse prompt into shots ──
+    // Returns array of { shotNum, header, body, fullMatch, startIndex }
+    const parseShots = (p) => {
+      const shots = [];
+      const shotRe = /Shot\s*(\d+)\s*\(([^)]*)\)\s*:\s*([\s\S]*?)(?=\nShot\s*\d+\s*\(|$)/gi;
+      let m;
+      while ((m = shotRe.exec(p)) !== null) {
+        shots.push({
+          shotNum: parseInt(m[1], 10),
+          header: m[2],               // e.g. "CU, static" or "ECU, slow push-in"
+          body: m[3].trim(),          // shot direction body text
+          fullMatch: m[0],
+          startIndex: m.index,
+        });
+      }
+      return shots;
+    };
+
+    // ── Helper: detect push-in in header or body ──
+    const hasPushIn = (header, body = '') => {
+      const combined = `${header} ${body}`.toLowerCase();
+      return /push[- ]?in|dolly[- ]?in|track[- ]?in|slow\s+push/.test(combined);
+    };
+
+    // ── Helper: detect if shot has dialogue ──
+    const hasDialogue = (body) => /\[@[a-z0-9_]+[^]]*\]:\s*"[^"]+"/i.test(body);
+
+    // ── Helper: extract dialogue text from shot body ──
+    const extractDialogue = (body) => {
+      const matches = [];
+      const re = /\[@([a-z0-9_]+)[^\]]*\]:\s*"([^"]+)"/gi;
+      let dm;
+      while ((dm = re.exec(body)) !== null) {
+        matches.push({ speaker: dm[1], text: dm[2], fullMatch: dm[0] });
+      }
+      return matches;
+    };
+
+    // ── Helper: count words in a string ──
+    const wordCount = (text) => text.split(/\s+/).filter(w => w.length > 0).length;
+
+    // ── Helper: detect ECU in header ──
+    const isECU = (header) => /\bECU\b|extreme\s*close[- ]?up/i.test(header);
+
+    // ── Helper: detect static camera ──
+    const isStatic = (header, body = '') => {
+      const combined = `${header} ${body}`.toLowerCase();
+      return /\bstatic\b/.test(combined) && !hasPushIn(header, body);
+    };
+
+    // ── Helper: detect emotional state ANIMATIONS (not descriptions) ──
+    // Animations compete with lip sync; descriptions don't.
+    // Animations: "face drains", "jaw tightens", "tears streaming", "blood drains"
+    // Safe descriptions: "eyes are steady", "jaw is set", "face is calm"
+    const EMOTIONAL_STATE_ANIMATIONS = [
+      /\bface\s+drains?\b/i,
+      /\bblood\s+drains?\b/i,
+      /\bjaw\s+tightens?\b/i,
+      /\btears?\s+stream(?:ing|s)?\b/i,
+      /\bface\s+goes?\s+pale\b/i,
+      /\blips?\s+barely\s+mov(?:e|ing)\b/i,
+      /\bvoice\s+breaks?\b/i,
+      /\bface\s+crumbles?\b/i,
+      /\bchin\s+trembles?\b/i,
+      /\bshoulders?\s+shak(?:e|ing|es)\b/i,
+      /\bbody\s+shak(?:e|ing|es)\b/i,
+      /\beyes?\s+fill(?:s|ing)?\b/i,      // "eyes fill" = tear animation
+      /\bfull\s+horror\b/i,               // "the full horror of it landing"
+    ];
+
+    const hasEmotionalStateAnimation = (body) => {
+      return EMOTIONAL_STATE_ANIMATIONS.some(re => re.test(body));
+    };
+
+    // ── Helper: strip emotional state animations from text ──
+    const stripEmotionalAnimations = (body) => {
+      let cleaned = body;
+      // Strip the animation phrases, preserving surrounding text
+      const STRIP_PATTERNS = [
+        /,?\s*face\s+drains?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*blood\s+drains?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*jaw\s+tightens?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*tears?\s+stream(?:ing|s)?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*face\s+goes?\s+pale[^,.;]*[,.;]?\s*/gi,
+        /,?\s*lips?\s+barely\s+mov(?:e|ing)[^,.;]*[,.;]?\s*/gi,
+        /,?\s*voice\s+breaks?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*face\s+crumbles?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*chin\s+trembles?[^,.;]*[,.;]?\s*/gi,
+        /,?\s*shoulders?\s+shak(?:e|ing|es)[^,.;]*[,.;]?\s*/gi,
+        /,?\s*body\s+shak(?:e|ing|es)[^,.;]*[,.;]?\s*/gi,
+        /,?\s*the\s+full\s+horror[^,.;]*[,.;]?\s*/gi,
+        /,?\s*eyes?\s+fill(?:s|ing)?(?:\s+but[^,.;]*)?[,.;]?\s*/gi,
+      ];
+      for (const pat of STRIP_PATTERNS) {
+        cleaned = cleaned.replace(pat, ' ');
+      }
+      return cleaned.replace(/\s{2,}/g, ' ').trim();
+    };
+
+    // Parse shots from the prompt
+    let shots = parseShots(fixed);
+    if (shots.length === 0) {
+      this.log(`[RULES-ENGINE] ${clipId}: no shots found in prompt — skipping validation`);
+      return { prompt, fixes: [] };
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 1: Max 1 [@speaker] tag per shot direction
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      const dialogues = extractDialogue(shot.body);
+      if (dialogues.length > 1) {
+        const speakers = [...new Set(dialogues.map(d => d.speaker.toLowerCase()))];
+        if (speakers.length > 1) {
+          // Two different speakers in one shot — flag it (can't auto-split shots
+          // without restructuring the clip, but we log a prominent warning)
+          fixes.push(`RULE1: Shot ${shot.shotNum} has ${speakers.length} speakers (${speakers.join(', ')}) — Kling cannot handle mid-shot speaker switches. Manual review needed.`);
+          this.log(`[RULES-ENGINE] ⚠ ${clipId} Shot ${shot.shotNum}: DUAL SPEAKER detected (${speakers.join(', ')}). Cannot auto-fix — flagging for review.`, 'warn');
+        }
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 2: No laughter/laughing directions + dialogue in same shot
+    // Replace with "warm smile" or "a quiet smile"
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      if (!hasDialogue(shot.body)) continue;
+      const laughterRe = /\b(?:she|he)\s+laughs?\b|\blaughing\b|\blaughter\b|\b(?:she|he)\s+chuckles?\b|\bchuckling\b|\bfull\s+(?:and\s+)?free\s+laugh/gi;
+      if (laughterRe.test(shot.body)) {
+        const before = shot.body;
+        // Replace laughter phrases with smile equivalents
+        let newBody = shot.body
+          .replace(/\b(?:she|he)\s+laughs?\s*(?:—\s*)?(?:full(?:y)?\s+(?:and\s+)?(?:free(?:ly)?|loud(?:ly)?|open(?:ly)?))?/gi, 'a warm smile spreads')
+          .replace(/\blaughing\b/gi, 'smiling warmly')
+          .replace(/\blaughter\b/gi, 'a warm smile')
+          .replace(/\b(?:she|he)\s+chuckles?\b/gi, 'a quiet smile')
+          .replace(/\bchuckling\b/gi, 'smiling quietly');
+        if (newBody !== before) {
+          fixed = fixed.replace(before, newBody);
+          fixes.push(`RULE2: Shot ${shot.shotNum} — replaced laughter direction with smile (laughter is macro facial animation that conflicts with lip sync)`);
+          this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: laughter → smile`);
+        }
+      }
+    }
+
+    // Re-parse after modifications
+    shots = parseShots(fixed);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 3: No push-in + emotional state animation + dialogue >6 words
+    // Strip the emotional animation (keep push-in since it may be cinematically intended)
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      if (!hasPushIn(shot.header, shot.body)) continue;
+      if (!hasDialogue(shot.body)) continue;
+      const dialogues = extractDialogue(shot.body);
+      const totalWords = dialogues.reduce((sum, d) => sum + wordCount(d.text), 0);
+      if (totalWords <= 6) continue; // ≤6 words is the safe zone even with competing directions
+      if (!hasEmotionalStateAnimation(shot.body)) continue;
+
+      const before = shot.body;
+      const newBody = stripEmotionalAnimations(before);
+      if (newBody !== before) {
+        fixed = fixed.replace(before, newBody);
+        fixes.push(`RULE3: Shot ${shot.shotNum} — stripped emotional state animation (push-in + emotion + ${totalWords} words = near-certain lip sync failure)`);
+        this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: stripped emotional animation (push-in + ${totalWords}w dialogue)`);
+      }
+    }
+
+    // Re-parse after modifications
+    shots = parseShots(fixed);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 4: No ECU on characters who are background AND profile in start frame
+    // Downgrade ECU → CU in the shot header
+    // ══════════════════════════════════════════════════════════════════════
+    if (verifiedPositions && verifiedPositions.length > 0) {
+      for (const shot of shots) {
+        if (!isECU(shot.header)) continue;
+        if (!hasDialogue(shot.body)) continue; // Only matters for dialogue shots
+
+        // Identify which character is targeted in this shot
+        const dialogues = extractDialogue(shot.body);
+        if (dialogues.length === 0) continue;
+        const targetSpeaker = dialogues[0].speaker.toLowerCase();
+
+        // Check if that character is background + profile in verified positions
+        const charPos = verifiedPositions.find(c => {
+          const name = (c.name || '').toLowerCase();
+          const baseName = (c.baseName || '').toLowerCase();
+          return name === targetSpeaker || baseName === targetSpeaker ||
+            targetSpeaker.includes(baseName) || baseName.includes(targetSpeaker);
+        });
+
+        if (charPos) {
+          const posLower = (charPos.position || '').toLowerCase();
+          const isBackground = /\bbackground\b|\bfar\b|\bbehind\b|\bback\b|\bdistant\b/.test(posLower);
+          const isProfile = /\bprofile\b|\bside\b|\bfacing\s+(?:away|left|right|window|wall|door)\b|\bback\s+(?:to|toward)\s+camera\b/.test(posLower);
+
+          if (isBackground && isProfile) {
+            const before = shot.header;
+            const newHeader = shot.header.replace(/\bECU\b/i, 'CU');
+            if (newHeader !== before) {
+              fixed = fixed.replace(`Shot ${shot.shotNum} (${before})`, `Shot ${shot.shotNum} (${newHeader})`);
+              fixes.push(`RULE4: Shot ${shot.shotNum} — downgraded ECU → CU (${targetSpeaker} is background + profile — ECU reframe from that position kills dialogue budget)`);
+              this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: ECU → CU (background+profile speaker)`);
+            }
+          }
+        }
+      }
+    }
+
+    // Re-parse after modifications
+    shots = parseShots(fixed);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 5: No "lifts head"/"raises head" macro movement + dialogue on push-in
+    // Replace with description ("his gaze rises", "head now lifted")
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      if (!hasPushIn(shot.header, shot.body)) continue;
+      if (!hasDialogue(shot.body)) continue;
+
+      const headLiftRe = /\b(?:lifts?\s+(?:his|her|their)?\s*head|raises?\s+(?:his|her|their)?\s*head|head\s+lifts?|head\s+rises?)\b/gi;
+      if (headLiftRe.test(shot.body)) {
+        const before = shot.body;
+        const newBody = shot.body
+          .replace(/\blifts?\s+(?:his|her|their)?\s*head\b/gi, 'gaze rises')
+          .replace(/\braises?\s+(?:his|her|their)?\s*head\b/gi, 'gaze rises')
+          .replace(/\bhead\s+lifts?\b/gi, 'gaze rises')
+          .replace(/\bhead\s+rises?\b/gi, 'gaze rises');
+        if (newBody !== before) {
+          fixed = fixed.replace(before, newBody);
+          fixes.push(`RULE5: Shot ${shot.shotNum} — replaced "lifts/raises head" with "gaze rises" (macro head movement + push-in + dialogue = budget killer)`);
+          this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: head-lift → gaze-rises`);
+        }
+      }
+    }
+
+    // Re-parse after modifications
+    shots = parseShots(fixed);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 6: No props-in-hand + dialogue unless ≤4 words
+    // Strip the prop interaction direction
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      if (!hasDialogue(shot.body)) continue;
+      const dialogues = extractDialogue(shot.body);
+      const totalWords = dialogues.reduce((sum, d) => sum + wordCount(d.text), 0);
+      if (totalWords <= 4) continue; // ≤4 words is the universal safe zone
+
+      // Detect prop-in-hand interaction patterns
+      const propInteractionRe = /\b(?:holds?|grips?|clutch(?:es|ing)?|grabs?|picks?\s+up|sets?\s+down|puts?\s+down|places?\s+(?:down|on|back)|slides?\s+(?:forward|across|toward)|hands?\s+(?:over|to|forward)|extends?\s+(?:hand|arm)|opens?\s+(?:folder|envelope|file|document|book|bible|bag)|flips?\s+(?:through|open)|tears?\s+(?:open|envelope)|pushes?\s+(?:forward|across|toward))\b[^.;\n]*/gi;
+      if (propInteractionRe.test(shot.body)) {
+        const before = shot.body;
+        // Strip prop interaction phrases, preserve surrounding content
+        let newBody = shot.body.replace(propInteractionRe, '');
+        // Clean up double spaces, leading commas/dashes, etc.
+        newBody = newBody
+          .replace(/\s*[,—–]\s*[,—–]\s*/g, ', ')
+          .replace(/^\s*[,—–]\s*/gm, '')
+          .replace(/\s*[,—–]\s*$/gm, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+        if (newBody !== before && newBody.length > 10) { // Safety: don't strip to empty
+          fixed = fixed.replace(before, newBody);
+          fixes.push(`RULE6: Shot ${shot.shotNum} — stripped prop interaction (${totalWords} words > 4-word safe zone — props-in-hand consume dialogue budget)`);
+          this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: stripped prop interaction (${totalWords}w dialogue)`);
+        }
+      }
+    }
+
+    // Re-parse after modifications
+    shots = parseShots(fixed);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 7: Per-shot word count ceiling (~10 for push-in, ~12 for static)
+    // Flag shots that exceed the ceiling — cannot auto-fix (would require
+    // restructuring the clip), but log a prominent warning.
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      const dialogues = extractDialogue(shot.body);
+      if (dialogues.length === 0) continue;
+      const totalWords = dialogues.reduce((sum, d) => sum + wordCount(d.text), 0);
+      const isPushIn = hasPushIn(shot.header, shot.body);
+      const ceiling = isPushIn ? 10 : 12;
+
+      if (totalWords > ceiling) {
+        fixes.push(`RULE7: Shot ${shot.shotNum} has ${totalWords} words (ceiling: ${ceiling} for ${isPushIn ? 'push-in' : 'static'}). Consider splitting or reducing dialogue.`);
+        this.log(`[RULES-ENGINE] ⚠ ${clipId} Shot ${shot.shotNum}: ${totalWords} words exceeds ${ceiling}-word ceiling for ${isPushIn ? 'push-in' : 'static'} shots`, 'warn');
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 8: Speaker must face camera — inject turn directive
+    // When verified positions show speaker facing away, add "turns toward camera"
+    // ══════════════════════════════════════════════════════════════════════
+    if (verifiedPositions && verifiedPositions.length > 0) {
+      for (const shot of shots) {
+        const dialogues = extractDialogue(shot.body);
+        if (dialogues.length === 0) continue;
+        const targetSpeaker = dialogues[0].speaker.toLowerCase();
+
+        const charPos = verifiedPositions.find(c => {
+          const name = (c.name || '').toLowerCase();
+          const baseName = (c.baseName || '').toLowerCase();
+          return name === targetSpeaker || baseName === targetSpeaker ||
+            targetSpeaker.includes(baseName) || baseName.includes(targetSpeaker);
+        });
+
+        if (charPos) {
+          const posLower = (charPos.position || '').toLowerCase();
+          const facingAway = /\bfacing\s+away\b|\bback\s+to\s+camera\b|\bback\s+of\s+head\b|\bfacing\s+(?:the\s+)?(?:window|wall|door|opposite)\b|\brear\s+view\b/.test(posLower);
+
+          if (facingAway) {
+            // Check if body already has a turn directive
+            const hasTurnDirective = /\bturns?\s+(?:toward|to|slightly\s+toward)\s+(?:camera|the\s+camera)\b/i.test(shot.body);
+            if (!hasTurnDirective) {
+              // Only inject for CU/MEDIUM shots (WIDE speaker-facing-away is acceptable as voiceover)
+              const isWide = /\bWIDE\b/i.test(shot.header);
+              if (!isWide) {
+                // Inject turn directive at the start of the shot body (before dialogue)
+                const dialogueStart = shot.body.indexOf('[@');
+                if (dialogueStart > 0) {
+                  const before = shot.body;
+                  const newBody = shot.body.slice(0, dialogueStart) +
+                    'turns slightly toward camera, ' +
+                    shot.body.slice(dialogueStart);
+                  fixed = fixed.replace(before, newBody);
+                  fixes.push(`RULE8: Shot ${shot.shotNum} — injected turn directive (speaker ${targetSpeaker} faces away from camera — lip sync impossible without turn)`);
+                  this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: injected "turns toward camera" for ${targetSpeaker}`);
+                } else if (dialogueStart === 0) {
+                  const before = shot.body;
+                  const newBody = 'turns slightly toward camera — ' + shot.body;
+                  fixed = fixed.replace(before, newBody);
+                  fixes.push(`RULE8: Shot ${shot.shotNum} — injected turn directive (speaker ${targetSpeaker} faces away)`);
+                  this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: injected "turns toward camera" for ${targetSpeaker}`);
+                }
+              } else {
+                // WIDE + facing away = flag only, don't inject
+                fixes.push(`RULE8: Shot ${shot.shotNum} — WIDE shot with speaker ${targetSpeaker} facing away. Dialogue will be voiceover-style (acceptable but not ideal).`);
+                this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: WIDE + speaker facing away — voiceover delivery expected`);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Re-parse after modifications
+    shots = parseShots(fixed);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 9: No worn accessory removal in dialogue shots
+    // "slides ring off", "removes glasses", "takes off necklace" etc.
+    // Flag it — can't auto-fix without restructuring, but warn prominently.
+    // ══════════════════════════════════════════════════════════════════════
+    for (const shot of shots) {
+      if (!hasDialogue(shot.body)) continue;
+      const accessoryRemovalRe = /\b(?:slides?\s+(?:ring|bracelet|watch|glasses|necklace)\s+(?:off|from)|removes?\s+(?:glasses|ring|earring|bracelet|watch|necklace|scarf|hat)|takes?\s+off\s+(?:glasses|ring|earring|bracelet|watch|necklace|scarf|hat)|pulls?\s+off\s+(?:ring|bracelet|glasses))\b/i;
+      if (accessoryRemovalRe.test(shot.body)) {
+        // Strip the accessory removal phrase
+        const before = shot.body;
+        let newBody = shot.body.replace(accessoryRemovalRe, '');
+        newBody = newBody.replace(/\s*[,—–]\s*[,—–]\s*/g, ', ').replace(/\s{2,}/g, ' ').trim();
+        if (newBody !== before && newBody.length > 10) {
+          fixed = fixed.replace(before, newBody);
+          fixes.push(`RULE9: Shot ${shot.shotNum} — stripped worn accessory removal (Kling can't modify character appearance mid-shot — causes duplication artifacts)`);
+          this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: stripped accessory removal from dialogue shot`);
+        }
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // RULE 11: Dialogue-aware blocking validation (informational only)
+    // Flag dialogue that contradicts scene image blocking.
+    // e.g., "come in" but character already inside, "close the door" but no door
+    // This is informational — fixing requires dialogue rewriting which is too
+    // invasive for an automated rules engine.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const allDialogue = [];
+      for (const shot of shots) {
+        const dialogues = extractDialogue(shot.body);
+        for (const d of dialogues) {
+          allDialogue.push({ shot: shot.shotNum, text: d.text.toLowerCase() });
+        }
+      }
+      // Check for spatial/entry-exit contradictions (light pattern matching)
+      const spatialCues = [
+        { re: /\bcome\s+in(?:side)?\b/, desc: 'entry ("come in")' },
+        { re: /\bclose\s+the\s+door\b/, desc: 'door reference' },
+        { re: /\bsit\s+down\b/, desc: 'sitting transition' },
+        { re: /\bstand\s+up\b/, desc: 'standing transition' },
+        { re: /\bget\s+out\b/, desc: 'exit command' },
+        { re: /\bleave\s+(?:this|my|the)\b/, desc: 'departure command' },
+      ];
+      for (const d of allDialogue) {
+        for (const cue of spatialCues) {
+          if (cue.re.test(d.text)) {
+            fixes.push(`RULE11 (info): Shot ${d.shot} dialogue has ${cue.desc} — verify scene image blocking matches (character position should reflect this action).`);
+            this.log(`[RULES-ENGINE] ${clipId} Shot ${d.shot}: dialogue-blocking check — "${cue.desc}" detected`);
+          }
+        }
+      }
+    }
+
+    // ── Summary ──
+    if (fixes.length > 0) {
+      this.log(`[RULES-ENGINE] ${clipId}: applied ${fixes.length} fix(es)/warning(s)`);
+    } else {
+      this.log(`[RULES-ENGINE] ${clipId}: all rules passed — prompt unchanged`);
+    }
+
+    return { prompt: fixed, fixes };
   }
 
   /**
@@ -6685,6 +7201,43 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           }
         } else {
           this.log(`[POSTURE-FIX] Could not parse preamble (${!!preambleMatch}) or Shot 1 (${!!s1Match}) — skipping`);
+        }
+      }
+
+      // ── PRE-GEN RULES ENGINE — upstream prompt fixes (150-clip observations) ──
+      // Validate the prompt against known Kling failure patterns and auto-fix
+      // violations BEFORE burning credits. Non-destructive: no rules violated = passthrough.
+      {
+        const rulesResult = this._validateAndFixPromptRules(
+          finalMultiShotPrompt,
+          visionRefinedChars,
+          clipDef,
+          clipId
+        );
+        if (rulesResult.fixes.length > 0) {
+          finalMultiShotPrompt = rulesResult.prompt;
+          this.log(`[RULES-ENGINE] ${clipId}: ${rulesResult.fixes.length} fix(es) applied:`);
+          for (const fix of rulesResult.fixes) {
+            this.log(`[RULES-ENGINE]   → ${fix}`);
+          }
+        }
+      }
+
+      // ── PRODUCTION GROUNDING PREFIX ──
+      // Anchors every Kling prompt in the project's creative identity so the AI
+      // model never drifts away from the Nigerian drama tone, accent consistency,
+      // sound design, and scoring. Prepended once, after all prompt transforms.
+      {
+        const groundingPrefix =
+          'Nigerian drama — Nollywood drama set in Nigeria, Nigerian cast, Nigerian accent all through.\n' +
+          'SFX: add appropriate sfx to dramatic lines.\n' +
+          'Score: add dramatic score.\n\n';
+        const groundingSuffix = '\n\nNO SUBTITLES.';
+        if (!finalMultiShotPrompt.startsWith('Nigerian drama')) {
+          finalMultiShotPrompt = groundingPrefix + finalMultiShotPrompt;
+        }
+        if (!finalMultiShotPrompt.endsWith('NO SUBTITLES.')) {
+          finalMultiShotPrompt = finalMultiShotPrompt.trimEnd() + groundingSuffix;
         }
       }
 
