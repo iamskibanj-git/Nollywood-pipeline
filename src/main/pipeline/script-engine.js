@@ -1101,6 +1101,9 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
    * 3. Bare character names → add @ prefix
    * 4. @element in dialogue → convert to human name
    * 5. Shot count validation → warn if != 3 shots
+   * 6. Dual-speaker strip → remove extra [@speaker] tags from Shot 2/3
+   * 7. Shot direction length → warn when direction body > 20 words
+   * 8. Difficult-word replacement → swap known TTS problem words
    */
   _sanitizeKlingClipPrompts(script) {
     if (!script?.chapters || !script?.character_bible) return;
@@ -1187,6 +1190,47 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
           if (shotMatches.length > 3) {
             console.log(`[PROMPT-SANITIZE] ⚠ ${label}: ${shotMatches.length} shots (expected 3) — Kling renders 4+ unreliably`);
           }
+
+          // ── 6. Dual-speaker strip (Shots 2 & 3) ──
+          // Shot 2 and Shot 3 must have only ONE [@speaker] tag. If Claude wrote
+          // two speaker tags in the same shot, strip the second one.
+          const shotBlockRe = /Shot\s*(2|3)\s*\([^)]*\)\s*:\s*([\s\S]*?)(?=\nShot\s*\d+\s*\(|$)/gi;
+          let shotBlockMatch;
+          while ((shotBlockMatch = shotBlockRe.exec(prompt)) !== null) {
+            const shotNum = shotBlockMatch[1];
+            const shotBody = shotBlockMatch[2];
+            const speakerTags = shotBody.match(/\[@[a-z0-9_]+,\s*speaking/gi) || [];
+            if (speakerTags.length > 1) {
+              // Keep the first speaker tag, strip subsequent ones and their dialogue
+              let cleaned = shotBody;
+              let firstFound = false;
+              cleaned = cleaned.replace(/\n?\[@([a-z0-9_]+),\s*speaking[^\]]*\]:\s*"[^"]*"/gi, (m) => {
+                if (!firstFound) { firstFound = true; return m; }
+                totalFixes++;
+                console.log(`[PROMPT-SANITIZE] ${label}: stripped extra speaker from Shot ${shotNum}`);
+                return '';
+              });
+              if (cleaned !== shotBody) {
+                prompt = prompt.replace(shotBody, cleaned);
+              }
+            }
+          }
+
+          // ── 7. Shot direction length warning ──
+          // Warn when shot direction body (excluding dialogue tag) exceeds 15 words
+          const directionRe = /Shot\s*(\d+)\s*\([^)]*\)\s*:\s*([\s\S]*?)(?=\n\[@|\n\nShot\s*\d+\s*\(|$)/gi;
+          let dirMatch;
+          while ((dirMatch = directionRe.exec(prompt)) !== null) {
+            const dirShotNum = dirMatch[1];
+            const dirBody = dirMatch[2].trim();
+            const wordCount = dirBody.split(/\s+/).length;
+            if (wordCount > 20) {
+              console.log(`[PROMPT-SANITIZE] ⚠ ${label} Shot ${dirShotNum}: direction is ${wordCount} words (recommended max 15) — may cause Kling to drop dialogue`);
+            }
+          }
+
+          // ── 8. Difficult-word replacement ──
+          prompt = ScriptEngine._replaceDifficultWords(prompt, label);
 
           clip.multi_shot_prompt = prompt;
         }
@@ -1527,6 +1571,26 @@ This project runs the CINEMATIC pipeline (Cinema Studio 2.0 scene images + Kling
    - ONE CHARACTER PER SHOT (MANDATORY — Shots 2 and 3): Shot 1 is a WIDE establishing shot where all characters are visible — multiple @references are allowed in Shot 1 only. For Shot 2 and Shot 3, each shot direction must ONLY describe the character delivering the dialogue. Absolutely NO references to other characters — no @element names, no human names, no pronouns referring to others. The CHARACTER POSITIONS preamble already tells the model where everyone is. Any mention of another character in a shot direction confuses the video model and causes dialogue to be assigned to the wrong face. Wrong: "Shot 2: CLOSE-UP on @ada. She points at @emeka." Wrong: "Shot 2: CLOSE-UP on @ada. She points at Emeka." Right: "Shot 2: CLOSE-UP on @ada. She points sharply ahead, eyes blazing." The ONLY @reference in Shot 2 or Shot 3 is the speaker. Describe reactions, gestures, and emotions of the speaker alone.
    - Shot vocabulary: WIDE ESTABLISHING, WIDE, MEDIUM, CLOSE-UP, EXTREME CLOSE-UP, OVER-SHOULDER, REACTION, INSERT
    - Camera movement vocabulary: STATIC, SLOW PUSH-IN, SLOW PUSH-OUT, PAN LEFT, PAN RIGHT, TILT UP, TILT DOWN, HANDHELD, TRACKING
+   - NO SUBTITLES: Do NOT include subtitle text, caption overlays, or on-screen text of any kind in any shot direction or prompt.
+
+KLING RENDERING BUDGET — CRITICAL CONSTRAINTS (from 150-clip production data):
+Kling 3.0 has a finite rendering budget per clip. Lip-sync, camera movement, body animation, emotional state animations, and prop interactions ALL compete for the same budget. When the budget is overloaded, lip-sync is the first thing sacrificed — dialogue gets dropped, delivered off-screen, or assigned to the wrong character.
+
+Budget rules for shot directions:
+- PUSH-IN + DIALOGUE: Keep dialogue to 6 words or fewer on push-in shots. No concurrent emotional state animations (tears, trembling, jaw tightening). If the dialogue line exceeds 6 words, use STATIC camera instead.
+- PROPS-IN-HAND + DIALOGUE: Characters should NOT interact with held props during dialogue shots unless the dialogue is 4 words or fewer. "Clutches the letter" or "sips from the cup" while delivering 8 words of dialogue = lip-sync failure.
+- LAUGHTER + DIALOGUE: Never describe a character laughing, chuckling, or bursting into laughter while simultaneously delivering dialogue. Use "warm smile", "grinning", or "smiling warmly" instead. Laughter animation and lip-sync are mutually exclusive.
+- WORD COUNT PER SHOT: Aim for 8-10 words on static shots, 6-8 words on push-in shots. Kling drops trailing words beyond ~12 words in a single shot. If a line is 12+ words, it MUST go on a static shot with no competing animations.
+- SHOT DIRECTION LENGTH: Keep each shot direction body (excluding the dialogue tag) to 15 words maximum. Shot directions are concise instructions: camera + subject + primary action. Not prose descriptions. Format: "MEDIUM SHOT on @emeka, static. He spreads his hands wide." (11 words) — NOT "As the camera holds on Emeka in a medium shot, he slowly spreads his hands wide while looking toward the window." (21 words).
+- SPEAKER FACING CAMERA: If a character's blocking places them facing away from camera (back to camera, looking out window, etc.), their FIRST dialogue shot MUST include a turn directive — "turns to face camera" or "turns over shoulder." Kling cannot animate lip-sync on the back of a head.
+- EMOTIONAL STATE ANIMATIONS vs DESCRIPTIONS: Animations COMPETE with lip-sync: "face drains of color", "jaw tightens", "tears streaming", "chin trembles", "eyes fill with tears." Descriptions are SAFE (no budget cost): "eyes are steady", "jaw is set", "face is calm", "expression is unreadable." When dialogue is present, prefer descriptions over animations.
+
+CROSS-CLIP CONTINUITY (SAME SCENE — CRITICAL):
+All clips in the same scene share ONE start frame image. Kling renders each clip independently with NO memory of what happened in the previous clip.
+- Shot 1 of EVERY clip must re-establish the current physical state of all visible characters. Do NOT assume Kling remembers what happened in the previous clip.
+- If dialogue implies a position transition ("Sit down.", "Come inside.", "Stand up.", "Leave."), the NEXT clip's Shot 1 must acknowledge the new state — but the start frame will still show the original positions. Keep transitions subtle: prefer dialogue that matches the static start frame. Avoid "Come inside" when the character is already inside in the scene image.
+- Movement WITHIN a clip is fine (character stands up in Shot 2). Movement ACROSS clips creates visual contradictions because the start frame resets.
+- For scenes with physical progression, write dialogue that works with the static composition rather than against it. If a character must move, place the movement dialogue in the LAST clip of the scene where the visual contradiction has the least screen time before the scene changes.
 
 EXAMPLE scene excerpt with cinematic fields:
 
@@ -1975,6 +2039,52 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
     ];
 
     return narrativePatterns.some(p => p.test(text));
+  }
+
+  /**
+   * Replace words that Kling's TTS consistently mispronounces or mangles.
+   * Only operates INSIDE dialogue quotes ([@speaker, ...]: "...") to avoid
+   * corrupting shot directions or technical terms.
+   *
+   * Dictionary is built incrementally from production observations.
+   * Each entry: regex pattern → replacement string.
+   *
+   * @param {string} prompt - The multi_shot_prompt text
+   * @param {string} label - Clip label for logging
+   * @returns {string} Prompt with difficult words replaced
+   */
+  static _replaceDifficultWords(prompt, label) {
+    // Pattern → replacement. Only applied inside dialogue quotes.
+    // Add new entries as TTS failures are observed in production.
+    const dictionary = [
+      // Known mispronunciations from 150-clip run
+      [/\burgently\b/gi, 'with urgency'],
+      [/\bEFCC\b/g, 'E.F.C.C.'],        // spell out acronyms for TTS
+      [/\bNDLEA\b/g, 'N.D.L.E.A.'],
+      [/\bLASIEPA\b/g, 'L.A.S.I.E.P.A.'],
+      [/\bNASS\b/g, 'N.A.S.S.'],
+      [/\bICPC\b/g, 'I.C.P.C.'],
+      [/\bATM\b/g, 'A.T.M.'],
+      [/\bSUV\b/g, 'S.U.V.'],
+      [/\bPHD\b/gi, 'P.H.D.'],
+      [/\bLGA\b/g, 'L.G.A.'],
+    ];
+
+    let fixed = prompt;
+    // Match dialogue blocks: ]: "..."
+    fixed = fixed.replace(/(\]:\s*")([^"]*?)(")/gi, (fullMatch, pre, dialogue, post) => {
+      let replaced = dialogue;
+      for (const [pattern, replacement] of dictionary) {
+        const before = replaced;
+        replaced = replaced.replace(pattern, replacement);
+        if (replaced !== before) {
+          console.log(`[DIFFICULT-WORD] ${label}: "${before.match(pattern)?.[0]}" → "${replacement}" in dialogue`);
+        }
+      }
+      return pre + replaced + post;
+    });
+
+    return fixed;
   }
 }
 

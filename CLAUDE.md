@@ -2502,3 +2502,93 @@ Cost: ~$0.01-0.02 per clip, only for clips in corrected scenes. If 10-15 of ~50 
 **Utility scripts added:**
 - `scripts/clear-vision-verified.js` — clears `vision_blocking_verified` for specific scenes, forcing 2nd Vision pass re-run. Usage: `node scripts/clear-vision-verified.js --scene 1_5 --commit`
 - `scripts/swap-scene-blocking.js` — swaps character positions for a 2-character scene, splitting spatial vs visual descriptions so clothing/pronouns stay with the correct character. Sets `manually_swapped: true` lock. Usage: `node scripts/swap-scene-blocking.js --scene 1_5 --commit`
+
+### Session 30 — Assembly Gate, Redo Recovery, Prompt Grounding, Script Engine Roadmap
+
+**Assembly Integrity Gate (orchestrator.js):**
+Hard gate before FFmpeg assembly. Checks: (1) every clip of the expected type is status=done — throws with clip names if any pending/failed, (2) every done clip has its file present on disk — catches stale DB entries where .mp4 was deleted/moved/soft-deleted. Both throw immediately with identifying info. Prevents partial or broken assemblies.
+
+**Redo Recovery Widened (orchestrator.js, db.js):**
+- Pre-stage recovery block now catches `scenes-done` in addition to `verified`/`assembled`. Fixes edge case: previous restart successfully set stage to `scenes-done` but crashed on `db.runSqlDirect()` (which didn't exist) before clearing `gen_clicked_at`. Second restart saw `scenes-done` (not in the old `['verified','assembled']` filter), skipped recovery, and stale `gen_clicked_at` caused asset recovery instead of fresh generation.
+- `db.runSqlDirect()` replaced with new exported `db.clearAssetGenerationMeta(assetId)` — clears `gen_clicked_at`, `prompt_used`, `cdn_url`.
+
+**Production Grounding (orchestrator.js):**
+Every Kling `multi_shot_prompt` now gets:
+- **Prefix:** `Nigerian drama — Nollywood drama set in Nigeria, Nigerian cast, Nigerian accent all through. SFX: add appropriate sfx to dramatic lines. Score: add dramatic score.`
+- **Suffix:** `NO SUBTITLES.`
+Injected after rules engine, before prompt preview gate. Idempotent — won't duplicate on re-runs. Anchors Kling in the production's creative identity so it never drifts to generic/Western defaults.
+
+**check-rejections.js utility:**
+Read-only DB inspector. Shows all rejected and pending clips with status, file path, gen_clicked_at. Uses sql.js snapshot (in-memory, no writes to disk). Safe to run while app is live. Usage: `node check-rejections.js`
+
+---
+
+### Script Engine Improvement Roadmap (Future Changes to `script-engine.js`)
+
+Observations from the 150-clip production run. The rules engine (orchestrator.js) catches these at video gen time, but moving them upstream into the script engine's cinematic scaffolding would produce cleaner prompts from the start.
+
+**A. Upstream Rules — Move from Rules Engine to Script Scaffolding**
+
+| # | Issue | Current fix (rules engine) | Proposed script engine change |
+|---|-------|---------------------------|-------------------------------|
+| A1 | Dual-speaker shot directions | R1 flags 2+ `[@speaker]` in Shot 2/3 | Add to `_sanitizeKlingClipPrompts`: detect and strip second speaker ref from Shot 2/3 at script time |
+| A2 | Laughter + dialogue collision | R2 replaces "laughing" with "warm smile" | Scaffolding instruction: "Never describe a character laughing while delivering dialogue — use 'warm smile' or 'grinning'. Laughter and lip-sync compete for the same rendering budget." |
+| A3 | Push-in + emotion + long dialogue | R3 strips emotional animation when >6 words | Scaffolding budget note: "Push-in camera movement, emotional state animations, and dialogue compete for Kling's rendering budget. Push-in shots: keep dialogue ≤6 words, no concurrent emotional animations. Long lines (8+ words): use static camera." |
+| A4 | Props-in-hand + dialogue | R6 strips prop interaction when >4 words | Scaffolding: "Characters should not interact with held props during dialogue shots unless dialogue is ≤4 words. Prop interactions and lip-sync compete for rendering budget." |
+| A5 | No word count awareness | R7 flags shots exceeding 10/12 word ceiling | Scaffolding: "Dialogue per shot: aim for 8-10 words on static shots, 6-8 words on push-in shots. Kling drops trailing words beyond ~12 words in a single shot." |
+| A6 | Speaker facing away | R8 injects turn directive | Scaffolding: "If a character's blocking describes them facing away from camera, their first dialogue shot MUST include a turn — 'turns to face camera' or 'turns over shoulder'. Kling cannot animate lip-sync on the back of a head." |
+
+**B. Scene Continuity Across Multiple Clips (Same Scene)**
+
+Current limitation: one scene image per scene, shared by all clips in that scene. When dialogue implies position transitions ("Come in. Sit down.", "Stand up.", "Leave."), later clips inherit the same start frame — creating contradictions where the character has already moved in the previous clip but the start frame shows the original position.
+
+**Observed failures:**
+- ch10_sc2_c1: "Come inside. Stop crying at my door." — but scene image shows character already inside
+- ch10_sc4_c2: Ifeoma stands in c1 start frame, Kling naturally seats her during c2 — scene progressed but start frame didn't
+- ch9_sc3_c2: Scene-setting says "seated on the sofa" but start frame shows standing at doorway
+
+**Proposed solutions (from Session 28 analysis):**
+1. **Progressive scene images per clip** — detect dialogue-implied blocking transitions at script stage (verbs: "come in", "sit down", "stand up", "leave", "walk to"), generate per-clip scene images when transitions occur (c1=standing, c2=seated). Most accurate but most expensive (extra scene image generations).
+2. **Dialogue-to-blocking reconciliation** — post-image Vision pass reads scene image + dialogue, flags lines referencing states not visible. Rewrites dialogue to match visual context ("Close the door behind you" → "Sit down. We need to talk."). Less invasive, fits existing pipeline pattern.
+3. **Script-level continuity annotations** — script engine marks clips that imply blocking transitions with `blocking_transition: { character: "@ada", from: "standing", to: "seated" }`. Pipeline uses these to decide whether to generate progressive scene images or rewrite dialogue.
+
+**C. Shot Direction Sentence Length Cap**
+
+Observed: long shot directions (20+ words) cause Kling to either ignore parts of the direction or deprioritize lip-sync. Shot directions should be concise instructions, not prose descriptions.
+
+**Proposed rules:**
+- Shot direction body (excluding dialogue tag): max 15 words. If more is needed, split the detail into the scene-setting line or a continuity note.
+- Camera + subject + action in that order: "MEDIUM SHOT on @emeka, static. He spreads his hands wide." (11 words) — not "As the camera holds on Emeka in a medium shot, he slowly spreads his hands wide while looking toward the window with growing concern." (24 words)
+- Overflow strategy: when a shot direction exceeds 15 words, split into: (a) essential camera + subject + primary action in the shot direction, (b) atmospheric/secondary detail moved to scene-setting line or blocking notes
+
+**D. Dynamic Scenes — Movement Progression Across Clips**
+
+Kling treats each clip independently — it doesn't know what happened in the previous clip. When a scene involves physical progression (character walks across room, gradually becomes more agitated, transitions from standing to seated), each clip's shot directions must explicitly re-state the current physical state rather than assuming continuity from the previous clip.
+
+**Proposed scaffolding additions:**
+- "Each clip is rendered independently by Kling with no memory of previous clips. Shot 1 of every clip must re-establish the current physical state of all characters — do not assume Kling remembers what happened in the previous clip."
+- "For scenes with physical progression (character moves, sits, stands, enters/exits), each clip's CHARACTER POSITIONS preamble and Shot 1 must reflect the state AT THE START OF THAT CLIP, not the start of the scene. If a character sat down in clip 2, clip 3's blocking should describe them as seated."
+- "Movement within a clip is fine (character stands up in Shot 2). Movement ACROSS clips requires explicit re-establishment in the next clip's blocking."
+
+**E. Structured SFX/Score Hints (Future)**
+
+Currently using blanket grounding prefix ("add appropriate SFX", "add dramatic score"). Future enhancement: per-clip structured fields in the script JSON schema.
+
+```json
+{
+  "clip_id": "ch3_sc3_c1",
+  "sfx_hint": "door slam, glass breaking",
+  "score_hint": "tension rising, strings crescendo",
+  "multi_shot_prompt": "..."
+}
+```
+
+Script engine would author these per clip based on dramatic context. Orchestrator would inject them into the prompt alongside the grounding prefix. Not needed now — blanket approach works — but gives finer control for productions that need specific sound design.
+
+**F. Subtitle Suppression at Script Level**
+
+Currently `NO SUBTITLES.` is appended as a suffix by the orchestrator. If Kling consistently ignores the suffix position, move into the scaffolding template so it's baked into every `multi_shot_prompt` Claude writes: "Do NOT include subtitle text, caption overlays, or on-screen text of any kind."
+
+**G. Difficult-Word Replacement Dictionary**
+
+Pre-generation pass scanning dialogue for words Kling's TTS consistently mangles. Known problem words: "urgently"→"urgencently", "managed"→mangled, acronyms like "EFCC", verb→noun substitutions ("investigates"→"investigation"). Implementation: regex dictionary or lightweight LLM pass applied to dialogue lines before prompt injection. Build dictionary incrementally from production observations.
