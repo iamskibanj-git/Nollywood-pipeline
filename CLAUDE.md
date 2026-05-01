@@ -1950,6 +1950,20 @@ Data from first production run. Formula: `ceil(words / 2.5) + (transitions × 0.
 
 | ch8_sc5_c1 | 27 | 8/9/10 | 3 | 10s | 12s | ✓ Okafor bedroom, Emeka + Mama Okafor. RECOVERED via asset library after double timeout + SESSION_EXPIRED fix + prompt_used matching fix. S1 98% — phantom prop: hangers morphed into wardrobe (not in scene image). S2 95%. S3 89% — 10 words, slight dip but serviceable. All shots delivered. No [REDO]. | S1: "Where is she? Where did she go?" S2: "I did not know she was leaving, Emeka." S3: "You were here. You were in this house." |
 
+| ch10_sc9_c1 | 14 | 3/4/7 | 3 | 12s | 12s | ✓ FINAL CLIP. Same bedroom, Adaeze alone at vanity. SINGLE CHAR. Series finale — mirror scene. S1 MEDIUM static "hands flat on surface" (pose) + "looks at herself in mirror" + "I see you." (3 words) — 98%. Trivially safe. S2 CU slow push-in "reflection in mirror" (mirror framing) + "eyes are full — not of tears, but of recognition" (description) + "I always saw you." (4 words) — 98%. Mirror reflection framing confirmed reliable (2nd success). ≤4 words + push-in + single char = bulletproof. S3 ECU static "direct to camera" (fourth wall break) + "slow private smile" (pose, not laughter) + "holds her own gaze" + "You are still here. That is enough." (7 words) — 98%. Direct-to-camera framing worked — Kling understood the instruction. Smile = pose (coexists with speech), consistent with pattern. Perfect 3-for-3 sweep on the final clip. Single char + low word counts + descriptions only = the template for reliable delivery. **OBSERVATION 150/150 COMPLETE.** | S1: "I see you." S2: "I always saw you." S3: "You are still here. That is enough." |
+
+| ch10_sc8_c2 | 11 | 6/3/2 | 3 | 10s | 10s | ✓ Same bedroom, Adaeze alone at vanity. SINGLE CHAR. S1 MEDIUM static "looking at reflection, hand raised slightly" (pose) + "I am not hiding anything anymore." (6 words) — 98%. S2 ECU INSERT on hand static "slides wedding band off finger" (accessory removal) + "Not even myself." (3 words) — voiceover delivery (no mouth visible), dialogue fine. VISUAL ARTIFACT: ring removal caused finger morphing — Kling can't cleanly animate removing a worn accessory. She holds a ring but still wears one on the finger (duplication). Kling handles props picked up/set down but REMOVING WORN ACCESSORIES (ring, glasses, necklace) requires modifying character appearance mid-shot which it can't do. Accessory stays rendered + duplicate appears in hand. Cosmetic issue, dramatic intent reads. S3 CU slow push-in "places ring in drawer" + "closes drawer" + "looks up at reflection" + "smiles" (4 sequential actions) + "Goodbye, Emeka." (2 words) — 98%. 2 words = trivially safe. Single char absorbed all choreography. | S1: "I am not hiding anything anymore." S2: "Not even myself." S3: "Goodbye, Emeka." |
+
+| ch10_sc8_c1 | 18 | 6/6/6 | 3 | 10s | 10s | ✓ Bedroom at night, Adaeze alone at vanity. SINGLE CHAR. S1 MEDIUM static "hands resting on surface" (pose) + "It is empty now. The drawer." (6 words) — 98%. Facing away toward mirror but dialogue delivered. S2 CU static "in the mirror reflection" (mirror framing) + "opens vanity drawer" (prop interaction) + "Everything I hid. Gone. As evidence." (6 words) — 98%. Mirror reflection framing worked — Kling understood the instruction. Drawer opening didn't compete at 6 words on single char. S3 CU slow push-in "eyes settle on reflection" (eye direction) + "Good. Let it serve its purpose." (6 words) — 98%. Single char push-in safe. Perfect 3-for-3. Single char + balanced 6/6/6 word counts = reliable sweep. | S1: "It is empty now. The drawer." S2: "Everything I hid. Gone. As evidence." S3: "Good. Let it serve its purpose." |
+
+| ch10_sc7_c1 | 24 | 9/6/9 | 3 | 10s | 12s | [REDO] ⚠ Same apartment kitchen, new scene image. Adaeze at stove facing away, Ifeoma on box facing her. S1 MEDIUM static "glancing back toward daughter" (eye direction/partial turn) + "Do not wait as long as I did." (9 words) — 98%. Adaeze facing away but "glancing back" gave enough turn for delivery. S2 CU static Ifeoma "face goes serious then gap-toothed smile breaks through" (facial transitions) + "I will not, Mummy. I promise." (6 words) — 98%. Facial expression transitions in lip sync zone coexist with speech. S3 CU static Adaeze profile "she laughs — full and free" (laughter animation) + "Good. Now help me carry these to the door." (9 words) — DIALOGUE NEVER DELIVERED. Laughter consumed entire shot budget. NEW PATTERN: laughter ≠ smile. Laughing is a MACRO facial animation that directly conflicts with lip sync — mouth doing laughter can't simultaneously do speech. "She laughs" = competing animation (like "jaw tightens", "tears streaming"). "She smiles" = pose/state (coexists with speech). Profile angle compounded the failure. Upstream: never pair "laughs"/"laughing"/"laughter" with dialogue in the same shot. Replace with "a warm smile" or move laughter to a non-dialogue reaction shot. | S1: "Do not wait as long as I did." S2: "I will not, Mummy. I promise." S3: "Good. Now help me carry these to the door." |
+
+| ch10_sc6_c2 | 21 | 6/11/4 | 3 | 10s | 11s | ✓ Same kitchen. S1 MEDIUM static "She is. I am very lucky." (6 words) — 98%. S2 CU static Ifeoma "looks up, completely earnest" (eye direction/description) + "Mummy. I want to be like you when I grow up." (11 words) — 98%. 11 words on static CU survived cleanly — static + no competing directions handles high word counts. Confirms 11-word dips are push-in specific, not a general CU ceiling. S3 ECU slow push-in Adaeze "she stops" (cessation) + "looks at her daughter" (head turn) + "Be better. Be louder." (4 words) — 95%. ≤4 words but minor dip — "stops" (cessation from stove activity) + head turn = two micro-actions that cost small tax even at 4 words. Still clean. | S1: "She is. I am very lucky." S2: "Mummy. I want to be like you when I grow up." S3: "Be better. Be louder." |
+
+| ch10_sc6_c1 | 21 | 5/6/10 | 3 | 10s | 10s | ✓ New apartment kitchen, Adaeze (foreground at stove) + Ifeoma (background near boxes). Food business scene. S1 WIDE ESTABLISHING static "spooning food" (action on non-speaker) + "Mummy, how many orders today?" (5 words) — 98%. S2 CU static Adaeze "counts quickly in her head" (internal/ambient) + "small pleased smile" (facial) + "Twelve. Aunty Ngozi sent three more." (6 words) — 89%. Unexpected dip — "counts in head" may have triggered visible thinking animation, or stove-area hand activity from start frame carried into CU. 6 words should be trivially safe on static CU. Anomalous. S3 CU static Ifeoma "she grins" (facial) + "She is your best customer. And your best friend." (10 words) — 95%. Minor background→CU tax. | S1: "Mummy, how many orders today?" S2: "Twelve. Aunty Ngozi sent three more." S3: "She is your best customer. And your best friend." |
+
+| ch10_sc5_c1 | 22 | 5/6/11 | 3 | 10s | 11s | ⚠ Same park, new scene image (Ifeoma seated on bench foreground, Mama standing behind near tree). S1 MEDIUM static "looking ahead" (eye direction) + "She is strong, my mummy." (5 words) — 98%. S2 CU static Mama Okafor "eyes are wet but steady" (description) + "Yes. Stronger than I ever knew." (6 words) — 95%. NEW FAILURE MODE: Mama delivered lines against her PORTRAIT BACKGROUND instead of park scene. Kling rendered her against her character reference image rather than maintaining scene environment. CU on background character may cause Kling to pull from portrait/grid reference when reframe distance is large enough. Dialogue delivered but visual continuity broken — cosmetically jarring. S3 CU slow push-in Ifeoma "young face is certain" (description) + "I want to be like her when I grow up." (11 words) — 90%. Push-in + description + 11 words = expected 90%. 11 words is just past the comfort zone for push-in even with description only (10 words = 98% in ch9_sc6_c3, 11 words = 90% here). | S1: "She is strong, my mummy." S2: "Yes. Stronger than I ever knew." S3: "I want to be like her when I grow up." |
+
 | ch10_sc4_c2 | 25 | 8/8/9 | 3 | 10s | 12s | ⚠ Same park bench. S1 MEDIUM static Ifeoma "looking up with clear direct eyes" (eye direction/description) + "Grandma. Why did you not help Mummy before?" (8 words) — 98%. S2 CU slow push-in Mama Okafor "eyes drop" (eye direction) + "chin trembles slightly" (facial micro-movement in lip sync zone) + "Because I was afraid too, my child." (8 words) — 89%. Push-in + chin tremble + 8 words = expected dip. Chin tremble is face-adjacent micro-movement — borderline between ambient and competing. Kling seated the kid on the bench during this shot (cross-clip blocking progression — she was standing in start frame). S3 CU static Mama Okafor "lifts her eyes" (eye direction) + "Your mother taught me fear is not an excuse." (9 words) — 95%. Continuous framing from S2 (same character), no reframe. Minor dip at 9 words. CROSS-CLIP BLOCKING: Kling naturally transitioned Ifeoma from standing to seated across clips — confirms pipeline needs progressive scene images when dialogue/scene progression implies position changes. | S1: "Grandma. Why did you not help Mummy before?" S2: "Because I was afraid too, my child." S3: "Your mother taught me fear is not an excuse." |
 
 | ch10_sc4_c1 | 22 | 6/9/7 | 3 | 10s | 11s | ⚠ Lagos park, Mama Okafor (foreground on bench) + Ifeoma (standing beside her). Gift scene. S1 WIDE ESTABLISHING static "small wrapped gift in lap" + "I brought you something. Open it." (6 words) — 98%. Kling morphed Bible into Mama's hand and animated handoff to Ifeoma — prop materialization + giving action triggered by dialogue "Open it." Improvised choreography aligned with dialogue intent. S2 CU static Ifeoma "holds Bible open, tracing name inside cover" (prop interaction) + "My name is inside. You wrote it yourself." (9 words) — 80%. Bible already in hand from S1 handoff but tracing action competed with 9 words. Prop interaction + dialogue = budget competition confirmed again. S3 CU static Mama Okafor "face is softer" (description) + "Every young woman needs her own Bible." (7 words) — 90%. Minor dip on clean static — possibly residual budget depletion from S2's heavy prop choreography carrying across shots. Serviceable, no [REDO] but S2 at 80% is borderline. | S1: "I brought you something. Open it." S2: "My name is inside. You wrote it yourself." S3: "Every young woman needs her own Bible." |
@@ -2062,7 +2076,7 @@ Data from first production run. Formula: `ceil(words / 2.5) + (transitions × 0.
 
 | ch6_sc6_c3 | 17 | 8/0/9 | 2 | 11s | 11s | [REDO] ⚠ Same apartment. PHONE CALL with off-screen Chidinma. S1 WIDE static Adaeze on screen — Chidinma's dialogue "My name is Chidinma. We need to meet." (8 words) assigned to Adaeze's shot. Adaeze DELIVERED CHIDINMA'S LINE (wrong speaker). "Color draining, eyes widening" emotional state direction present but moot since wrong speaker delivered. S2 ECU on eyes, no dialogue — pure reaction, fine. S3 CU PUSH-IN Adaeze "Your husband is going to destroy both of us." (9 words) — Adaeze delivered this too. PHONE CALL HANDLING FAILED because prompt structure was wrong. Compare ch3_sc5_c1-c4 where phone calls worked: in those clips, on-screen character (Tunde) had his OWN dialogue, and off-screen caller (Ngozi) had separate dialogue tags. Here, Chidinma's dialogue was tagged to Adaeze's shot direction, so Kling assigned it to whoever was on camera. Upstream: phone call scenes need separate speaker handling — on-screen char gets reaction directions, off-screen voice gets its own dialogue tag with no character on screen. | S1: "My name is Chidinma. We need to meet." S2: (silence — reaction) S3: "Your husband is going to destroy both of us." |
 
-**Emerging patterns (updated Session 28, 110 clips):**
+**Emerging patterns (updated Session 28, 150 clips — OBSERVATION GATHERING COMPLETE):**
 - **Push-in + dialogue in multi-character scenes = near-certain lip sync failure.** 13/17 multi-char clips with push-in S3 failed. Exceptions: car interior (ch1_sc4_c1/c2), INSERT→PULL BACK (ch2_sc2_c3).
 - **Single-character scenes are push-in safe.** ch2_sc3_c1, ch2_sc4_c2, ch2_sc7_c1 all delivered push-in + dialogue. No second character to split attention.
 - **Camera movement WITHOUT dialogue = always safe.** ch2_sc4_c2 S3 INSERT→tilt, no dialogue — perfect. Full budget when not lip syncing.
@@ -2156,6 +2170,91 @@ Data from first production run. Formula: `ceil(words / 2.5) + (transitions × 0.
   - **Cross-clip blocking progression (Session 28, ch10_sc2_c1):** Dialogue that implies position transitions ("Come in. Sit down.", "Stand up.", "Leave.") can be valid if the NEXT clip's scene image reflects the change — clip N dialogue drives clip N+1 blocking. This is legitimate cinematic grammar (character says "sit down," next cut shows them seated). But the pipeline must support it deliberately: (a) detect dialogue-implied blocking transitions at script stage, (b) generate progressive scene images per-clip when transitions occur (clip c1 = standing, clip c2 = seated), (c) validate that the next clip's start frame matches the transition. If progressive scene images aren't supported, the simpler fix is Option B — rewrite dialogue to match static blocking. Currently the pipeline uses one scene image per scene for all clips, so blocking transitions within a scene create contradictions. **Additional example (ch10_sc4_c2):** Ifeoma stands in c1 start frame, but Kling naturally seats her during c2 — the scene progressed but the start frame didn't. If c2 had a progressive scene image with Ifeoma seated on the bench, blocking would be consistent.
   - **Implementation timing:** After 150-clip observation gathering is complete.
 - **Difficult-word replacement pass** — Pre-generation pass that scans dialogue for words Kling's TTS consistently mangles or mispronounces. Build a dictionary of problem words → simpler synonyms and auto-swap before prompt submission. Known problem words so far: "urgently"→"urgencently" (ch5_sc2_c1), "managed" mangled (ch6_sc4_c1), acronyms like "EFCC" (ch6_sc4_c1). Also flag: complex consonant clusters, multi-syllable words with unusual stress patterns, abbreviations/acronyms. Implementation: lightweight LLM pass or regex dictionary applied to dialogue lines before injection into multi-shot prompts. Timing: after 150-clip run, accumulate full problem-word list from observations.
+
+### Full Automation Analysis — Script-Approved to Final Output (Session 28, 150 clips)
+
+**Goal:** Once the script is approved by the human, can the pipeline run to completion without human intervention? What are the hard gates, what can be automated, and what verification exists vs what's missing?
+
+**Current verification inventory by stage:**
+
+| Stage | Prompt Stored | Prompt-to-Output Match | Human Gate | Automated Scoring | Gap |
+|-------|:---:|:---:|:---:|:---:|-----|
+| Portrait Gen | ✅ `prompt_used` | ❌ No vision check | ✅ Portrait approval | Partial (NSFW only) | No vision verification that portrait matches character description |
+| Grid Gen | ✅ `prompt_used` | ❌ No validation | ❌ None | Partial (dimensions, file size) | No human approval, no vision check, no character consistency validation |
+| Scene Image Gen | ✅ `prompt_used` | ❌ No vision check vs prompt | ✅ Scene approval | ❌ None | No automated check that scene contains correct characters/setting/props |
+| Video Clip Gen | ✅ `prompt_used` | ✅ Recovery matching (Dice) | ✅ Accept/review/reject | ✅ Gemini ClipVerifier (3-tier) | Only stage with meaningful automated quality scoring |
+
+**What's needed per stage for full automation:**
+
+**1. Portrait Gen — currently has human gate**
+- Add: Vision verification that portrait matches character bible description (skin tone, age, gender, clothing, hairstyle)
+- Add: Face consistency scoring across multiple portrait generations for the same character
+- Automated gate: Accept if vision match ≥ 90%, flag for human review if 70-90%, auto-reject + regenerate if < 70%
+- Risk of full auto: Medium. Wrong face/wrong character is catastrophic downstream — every grid, scene, and clip inherits the error. **Recommend: keep human gate for v1, automate for v2 after confidence builds.**
+
+**2. Grid Gen — currently has NO gate**
+- Add: Vision verification that grid maintains face consistency with approved portrait
+- Add: Multi-angle coverage check (front, profile, 3/4 — all present?)
+- Add: Human approval gate (currently missing entirely — grids auto-pass)
+- Risk of full auto: High. Grid is the character reference for ALL downstream generation. Bad grid = bad everything. **Recommend: add human gate first, then automate with vision scoring.**
+
+**3. Scene Image Gen — currently has human gate**
+- Add: Vision verification that scene contains the correct characters (match against portraits/grids)
+- Add: Vision check that scene setting matches location prompt (indoor/outdoor, time of day, props present)
+- Add: Blocking validation — characters positioned where the script expects them (using dialogue-aware blocking from Option A)
+- Add: Cross-scene continuity check (same character looks the same across scenes)
+- Automated gate: Accept if all checks pass, flag for review if any fail
+- Risk of full auto: Medium-high. Wrong characters in scene or wrong setting cascades to clips. **Recommend: automate with vision + keep human gate as override for v1.**
+
+**4. Video Clip Gen — already has automated scoring (Gemini ClipVerifier)**
+- Existing: Gemini multimodal scoring (accept/review/reject), max 3 redo iterations
+- Add: Lip sync accuracy scoring (automated, not manual observation)
+- Add: Prompt-to-output verification — does the clip contain the right characters, right setting, right shot scales?
+- Add: Rules engine based on 150-clip observations — pre-generation validation that catches known failure patterns BEFORE burning Kling credits (push-in + emotional state + dialogue = auto-reject the prompt, fix first)
+- Risk of full auto: Low-medium. Clips are the most expensive stage (Kling credits) but already have the best verification. **Recommend: enhance existing ClipVerifier + add pre-generation rules engine.**
+
+**Non-negotiable hard gates (must remain human-in-the-loop):**
+
+1. **Script approval** — Creative decisions about story, dialogue, pacing. Cannot be automated.
+2. **Portrait approval (v1)** — Character identity is the foundation. Wrong face cascades everywhere. Keep human gate until vision-based face consistency scoring is proven reliable.
+3. **Final cut review** — Even with perfect individual clips, the assembled sequence needs editorial judgment: pacing, emotional arc, continuity between clips. Human review of assembled scenes before export.
+
+**Gates that CAN be automated (with sufficient verification):**
+
+1. **Grid generation** — Once portrait is approved, grid is mechanical (same face, multiple angles). Vision scoring for face consistency can automate this.
+2. **Scene image generation** — With vision verification (correct characters + setting + blocking), can be auto-approved if all checks pass, with human review only on flagged failures.
+3. **Individual clip generation** — Already partially automated via ClipVerifier. Enhance with pre-gen rules engine + lip sync scoring for full automation.
+
+**Pre-generation rules engine (NEW — biggest automation win):**
+Before submitting ANY prompt to Kling, validate it against the 150-clip observation rules:
+- Max 1 speaker per shot direction
+- No laughter/laughing + dialogue in same shot
+- No push-in + emotional state animation + dialogue (>6 words)
+- No ECU on background-profile characters
+- No "lifts head"/"raises head" macro movement + dialogue on push-in shots
+- No props-in-hand + dialogue (unless ≤4 words)
+- Word count ceiling per shot (~10 words for push-in, ~12 for static)
+- Speaker must face camera (no back-to-camera dialogue)
+- No worn accessory removal in dialogue shots
+
+If the prompt violates any rule, auto-fix (simplify direction, remove competing animation, split shot) BEFORE submitting to Kling. This prevents burning credits on prompts that will fail based on known patterns.
+
+**Pros of full automation (post script-approval):**
+- Speed: 150 clips could generate in hours instead of days of manual review
+- Consistency: rules engine applies the same quality bar to every clip
+- Scale: can process multiple productions simultaneously
+- Credit efficiency: pre-gen rules prevent known-failure prompts from burning Kling credits
+
+**Cons of full automation:**
+- Edge cases: the 150-clip dataset doesn't cover every possible failure mode
+- Creative judgment: some "failures" are actually dramatic (off-screen voiceover, Kling improvisation)
+- Cascading errors: automated approval at portrait/grid stage can propagate wrong-face through entire production
+- Over-correction: aggressive rules engine might reject prompts that would have worked, making the output too conservative
+
+**Recommended automation roadmap:**
+- **Phase 1 (now):** Implement pre-gen rules engine + upstream fixes. Keep all human gates.
+- **Phase 2:** Add vision verification at portrait/grid/scene stages. Automate grid approval. Scene approval becomes human-override-only (auto-approve if vision passes).
+- **Phase 3:** Remove portrait human gate (vision + face consistency scoring proven). Full auto from script-approval to assembled clips, with human review only at final cut.
 
 ### REDO Strategy — Credit-Conscious Selective Regeneration
 
