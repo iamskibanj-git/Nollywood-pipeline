@@ -2820,3 +2820,9 @@ Phase 5: Resume + Recovery
   - `_restoreCinematicMaps(projectId)` — rebuilds in-memory maps from DB settings on resume, validates paths against disk
   - Resume path: calls `_restoreCinematicMaps` + `reconcileWithFilesystem` before any stage logic runs
   - Principle: local file on disk is the ultimate source of truth. DB is an index that gets reconciled against reality on every resume.
+- Cultural grounding (location authenticity):
+  - `CULTURAL_GROUNDING` map (module-level constant) keyed by nationality ('Nigerian')
+  - Contains: `prompt_suffix`, `interior_markers`, `exterior_markers`, `forbidden` elements, `verify_instruction`
+  - `_buildLocationPrompt` injects interior/exterior cultural markers based on location text detection (regex for room/kitchen/etc → interior, else exterior)
+  - `verifyLocationImage` receives `culturalContext` + `forbiddenElements` — checks for out-of-place Western elements (CNN, European portraits, non-African art). `cultural_authenticity` weighted 2.5x, forced fail if score < 40.
+  - Prevents: Nigerian living room with CNN on TV, European portraits on walls, IKEA furniture, non-African architecture

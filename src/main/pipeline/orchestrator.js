@@ -10,6 +10,25 @@ const db = require('../database/db');
 
 const STAGES = ['research', 'script', 'portraits', 'scenes', 'video', 'assembly', 'publish', 'export'];
 
+// ── Cultural Grounding ──
+// Location images must be culturally authentic to the target market.
+// AI image generators default to Western aesthetics unless explicitly anchored.
+// Keyed by nationality (from storyBrief.nationality). Expandable to other markets.
+const CULTURAL_GROUNDING = {
+  Nigerian: {
+    // Positive markers — inject into location prompts
+    prompt_suffix: 'Nigerian setting. African decor, local artwork, warm earth tones. Nigerian cultural elements — no Western/European cultural markers, no foreign TV channels, no European portraits or artwork on walls.',
+    // Interior-specific markers for indoor scenes
+    interior_markers: 'Nigerian home interior — ankara/aso-oke fabric accents, carved wooden furniture, African sculptures or masks as decor, family photos of Black/African people, local TV (NTA/Channels TV if screen visible), terrazzo or tile floors, ceiling fan.',
+    // Exterior-specific markers for outdoor scenes
+    exterior_markers: 'Nigerian street/exterior — tropical vegetation, concrete/painted buildings, corrugated roofing where appropriate, hand-painted signage, warm dusty light, Lagos/Abuja/Enugu architecture style.',
+    // Negative markers — what MUST NOT appear (for verification)
+    forbidden: ['CNN', 'BBC', 'Fox News', 'European portraits', 'European artwork', 'white family photos', 'American decor', 'IKEA furniture', 'Western suburban architecture', 'snow', 'autumn leaves', 'cherry blossoms', 'non-African cultural symbols'],
+    // Verification prompt addition
+    verify_instruction: 'CULTURAL AUTHENTICITY CHECK: This is a NIGERIAN drama. The location MUST look authentically Nigerian/African. Check for out-of-place Western elements: European/white faces in wall art or photos, Western TV channels (CNN/BBC/Fox), IKEA-style furniture, non-African architecture, snow/autumn scenery. Any non-Nigerian cultural marker = critical issue.',
+  },
+};
+
 // ── Duration Calculation ──
 const AVG_CLIP_DURATION = 7;         // 6-8 seconds per clip, average 7 (staged/Veo)
 const CREDITS_PER_CLIP = 12;         // Veo 3.1 Lite: 12 credits per 8s clip (staged)
@@ -4425,9 +4444,16 @@ class PipelineOrchestrator {
           // ── Vision verification: does the location match its description? ──
           if (this._imageVerifier && locAsset) {
             try {
+              // Pass cultural grounding context for authenticity verification
+              const grounding = CULTURAL_GROUNDING['Nigerian'] || {};
               const locVerification = await this._imageVerifier.verifyLocationImage(
                 outputPath,
-                { name: loc.name, description: loc.description },
+                {
+                  name: loc.name,
+                  description: loc.description,
+                  culturalContext: grounding.verify_instruction || '',
+                  forbiddenElements: grounding.forbidden || [],
+                },
                 { passThreshold: 70 }
               );
               this.log(`[CINEMATIC] Location @${loc.name} vision score: ${locVerification.score} → ${locVerification.verdict}`);
@@ -4605,7 +4631,19 @@ class PipelineOrchestrator {
     // the model into composing landscape content rotated into a portrait canvas.
     const loc = location || 'a setting';
     const details = locationDetails || '';
-    return `${loc}. ${details}. Empty — no people, no characters, no figures, no human silhouettes anywhere in frame. Photorealistic cinematic still, natural lighting, shallow depth of field, warm color grade, film grain.`.replace(/\s+/g, ' ').trim();
+
+    // Cultural grounding — anchor to target nationality to prevent Western defaults
+    const nationality = 'Nigerian'; // Locked — all Nollywood productions
+    const grounding = CULTURAL_GROUNDING[nationality];
+    let culturalAnchors = '';
+    if (grounding) {
+      // Detect indoor vs outdoor from location text
+      const locLower = (loc + ' ' + details).toLowerCase();
+      const isInterior = /room|kitchen|bedroom|living|office|apartment|flat|house|parlour|parlor|bathroom|corridor|hallway|foyer|study|library|dining|lounge|balcony|studio|shop|store|bar|restaurant|church|mosque|hospital|clinic|ward|cell|prison/i.test(locLower);
+      culturalAnchors = isInterior ? grounding.interior_markers : grounding.exterior_markers;
+    }
+
+    return `${loc}. ${details}. ${culturalAnchors}. Empty — no people, no characters, no figures, no human silhouettes anywhere in frame. Photorealistic cinematic still, natural lighting, shallow depth of field, warm color grade, film grain.`.replace(/\s+/g, ' ').trim();
   }
 
   /**

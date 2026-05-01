@@ -262,16 +262,18 @@ Output ONLY the JSON.`;
   // ═══════════════════════════════════════════════════════════════════
 
   /**
-   * Verify a generated location image matches its description and contains
-   * no people (location images are empty backgrounds used as references).
+   * Verify a generated location image matches its description, contains
+   * no people, and is culturally authentic to the target nationality.
    *
    * Checks: matches description, no people/figures present (critical),
-   * mood/atmosphere match, composition quality.
+   * cultural authenticity (critical), mood/atmosphere match, composition quality.
    *
    * @param {string} locationPath - Path to generated location image
    * @param {Object} location - Location info
    * @param {string} location.description - Expected location description
    * @param {string} [location.name] - Location element name (for logging)
+   * @param {string} [location.culturalContext] - Cultural verification instruction
+   * @param {string[]} [location.forbiddenElements] - Culturally inappropriate elements to check for
    * @returns {Promise<{score: number, issues: string[], verdict: string, details: Object}>}
    */
   async verifyLocationImage(locationPath, location, { passThreshold = 70 } = {}) {
@@ -280,33 +282,40 @@ Output ONLY the JSON.`;
     const imageData = await this._loadImage(locationPath);
     if (!imageData) return this._fallbackResult('Could not load location image');
 
+    // Cultural grounding context (passed from orchestrator's CULTURAL_GROUNDING map)
+    const culturalCheck = location.culturalContext
+      ? `\n\n${location.culturalContext}\nFORBIDDEN ELEMENTS (any of these = critical issue): ${(location.forbiddenElements || []).join(', ')}`
+      : '';
+
     const prompt = `You are a quality control system for an AI video production pipeline. Verify this generated EMPTY LOCATION IMAGE matches its description and contains NO people.
 
 EXPECTED LOCATION:
 ${location.description}
 
-CRITICAL RULE: This image MUST be completely empty — no people, no characters, no human figures, no silhouettes, no mannequins. It is used as a background reference for scene composition.
+CRITICAL RULE: This image MUST be completely empty — no people, no characters, no human figures, no silhouettes, no mannequins. It is used as a background reference for scene composition.${culturalCheck}
 
 TASK: Verify the location image.
 
 1. NO_PEOPLE — Is the image completely free of people, human figures, silhouettes, or any suggestion of a person? (CRITICAL — any human presence = instant fail)
 2. DESCRIPTION_MATCH — Does the image match the expected location description? (correct type of place, matching features/elements described)
-3. MOOD_SETTING — Does the atmosphere, lighting, and mood feel right for the described location? (time of day, indoor/outdoor, color warmth)
-4. COMPOSITION — Is the image well-composed as a background reference? (good framing, appropriate depth, usable as a scene backdrop)
+3. CULTURAL_AUTHENTICITY — Does the image look culturally authentic to the specified setting? Are there any out-of-place elements from a different culture (Western TV channels, European artwork, non-local architecture)? (CRITICAL for immersion)
+4. MOOD_SETTING — Does the atmosphere, lighting, and mood feel right for the described location? (time of day, indoor/outdoor, color warmth)
+5. COMPOSITION — Is the image well-composed as a background reference? (good framing, appropriate depth, usable as a scene backdrop)
 
 OUTPUT FORMAT (JSON only):
 {
   "scores": {
     "no_people": { "score": 0-100, "note": "brief explanation — 100 if completely empty, 0 if people visible" },
     "description_match": { "score": 0-100, "note": "how well it matches the description" },
+    "cultural_authenticity": { "score": 0-100, "note": "culturally appropriate? any foreign/out-of-place elements?" },
     "mood_setting": { "score": 0-100, "note": "" },
     "composition": { "score": 0-100, "note": "" }
   },
-  "critical_issues": ["e.g. 'person visible in background', 'completely wrong location type'"],
+  "critical_issues": ["e.g. 'person visible in background', 'CNN on TV screen — should be Nigerian channel', 'European portraits on wall'"],
   "minor_issues": ["e.g. 'slightly different lighting than expected', 'missing some described details'"]
 }
 
-NO_PEOPLE is the absolute highest priority. Any human figure = score 0 for no_people and a critical issue.
+NO_PEOPLE and CULTURAL_AUTHENTICITY are the highest priorities. Any human figure = score 0 for no_people. Any clearly foreign/Western cultural marker in a non-Western setting = score below 40 for cultural_authenticity.
 
 Output ONLY the JSON.`;
 
@@ -502,9 +511,10 @@ Output ONLY the JSON.`;
   _scoreLocationResult(parsed, { passThreshold }) {
     const scores = parsed.scores || {};
 
-    // no_people is critical (3x) — locations MUST be empty backgrounds
+    // no_people and cultural_authenticity are critical (3x/2.5x)
     const weights = {
       no_people: 3,
+      cultural_authenticity: 2.5,
       description_match: 2,
       mood_setting: 1.5,
       composition: 1,
@@ -527,9 +537,14 @@ Output ONLY the JSON.`;
 
     const score = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
 
-    // Extra hard check: if no_people < 50, force fail (people in location = unusable)
+    // Hard checks — force fail for critical violations
     const noPeopleScore = scores.no_people?.score ?? 100;
-    const forcedFail = noPeopleScore < 50;
+    const culturalScore = scores.cultural_authenticity?.score ?? 100;
+    const forcedFail = noPeopleScore < 50 || culturalScore < 40;
+
+    let failReason = '';
+    if (noPeopleScore < 50) failReason = 'no_people<50';
+    else if (culturalScore < 40) failReason = 'cultural_authenticity<40';
 
     const allIssues = [
       ...(parsed.critical_issues || []),
@@ -539,7 +554,7 @@ Output ONLY the JSON.`;
 
     const verdict = forcedFail ? 'fail' : (score >= passThreshold ? 'pass' : 'fail');
 
-    this.logger(`Location score: ${score} → ${verdict}${forcedFail ? ' (forced: no_people<50)' : ''} (pass≥${passThreshold})`);
+    this.logger(`Location score: ${score} → ${verdict}${forcedFail ? ` (forced: ${failReason})` : ''} (pass≥${passThreshold})`);
     if (allIssues.length > 0) {
       this.logger(`Issues: ${allIssues.slice(0, 3).join('; ')}`);
     }

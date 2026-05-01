@@ -40,6 +40,24 @@ Orchestrator persistence (orchestrator.js):
   db.saveVisionResult() immediately after API returns, use
   db.incrementVisionRetries() instead of in-memory counters.
 
+Cultural grounding (location authenticity):
+- CULTURAL_GROUNDING map keyed by nationality ('Nigerian'). Contains:
+  prompt_suffix, interior_markers, exterior_markers, forbidden elements,
+  verify_instruction.
+- _buildLocationPrompt: injects interior/exterior cultural markers based
+  on regex detection (room/kitchen → interior, else exterior). Prevents
+  AI from defaulting to Western aesthetics.
+- verifyLocationImage: receives culturalContext + forbiddenElements.
+  cultural_authenticity check weighted 2.5x, forced fail if < 40.
+  Catches: CNN on TV, European portraits, IKEA furniture, non-African
+  architecture in Nigerian settings.
+- Interior markers: ankara fabric, carved wood, African sculptures,
+  family photos of Black/African people, Nigerian TV channels, terrazzo.
+- Exterior markers: tropical vegetation, concrete/painted buildings,
+  hand-painted signage, Lagos/Abuja/Enugu architecture style.
+- Forbidden: CNN, BBC, Fox News, European portraits, white family photos,
+  IKEA furniture, Western suburban architecture, snow, autumn leaves.
+
 Also in this commit:
 - Location verification (verifyLocationImage) + gate removal
 - Dialogue triage auto-proceed when all clips have dialogue
