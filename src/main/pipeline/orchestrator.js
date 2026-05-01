@@ -385,11 +385,18 @@ class PipelineOrchestrator {
 
     // Get asset progress for the current stage
     let progress = null;
-    const typeMap = {
-      'portraits-done': 'scene_image',
-      'scenes-done': 'video_clip',
-      'script-done': 'portrait',
-    };
+    const isCinematic = project.generatorMode === 'cinematic';
+    const typeMap = isCinematic
+      ? {
+          'portraits-done': 'scene_image_cinematic',
+          'scenes-done': 'video_clip_cinematic',
+          'script-done': 'portrait',
+        }
+      : {
+          'portraits-done': 'scene_image',
+          'scenes-done': 'video_clip',
+          'script-done': 'portrait',
+        };
     const assetType = typeMap[project.stage];
     if (assetType) {
       progress = db.getAssetCounts(project.id, assetType);

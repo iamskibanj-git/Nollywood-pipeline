@@ -851,6 +851,10 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
     if (actualChapters !== expectedChapters) {
       console.error(`[SCRIPT] CHAPTER COUNT MISMATCH: expected ${expectedChapters}, got ${actualChapters}`);
       console.error(`[SCRIPT] Chapters present: ${script.chapters.map(c => c.chapter_number).join(', ')}`);
+      // Hard fail if chapters are missing entirely or severely off (< 50% of expected)
+      if (actualChapters === 0 || actualChapters < expectedChapters * 0.5) {
+        throw new Error(`Script generation failed: got ${actualChapters} chapters but expected ${expectedChapters}. Script is too incomplete to proceed.`);
+      }
     } else {
       console.log(`[SCRIPT] ✓ Chapter count validated: ${actualChapters}/${expectedChapters}`);
     }
@@ -871,7 +875,10 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
         }
       }
       const expectedClips = storyBrief.targetClips || 50;
-      if (totalClips < expectedClips * 0.8) {
+      if (totalClips < expectedClips * 0.5) {
+        // Hard fail: less than 50% of target clips is a malformed script
+        throw new Error(`Script generation failed: only ${totalClips} clips produced (target ~${expectedClips}, minimum 50% = ${Math.floor(expectedClips * 0.5)}). Script is too incomplete to proceed.`);
+      } else if (totalClips < expectedClips * 0.8) {
         console.warn(`[SCRIPT] Clip count LOW: ${totalClips} clips (target ~${expectedClips}, 80% threshold = ${Math.floor(expectedClips * 0.8)})`);
       } else if (totalClips > expectedClips * 1.2) {
         console.warn(`[SCRIPT] Clip count HIGH: ${totalClips} clips (target ~${expectedClips}, 120% threshold = ${Math.ceil(expectedClips * 1.2)})`);

@@ -1120,6 +1120,14 @@ function listResearchPoolSummaries() {
 // ── Produced Titles Queries ──
 
 function recordProducedTitle(projectId, title, themes, similarityScore) {
+  // Guard against duplicate insertion on resume (assembly done but project not yet completed)
+  if (projectId) {
+    const existing = queryOne(
+      `SELECT id FROM produced_titles WHERE project_id = ? AND title = ?`,
+      [projectId, title]
+    );
+    if (existing) return; // already recorded for this project
+  }
   runSql(`
     INSERT INTO produced_titles (project_id, title, themes, similarity_score)
     VALUES (?, ?, ?, ?)

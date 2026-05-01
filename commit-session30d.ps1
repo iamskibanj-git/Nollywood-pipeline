@@ -24,6 +24,18 @@ P2: Fix verify redo cap — throw instead of silently proceeding:
 - When MAX_VERIFY_REDO_ITERATIONS reached, check for pending clips
 - If any remain, throw explicit error (belt-and-suspenders with
   assembly integrity gate from Session 30)
+
+Other gap fixes:
+- recordProducedTitle(): uniqueness guard prevents duplicate rows on
+  resume (checks project_id + title before INSERT)
+- getActiveProjectStatus(): typeMap now branches on generatorMode so
+  cinematic projects show scene_image_cinematic / video_clip_cinematic
+  progress instead of staged types
+- _validateScriptCompleteness(): hard-fail (throw) when chapters < 50%
+  of expected or clip count < 50% of target — prevents malformed
+  scripts from reaching asset insertion
+- Gap 4 (insertExpectedAssets metadata): mitigated by adopt-orphan
+  pattern — rows get tagged with kling_clip_id at generation time
 "@
 
 git add -A
