@@ -383,7 +383,19 @@ Return JSON with this EXACT structure:
       "id": "character_id",
       "description_label": "Human-readable name",
       "element_name_hint": "snake_case_name",
-      "full_prompt_description": "Full physical description for portrait generation",
+      "physical_description": "PERMANENT physical features ONLY: face shape, skin tone, build, height, hair texture, distinguishing marks, age appearance. NO clothing here — clothing goes in outfits[]. This anchors face identity across all outfit changes.",
+      "outfits": [
+        {
+          "outfit_id": "o1",
+          "description": "Full clothing/styling description for this outfit: garments, accessories, hair styling, shoes, makeup level. E.g. 'Navy fitted power suit, gold stud earrings, straight shoulder-length wig, nude heels, minimal makeup'",
+          "context": "When this outfit is worn: 'Office scenes, corporate meetings, public appearances'"
+        },
+        {
+          "outfit_id": "o2",
+          "description": "E.g. 'Coral ankara wrapper tied at waist, matching head tie, bare feet, no makeup, simple gold bangle'",
+          "context": "When this outfit is worn: 'Home scenes, private moments, morning/evening'"
+        }
+      ],
       "role": "protagonist|antagonist|confidant|supporting|bplot",
       "arc_summary": "One sentence: what this character wants and how they change",
       "speech_style": "formal|proverbial|sharp|pleading|sarcastic|spiritual|street-smart|class-conscious|warm-maternal|cold-authoritative",
@@ -413,8 +425,9 @@ Return JSON with this EXACT structure:
           "location": "Description of location",
           "location_element_hint": "snake_case_location",
           "characters_present": ["char_id_1", "char_id_2"],
+          "character_outfits": {"char_id_1": "o1", "char_id_2": "o2"},
           "beat": "What happens in this scene — 1-2 sentences",
-          "scene_purpose": "reveal|confrontation|reversal|temptation|public-shame|private-confession|decision|trap|payoff|setup|pressure|escape|alliance",
+          "scene_purpose": "reveal|confrontation|reversal|temptation|public-shame|private-confession|decision|trap|payoff|setup|alliance",
           "power_shift": "char_id_1 → char_id_2 (or 'none' if power doesn't change)",
           "emotional_arc": "tension rises|power shifts|reveal|confrontation|resolution",
           "target_lines": 6,
@@ -432,9 +445,11 @@ Return JSON with this EXACT structure:
 }
 
 RULES FOR OUTLINE:
-- The character_bible must include full physical descriptions (full_prompt_description) — these are used for portrait generation.
+- The character_bible MUST separate physical_description (permanent body/face features used for portrait generation) from outfits[] (clothing/styling that changes across the story). physical_description NEVER includes clothing — it anchors face identity across outfit changes.
+- OUTFIT RULES: Every character must have at least 1 outfit. Protagonists and antagonists should have 2-4 outfits reflecting their life contexts (work, home, event, disguise, transformation). Supporting characters can have 1-2. Each outfit must have a clear context describing WHEN it is worn — this maps to specific scenes. Outfit descriptions must be vivid and specific enough for AI image generation (fabric type, color, accessories, styling details). outfit_id uses sequential numbering: o1, o2, o3...
 - Each character MUST have speech_style and speech_notes — these enforce voice consistency when chapters are generated independently. Nigerian drama characters speak differently by class, age, region, and role. A market woman speaks differently than a banker's wife.
 - relationship_arcs: Identify 3-5 key relationships that DRIVE the drama. Nollywood melodrama lives in the space between people — not just in plot events. The arc field describes how the bond transforms. The chapter generator uses these to ensure every scene services at least one relationship.
+- Each scene_beat MUST include character_outfits — a mapping of each character_id in that scene to their outfit_id. This determines which visual identity (portrait + element) is used for generation. An outfit change mid-story (e.g. going from office to home) is a DIFFERENT element — the system needs this mapping to select the correct visual. If a character changes outfit within a chapter, they need separate scenes with the new outfit_id.
 - Scene beats should describe WHO is talking about WHAT, not the actual dialogue.
 - Each scene beat MUST have scene_purpose — this is the dramatic function of the scene. A scene without a clear purpose is filler. If you cannot name its purpose from the taxonomy, the scene should not exist.
 - Each scene beat MUST have power_shift — who holds status/authority/leverage at the start vs end. Nollywood conflict thrives on reversals of social power: elder/younger, rich/poor, man/woman, saved/damned. Not every scene shifts power (use 'none'), but at least half should.
@@ -563,6 +578,7 @@ CRITICAL RULES:
 8. Each scene MUST include emotional_state: { "start": "...", "turn": "...", "end": "..." } — these are brief emotional descriptors (2-4 words) that track how the scene FEELS, not what happens. Examples: start: "uneasy calm", turn: "accusation lands", end: "cold fury". This helps continuity between scenes and prevents emotional whiplash.
 9. Each kling_clip MUST include "visual_beat": a single concrete visual action tied to story meaning. NOT complex choreography — one AI-safe action that the camera can reveal. Examples: "clutches the envelope tighter", "slowly removes her ring", "steps back from the table", "hides phone behind her back", "turns the framed photo face-down". This gives Kling something visual to render beyond talking heads. The visual_beat goes into the shot direction of the most dramatically appropriate shot (usually Shot 2 or 3).
 10. Honour the scene_purpose from the outline. A "reveal" scene must actually reveal something the audience didn't know. A "confrontation" must have characters in active opposition. A "setup" scene plants something for later. If the purpose doesn't match the content, the scene is mislabeled or broken.
+11. Each scene MUST include "character_outfits": a mapping of character_id → outfit_id from the character_bible. This tells the visual pipeline which element (portrait/outfit) to use. Copy it directly from the outline's scene_beats. If a character changes outfit within a scene, SPLIT into two scenes — a single scene cannot have one character in two outfits.
 
 === STRICT RULES ===
 - Dialogue Only: Only character speech. No narration, SFX, or descriptions.
@@ -1711,6 +1727,16 @@ CHARACTER ELEMENT NAMING (CRITICAL — CONSISTENCY REQUIRED):
 - \`speaker_id\` in line objects uses \`element_name_hint\` prefixed with @ (e.g. "@mama_adaeze") for consistency with blocking refs.
 - \`characters_present\` also uses element_name_hint values (e.g. ["mama_adaeze", "eze_okonkwo"]).
 - Character bible still contains full physical descriptions for portrait generation, but once elements exist, visual identity is locked by @reference.
+
+MULTI-OUTFIT CHARACTER SYSTEM:
+Characters in Nollywood drama wear different outfits across the story. Each outfit becomes a SEPARATE Higgsfield Element — a distinct visual identity that the pipeline selects per scene.
+- The character_bible separates \`physical_description\` (permanent features: face, body, skin tone, hair texture) from \`outfits[]\` (clothing/styling per context).
+- Each outfit has an \`outfit_id\` (o1, o2, o3...) and a \`context\` explaining when it's worn.
+- Each scene_beat MUST include \`character_outfits\`: a mapping of character_id → outfit_id. This is how the pipeline knows which element to render for each character in each scene.
+- Downstream pipeline creates: one master portrait per character (from physical_description), then one outfit portrait per outfit (using master portrait as face reference + outfit description), then one grid per outfit, then one Higgsfield Element per outfit. Element names follow the pattern: @{baseName}_o{N}_{suffix}.
+- The @element_name_hint in scene-level references resolves to the outfit-specific element at generation time. Write \`@claire_obi\` in blocking and kling_clips — the orchestrator appends the outfit suffix automatically based on \`character_outfits\`.
+- An outfit change within a scene is NOT supported — split into two scenes if a character changes clothes.
+- Outfit assignment should follow story logic: corporate scenes → formal outfit, home scenes → casual outfit, event scenes → glamour outfit, etc. A character's first-seen outfit should be o1.
 
 ${storyBrief.storyDriven ? `
 STORY-DRIVEN STRUCTURE (CINEMATIC ONLY):

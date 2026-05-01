@@ -1292,7 +1292,12 @@ class PipelineOrchestrator {
             // HARD RULE: No aspect ratio or orientation in prompt text.
             // The Higgsfield UI selector (aspectRatio param) is the sole authority.
             const portraitAspect = this.state.aspectRatio || '9:16';
-            const prompt = `Photorealistic cinematic portrait, studio-quality lighting. ${char.full_prompt_description}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
+            // Backward compat: use full_prompt_description if no outfits array
+            const charDescription = char.full_prompt_description
+              || (char.physical_description
+                ? `${char.physical_description}. ${(char.outfits && char.outfits[0]) ? char.outfits[0].description : ''}`
+                : char.description_label);
+            const prompt = `Photorealistic cinematic portrait, studio-quality lighting. ${charDescription}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
 
             // Dedup check — skip generation if identical prompt already produced a file
             const existing = db.findExistingGeneration(prompt, 'portrait');
@@ -3397,29 +3402,139 @@ class PipelineOrchestrator {
       }
     }
 
-    for (let i = 0; i < characters.length; i++) {
-      const char = characters[i];
-      this.emit({ type: 'progress', stage: 'elements-grids', current: i + 1, total: characters.length });
-      if (gridMap[char.id]) {
-        this.log(`[CINEMATIC] Grid for ${char.id} already exists — skipping`);
+    // ── Phase 2A-bis: Outfit portrait generation (multi-outfit system) ──
+    // For characters with outfits[] array, generate one portrait per outfit
+    // using the master portrait as a face-reference image. The master portrait
+    // (already approved) anchors identity; outfit portraits show the same face
+    // in different clothing. Characters with only 1 outfit (or legacy
+    // full_prompt_description) skip this — their master portrait IS the outfit portrait.
+    const outfitPortraitDir = path.join(projectDir, 'assets', 'portraits');
+    const outfitPortraitMap = {}; // { `${charId}_o${N}`: filePath }
+
+    // Build list of outfit portraits needed
+    const outfitPortraitsNeeded = [];
+    for (const char of characters) {
+      if (!char.outfits || char.outfits.length <= 1) {
+        // Legacy character or single-outfit — master portrait covers o1
         continue;
       }
-      // Find portrait file on disk
-      const portraitAsset = db.getAssets(projectId, { type: 'portrait' })
-        .find(p => p.character_id === char.id && p.status === 'done' && p.file_path);
-      if (!portraitAsset) {
-        this.log(`[CINEMATIC] WARN: no portrait for ${char.id} — can't generate grid`, 'warn');
+      // Master portrait covers o1; generate portraits for o2, o3, etc.
+      for (let oIdx = 1; oIdx < char.outfits.length; oIdx++) {
+        const outfit = char.outfits[oIdx];
+        const outfitKey = `${char.id}_${outfit.outfit_id}`;
+        const outfitPortraitPath = path.join(outfitPortraitDir, `portrait_${outfitKey}.png`);
+        if (fs.existsSync(outfitPortraitPath)) {
+          outfitPortraitMap[outfitKey] = outfitPortraitPath;
+          this.log(`[CINEMATIC] Outfit portrait already exists: ${outfitKey}`);
+        } else {
+          outfitPortraitsNeeded.push({ char, outfit, outfitKey, outfitPortraitPath });
+        }
+      }
+    }
+
+    if (outfitPortraitsNeeded.length > 0) {
+      this.log(`[CINEMATIC] Multi-outfit: generating ${outfitPortraitsNeeded.length} outfit portrait(s)...`);
+      for (let i = 0; i < outfitPortraitsNeeded.length; i++) {
+        if (this.cancelled) return;
+        await this.checkPause();
+
+        const { char, outfit, outfitKey, outfitPortraitPath } = outfitPortraitsNeeded[i];
+        this.emit({ type: 'progress', stage: 'outfit-portraits', current: i + 1, total: outfitPortraitsNeeded.length });
+
+        // Find the approved master portrait as face reference
+        const masterPortraitAsset = db.getAssets(projectId, { type: 'portrait' })
+          .find(p => p.character_id === char.id && p.status === 'done' && p.file_path);
+        if (!masterPortraitAsset) {
+          this.log(`[CINEMATIC] WARN: no master portrait for ${char.id} — cannot generate outfit portrait ${outfitKey}`, 'warn');
+          continue;
+        }
+
+        const portraitAspect = this.state.aspectRatio || '9:16';
+        const outfitPrompt = `Photorealistic cinematic portrait, studio-quality lighting. ${char.physical_description}. Wearing: ${outfit.description}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
+
+        this.log(`[CINEMATIC] Generating outfit portrait: ${outfitKey} (${outfit.context || '?'})`);
+
+        try {
+          await this._withSessionRetry(
+            () => this.automation.generateImage({
+              prompt: outfitPrompt,
+              outputPath: outfitPortraitPath,
+              references: [masterPortraitAsset.file_path],
+              aspectRatio: portraitAspect,
+              referenceCdnUrl: masterPortraitAsset.cdn_url || '',
+            }),
+            `outfit-portrait ${outfitKey}`
+          );
+          outfitPortraitMap[outfitKey] = outfitPortraitPath;
+          this.log(`[CINEMATIC] ✓ Outfit portrait complete: ${outfitKey}`);
+        } catch (err) {
+          if (this.cancelled || (err.message && err.message.includes('Target') && err.message.includes('closed'))) {
+            this.cancelled = true;
+            return;
+          }
+          this.log(`[CINEMATIC] Outfit portrait failed for ${outfitKey}: ${err.message}`, 'error');
+          throw err;
+        }
+      }
+      this.log(`[CINEMATIC] ✓ All outfit portraits complete`);
+    }
+
+    // ── Build unified grid unit list: one entry per character-outfit combination ──
+    // Each grid unit gets its own grid and eventually its own Higgsfield element.
+    // Legacy characters (no outfits array) → single unit using master portrait.
+    // Multi-outfit characters → one unit per outfit (o1 uses master portrait, o2+ use outfit portrait).
+    const gridUnits = [];
+    for (const char of characters) {
+      if (!char.outfits || char.outfits.length === 0) {
+        // Legacy: single unit using master portrait
+        gridUnits.push({ char, outfitId: null, unitKey: char.id });
+      } else {
+        for (const outfit of char.outfits) {
+          const unitKey = `${char.id}_${outfit.outfit_id}`;
+          gridUnits.push({ char, outfitId: outfit.outfit_id, outfit, unitKey });
+        }
+      }
+    }
+
+    for (let i = 0; i < gridUnits.length; i++) {
+      const { char, outfitId, unitKey } = gridUnits[i];
+      this.emit({ type: 'progress', stage: 'elements-grids', current: i + 1, total: gridUnits.length });
+      if (gridMap[unitKey]) {
+        this.log(`[CINEMATIC] Grid for ${unitKey} already exists — skipping`);
         continue;
       }
-      const gridPath = path.join(gridDir, `${char.id}_grid.png`);
+
+      // Determine which portrait to use for this grid
+      let portraitFilePath, portraitCdnUrl = '';
+      if (!outfitId || outfitId === 'o1') {
+        // Use master portrait (o1 or legacy)
+        const portraitAsset = db.getAssets(projectId, { type: 'portrait' })
+          .find(p => p.character_id === char.id && p.status === 'done' && p.file_path);
+        if (!portraitAsset) {
+          this.log(`[CINEMATIC] WARN: no portrait for ${unitKey} — can't generate grid`, 'warn');
+          continue;
+        }
+        portraitFilePath = portraitAsset.file_path;
+        portraitCdnUrl = portraitAsset.cdn_url || '';
+      } else {
+        // Use outfit portrait
+        const outfitKey = `${char.id}_${outfitId}`;
+        portraitFilePath = outfitPortraitMap[outfitKey];
+        if (!portraitFilePath) {
+          this.log(`[CINEMATIC] WARN: no outfit portrait for ${outfitKey} — can't generate grid`, 'warn');
+          continue;
+        }
+      }
+
+      const gridPath = path.join(gridDir, `${unitKey}_grid.png`);
       // Insert asset row if not present, then mark generating
-      let gridAsset = existingGrids.find(g => g.character_id === char.id);
+      let gridAsset = existingGrids.find(g => g.character_id === unitKey);
       if (!gridAsset) {
-        db.insertExpectedAssets(projectId, [{ type: 'character_grid', character_id: char.id }]);
-        gridAsset = db.getAssets(projectId, { type: 'character_grid' }).find(g => g.character_id === char.id);
+        db.insertExpectedAssets(projectId, [{ type: 'character_grid', character_id: unitKey }]);
+        gridAsset = db.getAssets(projectId, { type: 'character_grid' }).find(g => g.character_id === unitKey);
       }
       if (!gridAsset) {
-        this.log(`[CINEMATIC] Couldn't create grid asset row for ${char.id} — skipping`, 'warn');
+        this.log(`[CINEMATIC] Couldn't create grid asset row for ${unitKey} — skipping`, 'warn');
         continue;
       }
       // Retry up to 2 attempts per grid — strict gate below will halt if still failed
@@ -3427,22 +3542,22 @@ class PipelineOrchestrator {
       for (let attempt = 1; attempt <= MAX_GRID_ATTEMPTS; attempt++) {
         try {
           db.markAssetGenerating(gridAsset.id, 'character-grid-generation');
-          this.log(`[CINEMATIC] Generating grid for ${char.id} (${char.description_label || '?'})${attempt > 1 ? ` [retry ${attempt}/${MAX_GRID_ATTEMPTS}]` : ''}`);
-          const genMeta = await this._generateCharacterGrid(char, portraitAsset.file_path, gridPath, portraitAsset.cdn_url || '');
+          this.log(`[CINEMATIC] Generating grid for ${unitKey} (${char.description_label || '?'}${outfitId ? ' / ' + outfitId : ''})${attempt > 1 ? ` [retry ${attempt}/${MAX_GRID_ATTEMPTS}]` : ''}`);
+          const genMeta = await this._generateCharacterGrid(char, portraitFilePath, gridPath, portraitCdnUrl);
 
           const dimsOk = await this._verifyGridDimensions(gridPath);
           if (!dimsOk) {
-            this.log(`[CINEMATIC] Grid for ${char.id} downloaded with WRONG dimensions. ${attempt < MAX_GRID_ATTEMPTS ? 'Retrying...' : 'All attempts exhausted.'}`, 'warn');
+            this.log(`[CINEMATIC] Grid for ${unitKey} downloaded with WRONG dimensions. ${attempt < MAX_GRID_ATTEMPTS ? 'Retrying...' : 'All attempts exhausted.'}`, 'warn');
             db.markAssetFailed(gridAsset.id, 'wrong-dimensions: aspect ratio doesn\'t match expected 16:9 grid');
             if (attempt < MAX_GRID_ATTEMPTS) continue; // retry
             break; // exhausted
           }
 
           db.markAssetDone(gridAsset.id, gridPath, genMeta);
-          gridMap[char.id] = gridPath;
+          gridMap[unitKey] = gridPath;
           break; // success
         } catch (e) {
-          this.log(`[CINEMATIC] Grid gen failed for ${char.id} (attempt ${attempt}/${MAX_GRID_ATTEMPTS}): ${e.message}`, 'warn');
+          this.log(`[CINEMATIC] Grid gen failed for ${unitKey} (attempt ${attempt}/${MAX_GRID_ATTEMPTS}): ${e.message}`, 'warn');
           db.markAssetFailed(gridAsset.id, e.message);
           if (attempt < MAX_GRID_ATTEMPTS) {
             this.log(`[CINEMATIC] Waiting 5s before retry...`);
@@ -3459,7 +3574,7 @@ class PipelineOrchestrator {
       const names = failedGrids.map(g => g.character_id || g.id).join(', ');
       throw new Error(`[STAGE GATE] Cannot proceed — ${failedGrids.length} character grid(s) incomplete: ${names}. Fix the issue and restart the pipeline.`);
     }
-    this.log(`[CINEMATIC] ✓ All ${characters.length} character grid(s) verified — proceeding to element creation`);
+    this.log(`[CINEMATIC] ✓ All ${gridUnits.length} character grid(s) verified — proceeding to element creation`);
 
     // ── Phase 2B: create character elements ──
     // ⚠️ DESIGN INTENT: element creation MUST be automated. The manual
@@ -3582,7 +3697,10 @@ class PipelineOrchestrator {
       }
     }
 
-    for (const char of characters) {
+    // ── Build element pending list from gridUnits (character-outfit pairs) ──
+    // Multi-outfit characters get one element per outfit: @baseName_oN_suffix
+    // Legacy characters (no outfits) get one element: @baseName_suffix (unchanged)
+    for (const { char, outfitId, outfit, unitKey } of gridUnits) {
       // Derive the base element name
       let baseName = null;
 
@@ -3606,34 +3724,58 @@ class PipelineOrchestrator {
       }
 
       if (!baseName) {
-        this.log(`[CINEMATIC] WARN: could not derive element name for ${char.id} — skipping`, 'warn');
+        this.log(`[CINEMATIC] WARN: could not derive element name for ${unitKey} — skipping`, 'warn');
         continue;
       }
 
-      // Append project suffix to avoid cross-project name collisions
-      // e.g. "son_emeka" → "son_emeka_bpdr_0419"
-      const elementName = `${baseName}_${elementSuffix}`;
+      // Append outfit_id (for multi-outfit) and project suffix to avoid collisions
+      // Multi-outfit: "son_emeka" + "o2" → "son_emeka_o2_bpdr_0419"
+      // Legacy/single: "son_emeka" → "son_emeka_bpdr_0419" (unchanged)
+      const elementName = outfitId
+        ? `${baseName}_${outfitId}_${elementSuffix}`
+        : `${baseName}_${elementSuffix}`;
 
-      const portraitPath = (db.getAssets(projectId, { type: 'portrait' })
-        .find(p => p.character_id === char.id))?.file_path;
+      // Determine portrait path for this unit
+      let portraitPath;
+      if (!outfitId || outfitId === 'o1') {
+        // Master portrait
+        portraitPath = (db.getAssets(projectId, { type: 'portrait' })
+          .find(p => p.character_id === char.id && p.status === 'done'))?.file_path;
+      } else {
+        // Outfit portrait
+        portraitPath = outfitPortraitMap[unitKey] || null;
+      }
       if (!portraitPath) {
-        this.log(`[CINEMATIC] WARN: no portrait for ${char.id} (${char.description_label}) — skipping element`, 'warn');
+        this.log(`[CINEMATIC] WARN: no portrait for ${unitKey} (${char.description_label}) — skipping element`, 'warn');
         continue;
       }
 
-      this.log(`[CINEMATIC] @${elementName} (base: ${baseName}) → ${char.description_label} (${char.id})`);
+      // Build description for element
+      let description;
+      if (outfit) {
+        description = `${char.physical_description || ''}. Wearing: ${outfit.description || ''}`;
+      } else {
+        description = char.full_prompt_description || char.physical_description || char.description_label;
+      }
+
+      this.log(`[CINEMATIC] @${elementName} (base: ${baseName}${outfitId ? ', outfit: ' + outfitId : ''}) → ${char.description_label} (${unitKey})`);
       pending.push({
         char,
+        outfitId,
         name: elementName,
         baseName,
         portraitPath,
-        gridPath: gridMap[char.id] || null,
-        description: char.full_prompt_description || char.description_label,
+        gridPath: gridMap[unitKey] || null,
+        description,
       });
     }
 
-    // Verify: cross-check that blocking text @mentions match derived element names
+    // Verify: cross-check that blocking text @mentions match derived element base names
+    // Note: blocking uses bare @baseName (e.g. @claire_obi) — the orchestrator resolves
+    // to the outfit-specific element at prompt-transform time. So we check that every
+    // blocking @mention has at least one element with that baseName prefix.
     const elementNames = new Set(pending.map(p => p.name));
+    const elementBaseNames = new Set(pending.map(p => p.baseName));
     const blockingMentions = new Set();
     for (const ch of script.chapters || []) {
       for (const sc of ch.scenes || []) {
@@ -3645,11 +3787,14 @@ class PipelineOrchestrator {
         }
       }
     }
-    const unmatchedMentions = [...blockingMentions].filter(m => !elementNames.has(m));
+    // A blocking @mention is valid if it matches either a full element name OR a baseName
+    const unmatchedMentions = [...blockingMentions].filter(m =>
+      !elementNames.has(m) && !elementBaseNames.has(m)
+    );
     if (unmatchedMentions.length > 0) {
-      this.log(`[CINEMATIC] WARN: blocking text has @mentions not matching any element: ${unmatchedMentions.map(m => '@' + m).join(', ')}. Available elements: ${[...elementNames].map(n => '@' + n).join(', ')}`, 'warn');
+      this.log(`[CINEMATIC] WARN: blocking text has @mentions not matching any element: ${unmatchedMentions.map(m => '@' + m).join(', ')}. Available base names: ${[...elementBaseNames].map(n => '@' + n).join(', ')}`, 'warn');
     } else {
-      this.log(`[CINEMATIC] ✓ All blocking @mentions match element names: ${[...elementNames].map(n => '@' + n).join(', ')}`);
+      this.log(`[CINEMATIC] ✓ All blocking @mentions match element names: ${[...elementBaseNames].map(n => '@' + n).join(', ')}`);
     }
 
     // ── @ BUTTON PRE-CHECK: which elements already exist? ──
@@ -3929,27 +4074,46 @@ class PipelineOrchestrator {
     // The map is dead simple now: the element name IS the @mention.
     // We still index by char.id and the name itself for cross-referencing,
     // but no complex slug/suffix/partial matching is needed.
+    // Build cinematicElementNames map — supports both legacy (1:1) and multi-outfit (1:many) resolution.
+    // For multi-outfit, the baseName → elementName mapping points to the o1 element (default fallback).
+    // The outfit-aware prompt transform uses _outfitElements[baseName][outfitId] for precise resolution.
     this.state.cinematicElementNames = pending.reduce((acc, p) => {
-      // The element name includes the project suffix (e.g. "son_emeka_bpdr_0419")
-      // but blocking text uses the base name (e.g. "@son_emeka").
-      // Index by EVERY plausible key so lookups always resolve:
-      acc[p.name] = p.name;                          // "son_emeka_bpdr_0419" → itself
-      acc[p.char.id] = p.name;                       // "character_1" → "son_emeka_bpdr_0419"
-      acc[`@${p.name}`] = p.name;                    // "@son_emeka_bpdr_0419" → itself
-      // Base name (without suffix) — this is what blocking @mentions use
-      if (p.baseName) {
-        acc[p.baseName] = p.name;                    // "son_emeka" → "son_emeka_bpdr_0419"
-        acc[`@${p.baseName}`] = p.name;              // "@son_emeka" → "son_emeka_bpdr_0419"
+      // The element name includes outfit_id + project suffix (e.g. "son_emeka_o2_bpdr_0419")
+      // or just project suffix for legacy/o1 (e.g. "son_emeka_bpdr_0419")
+      acc[p.name] = p.name;                          // full name → itself
+      acc[`@${p.name}`] = p.name;                    // "@full_name" → itself
+
+      // For o1 or legacy (no outfitId), set the baseName and charId mappings
+      // These serve as the DEFAULT resolution when no outfit context is available
+      if (!p.outfitId || p.outfitId === 'o1') {
+        acc[p.char.id] = p.name;                     // "character_1" → o1 element
+        if (p.baseName) {
+          acc[p.baseName] = p.name;                  // "son_emeka" → o1 element
+          acc[`@${p.baseName}`] = p.name;            // "@son_emeka" → o1 element
+        }
+        // description_label slug for any other lookups
+        if (p.char.description_label) {
+          const labelSlug = p.char.description_label
+            .toLowerCase()
+            .replace(/^(the|a|an)\s+/i, '')
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '');
+          if (labelSlug) acc[labelSlug] = p.name;
+        }
       }
-      // description_label slug for any other lookups
-      if (p.char.description_label) {
-        const labelSlug = p.char.description_label
-          .toLowerCase()
-          .replace(/^(the|a|an)\s+/i, '')
-          .replace(/[^a-z0-9]+/g, '_')
-          .replace(/^_+|_+$/g, '');
-        if (labelSlug) acc[labelSlug] = p.name;
-      }
+      return acc;
+    }, {});
+
+    // Build outfit-specific lookup: _outfitElements[baseName][outfitId] → elementName
+    // Used by the prompt transform to resolve @baseName + scene.character_outfits → correct outfit element
+    this.state._outfitElements = pending.reduce((acc, p) => {
+      if (!p.baseName) return acc;
+      if (!acc[p.baseName]) acc[p.baseName] = {};
+      const oid = p.outfitId || 'o1';
+      acc[p.baseName][oid] = p.name;
+      // Also index by char.id for legacy lookups
+      if (!acc[p.char.id]) acc[p.char.id] = {};
+      acc[p.char.id][oid] = p.name;
       return acc;
     }, {});
 
@@ -6105,26 +6269,38 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // Resolve characters from blocking.
       // ONE NAME TO RULE THEM ALL: the blocking @mention IS the element name.
       // @mama_agbado in blocking text = element "mama_agbado" in Higgsfield.
-      // Direct lookup, no translation needed.
+      // For multi-outfit: scene.character_outfits tells us which outfit each
+      // character wears → resolve via _outfitElements[baseName][outfitId].
+      // Falls back to default (o1) element if no outfit mapping exists.
       const characters = [];
       const blocking = scene.blocking || {};
       const elemMap = this.state.cinematicElementNames || {};
+      const outfitElemMap = this.state._outfitElements || {};
+      const sceneOutfits = scene.character_outfits || {};
       for (const [pos, hint] of [['frame-left', blocking.frame_left], ['frame-center', blocking.frame_center], ['frame-right', blocking.frame_right]]) {
         if (!hint) continue;
         const matches = (typeof hint === 'string' ? hint : '').match(/@([a-z0-9_]+)/gi) || [];
         for (const m of matches) {
           const charId = m.slice(1).toLowerCase();
-          // Element name = blocking @mention (one name to rule them all).
-          // Direct lookup — no translation needed.
-          const elementName = elemMap[charId] || elemMap[`@${charId}`] || null;
+
+          // Multi-outfit resolution: check if this character has an outfit specified for this scene
+          let elementName = null;
+          const outfitId = sceneOutfits[charId] || null;
+          if (outfitId && outfitElemMap[charId] && outfitElemMap[charId][outfitId]) {
+            // Direct outfit-aware resolution
+            elementName = outfitElemMap[charId][outfitId];
+          } else {
+            // Fallback: default elemMap lookup (resolves to o1 / legacy element)
+            elementName = elemMap[charId] || elemMap[`@${charId}`] || null;
+          }
 
           if (!elementName) {
             this.log(`[CINEMATIC] WARN: blocking ref "${m}" not in element map. Available: ${Object.keys(elemMap).join(', ')}`, 'warn');
           }
           // Derive baseName by stripping the suffix from the element name
-          // e.g. "adanna_mseb_0419" → "adanna", "son_emeka_bpdr_0419" → "son_emeka"
+          // e.g. "adanna_mseb_0419" → "adanna", "son_emeka_o2_bpdr_0419" → "son_emeka_o2" or "son_emeka"
           const resolvedName = elementName || charId;
-          const baseMatch = resolvedName.match(/^(.+)_[a-z]{2,5}_\d{4}$/);
+          const baseMatch = resolvedName.match(/^(.+?)(?:_o\d+)?_[a-z]{2,5}_\d{4}$/);
           const baseName = baseMatch ? baseMatch[1] : resolvedName;
           characters.push({ name: resolvedName, baseName, position: `${pos}: ${hint.replace(/@[a-z0-9_]+/gi, '').trim()}` });
         }
@@ -6507,6 +6683,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             sceneAssetId: sceneImageAsset.id,
             visionRefinedChars,
             visionBlockingVerified,
+            characterOutfits: sc.character_outfits || {},
           });
         }
       }
@@ -6604,7 +6781,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     for (let i = 0; i < allKlingClips.length; i++) {
       const item = allKlingClips[i];
-      let { chapter, scene, clipDef, startFramePath, startFrameGenId, sceneAssetId, visionRefinedChars, visionBlockingVerified } = item;
+      let { chapter, scene, clipDef, startFramePath, startFrameGenId, sceneAssetId, visionRefinedChars, visionBlockingVerified, characterOutfits } = item;
       const clipId = clipDef.clip_id || `ch${chapter}_sc${scene}_c${i + 1}`;
       const label = `${clipId} (Ch${chapter} Sc${scene}, ${clipDef.duration_seconds || 10}s, ${(clipDef.line_refs || []).length} line(s))`;
 
@@ -7042,21 +7219,40 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       }
 
-      // ── SANITIZE @-REFERENCES ──
+      // ── SANITIZE @-REFERENCES (outfit-aware) ──
       // Only character names are valid Higgsfield elements. Location @-references
       // (e.g. @mama_agbado_corn_stall) don't resolve — strip the @ prefix so they
       // become plain descriptive text. This fixes prompts where Claude mistakenly
       // used @ on location names despite the rubric forbidding it.
+      //
+      // Multi-outfit: resolve @baseName → @baseName_oN_suffix using scene's
+      // character_outfits mapping. Falls back to default (o1) resolution.
       const elemMap = this.state.cinematicElementNames || {};
+      const outfitElemMap = this.state._outfitElements || {};
+      const sceneOutfits = characterOutfits || {};
       const validElementNames = new Set(
         Object.values(elemMap).map(n => n.toLowerCase())
       );
       finalMultiShotPrompt = finalMultiShotPrompt.replace(/@([a-z0-9_]+)/gi, (match, name) => {
-        if (validElementNames.has(name.toLowerCase())) {
-          return match; // keep @character_name — it's a valid element
+        const nameLower = name.toLowerCase();
+        // If it's already a valid full element name, keep it
+        if (validElementNames.has(nameLower)) {
+          return match;
         }
+        // Try outfit-aware resolution: baseName + scene outfit → full element name
+        const outfitId = sceneOutfits[nameLower] || null;
+        if (outfitId && outfitElemMap[nameLower] && outfitElemMap[nameLower][outfitId]) {
+          const resolved = outfitElemMap[nameLower][outfitId];
+          return `@${resolved}`;
+        }
+        // Try default elemMap resolution (resolves baseName → o1 element)
+        const defaultResolved = elemMap[nameLower] || elemMap[`@${nameLower}`];
+        if (defaultResolved) {
+          return `@${defaultResolved}`;
+        }
+        // Not a valid element reference — strip @
         this.log(`[CINEMATIC] ${clipId}: stripped invalid @-ref "${match}" → "${name}"`);
-        return name; // strip the @ — it's a location or typo
+        return name;
       });
 
       // ── REPLACE character_N with actual element names ──
@@ -7073,21 +7269,27 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         return match; // no mapping found — leave as-is
       });
 
-      // ── AUTO-FIX BARE CHARACTER NAMES → @element references ──
+      // ── AUTO-FIX BARE CHARACTER NAMES → @element references (outfit-aware) ──
       // The LLM shot descriptions often use bare names like "mama_chisom" or
       // "adanna" without the @ prefix. Kling needs @element_name to identify
       // characters. Build a lookup from elemMap (which maps base names and
       // suffixed names to canonical suffixed names), sort longest-first to
       // avoid partial matches, then replace bare occurrences with @suffixed_name.
+      // Multi-outfit: prefer the outfit-specific element based on scene context.
       {
         // Collect all name variants → canonical suffixed element name
+        // For multi-outfit, override with outfit-specific resolution
         const bareFixMap = {};
         for (const [key, canonical] of Object.entries(elemMap)) {
-          // Skip keys that start with @ (those are @-prefixed duplicates in elemMap)
           if (key.startsWith('@')) continue;
-          // Skip keys like "character_1" — already handled above
           if (/^character_\d+$/i.test(key)) continue;
-          bareFixMap[key.toLowerCase()] = canonical;
+          // Check if this key has an outfit-specific override for this scene
+          const outfitId = sceneOutfits[key.toLowerCase()] || null;
+          if (outfitId && outfitElemMap[key.toLowerCase()] && outfitElemMap[key.toLowerCase()][outfitId]) {
+            bareFixMap[key.toLowerCase()] = outfitElemMap[key.toLowerCase()][outfitId];
+          } else {
+            bareFixMap[key.toLowerCase()] = canonical;
+          }
         }
         // Sort longest-first to avoid partial matches (e.g. "chi" inside "chisom")
         const sortedBareNames = Object.keys(bareFixMap).sort((a, b) => b.length - a.length);

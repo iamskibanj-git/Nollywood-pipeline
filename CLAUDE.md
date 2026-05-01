@@ -2774,3 +2774,21 @@ Phase 5: Resume + Recovery
 - Per-video Gemini analysis: relationship_dynamics, emotional_pacing, power_dynamics, visual_storytelling_moments, speech_patterns
 - Cross-video pattern extraction: relationship_patterns, emotional_arc_patterns, power_shift_patterns, effective_visual_beats, dialogue_voice_patterns
 - buildScriptResearchContext wiring: all new patterns passed to outline + chapter generation
+
+**Session 30g** — Multi-outfit character system (full implementation):
+- Script engine (script-engine.js):
+  - Outline schema: `physical_description` (permanent features) + `outfits[]` array (outfit_id, description, context) replaces `full_prompt_description`
+  - Scene beats: `character_outfits` mapping per scene (char_id → outfit_id)
+  - Outfit rules in RULES section: min 1 outfit, protagonists 2-4, sequential o1/o2/o3
+  - Chapter prompt: Rule 11 requiring `character_outfits` in generated scenes, no mid-scene outfit changes
+  - Cinematic scaffolding: MULTI-OUTFIT CHARACTER SYSTEM section explaining downstream flow
+- Orchestrator (orchestrator.js):
+  - Portrait generation: backward-compatible `charDescription` using physical_description + o1 outfit if no full_prompt_description
+  - Outfit portrait sub-loop: generates portraits for o2, o3... using master portrait as face reference
+  - Grid generation: iterates over `gridUnits` (character × outfit pairs) instead of characters
+  - Element creation: builds `pending` from gridUnits, element name format: `@{baseName}_o{N}_{suffix}` for multi-outfit, `@{baseName}_{suffix}` for legacy
+  - `_outfitElements` map: `[baseName][outfitId] → elementName` for precise outfit resolution
+  - Scene image @reference resolution: outfit-aware via `scene.character_outfits` + `_outfitElements`
+  - Video stage @reference resolution: outfit-aware via `characterOutfits` passed through allKlingClips
+  - Bare character name auto-fix: outfit-aware resolution
+- Backward compatibility: scripts without `outfits[]` array continue working unchanged (single element per character)
