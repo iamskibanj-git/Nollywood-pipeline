@@ -258,6 +258,65 @@ Output ONLY the JSON.`;
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  // LOCATION IMAGE VERIFICATION
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Verify a generated location image matches its description and contains
+   * no people (location images are empty backgrounds used as references).
+   *
+   * Checks: matches description, no people/figures present (critical),
+   * mood/atmosphere match, composition quality.
+   *
+   * @param {string} locationPath - Path to generated location image
+   * @param {Object} location - Location info
+   * @param {string} location.description - Expected location description
+   * @param {string} [location.name] - Location element name (for logging)
+   * @returns {Promise<{score: number, issues: string[], verdict: string, details: Object}>}
+   */
+  async verifyLocationImage(locationPath, location, { passThreshold = 70 } = {}) {
+    this.logger(`Verifying location: ${location.name || 'unknown'}`);
+
+    const imageData = await this._loadImage(locationPath);
+    if (!imageData) return this._fallbackResult('Could not load location image');
+
+    const prompt = `You are a quality control system for an AI video production pipeline. Verify this generated EMPTY LOCATION IMAGE matches its description and contains NO people.
+
+EXPECTED LOCATION:
+${location.description}
+
+CRITICAL RULE: This image MUST be completely empty — no people, no characters, no human figures, no silhouettes, no mannequins. It is used as a background reference for scene composition.
+
+TASK: Verify the location image.
+
+1. NO_PEOPLE — Is the image completely free of people, human figures, silhouettes, or any suggestion of a person? (CRITICAL — any human presence = instant fail)
+2. DESCRIPTION_MATCH — Does the image match the expected location description? (correct type of place, matching features/elements described)
+3. MOOD_SETTING — Does the atmosphere, lighting, and mood feel right for the described location? (time of day, indoor/outdoor, color warmth)
+4. COMPOSITION — Is the image well-composed as a background reference? (good framing, appropriate depth, usable as a scene backdrop)
+
+OUTPUT FORMAT (JSON only):
+{
+  "scores": {
+    "no_people": { "score": 0-100, "note": "brief explanation — 100 if completely empty, 0 if people visible" },
+    "description_match": { "score": 0-100, "note": "how well it matches the description" },
+    "mood_setting": { "score": 0-100, "note": "" },
+    "composition": { "score": 0-100, "note": "" }
+  },
+  "critical_issues": ["e.g. 'person visible in background', 'completely wrong location type'"],
+  "minor_issues": ["e.g. 'slightly different lighting than expected', 'missing some described details'"]
+}
+
+NO_PEOPLE is the absolute highest priority. Any human figure = score 0 for no_people and a critical issue.
+
+Output ONLY the JSON.`;
+
+    const result = await this._callVision(imageData, prompt);
+    if (!result) return this._fallbackResult('Vision API call failed');
+
+    return this._scoreLocationResult(result, { passThreshold });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   // INTERNAL HELPERS
   // ═══════════════════════════════════════════════════════════════════
 
@@ -435,6 +494,57 @@ Output ONLY the JSON.`;
       details: parsed,
       charactersIdentified: parsed.characters_identified || [],
     };
+  }
+
+  /**
+   * Score location image verification result.
+   */
+  _scoreLocationResult(parsed, { passThreshold }) {
+    const scores = parsed.scores || {};
+
+    // no_people is critical (3x) — locations MUST be empty backgrounds
+    const weights = {
+      no_people: 3,
+      description_match: 2,
+      mood_setting: 1.5,
+      composition: 1,
+    };
+
+    let totalWeight = 0;
+    let weightedSum = 0;
+    const issues = [];
+
+    for (const [key, weight] of Object.entries(weights)) {
+      const entry = scores[key];
+      if (entry && typeof entry.score === 'number') {
+        totalWeight += weight;
+        weightedSum += entry.score * weight;
+        if (entry.score < 70 && entry.note) {
+          issues.push(`${key}: ${entry.note} (${entry.score})`);
+        }
+      }
+    }
+
+    const score = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
+
+    // Extra hard check: if no_people < 50, force fail (people in location = unusable)
+    const noPeopleScore = scores.no_people?.score ?? 100;
+    const forcedFail = noPeopleScore < 50;
+
+    const allIssues = [
+      ...(parsed.critical_issues || []),
+      ...(parsed.minor_issues || []),
+      ...issues,
+    ];
+
+    const verdict = forcedFail ? 'fail' : (score >= passThreshold ? 'pass' : 'fail');
+
+    this.logger(`Location score: ${score} → ${verdict}${forcedFail ? ' (forced: no_people<50)' : ''} (pass≥${passThreshold})`);
+    if (allIssues.length > 0) {
+      this.logger(`Issues: ${allIssues.slice(0, 3).join('; ')}`);
+    }
+
+    return { score, issues: allIssues, verdict, details: parsed };
   }
 
   // ═══════════════════════════════════════════════════════════════════

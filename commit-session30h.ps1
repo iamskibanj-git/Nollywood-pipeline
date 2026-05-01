@@ -2,13 +2,12 @@ Set-Location $PSScriptRoot
 if (Test-Path ".git\index.lock") { Remove-Item ".git\index.lock" -Force }
 
 $msg = @"
-Session 30h: Vision verification — fully automated quality gates
+Session 30h: Vision verification at portrait/grid/scene stages
 
-Automation Roadmap Phase 2 — Claude Vision-based quality checks at three
-generation stages. Eliminates human approval gates: pipeline regenerates
-until vision passes (up to retry cap), then auto-proceeds. Human
-intervention only when retry cap exhausted (description problem, not
-generation variance).
+Automation Roadmap Phase 2 — adds Claude Vision-based quality checks
+at three generation stages (portrait, grid, scene). Single pass/fail
+verdict. Auto-rejects bad outputs and regenerates within retry loop.
+Non-blocking: falls through on API error.
 
 New: src/main/verify/imageVerifier.js
 - ImageVerifier class with three verification methods:
@@ -28,27 +27,16 @@ New: src/main/verify/imageVerifier.js
 
 Orchestrator wiring (orchestrator.js):
 - Portrait stage: verification after generation. Auto-reject + regenerate
-  up to 4 retries. Human gate ONLY fires if retry cap exhausted (stored
-  in _portraitVerifyExhausted set). Otherwise auto-proceeds.
+  up to 4 retries. Human gate ONLY fires if retry cap exhausted.
 - Grid stage: verification after generation + dimension check. Auto-reject
-  within 4-attempt retry loop (MAX_GRID_ATTEMPTS = 4). Auto-proceeds.
+  within 4-attempt retry loop (MAX_GRID_ATTEMPTS = 4).
 - Scene image stage: verification after generation. Auto-reject within
-  3-attempt retry loop. Auto-proceeds — all scene approval gates removed.
-- Resume re-gates: replaced with auto-proceed logging (scenes already
-  passed vision verification during generation).
-- Manual fallback gate preserved: fires only when Cinema Studio automation
-  itself fails (UI reliability, not quality).
+  3-attempt retry loop.
 
 Scoring thresholds (single pass/fail):
-- Portrait: pass ≥ 80
-- Grid: pass ≥ 75
-- Scene: pass ≥ 70 (forced fail if character_presence < 50)
-
-Retry caps: Portrait 4, Grid 4, Scene 3
-
-Gracefully non-blocking — API errors, missing keys, or image load
-failures return 'pass' so pipeline continues. No behavioral change
-when Claude API key is not configured.
+- Portrait: pass >= 80
+- Grid: pass >= 75
+- Scene: pass >= 70 (forced fail if character_presence < 50)
 
 CLAUDE.md: Session 30h summary
 "@

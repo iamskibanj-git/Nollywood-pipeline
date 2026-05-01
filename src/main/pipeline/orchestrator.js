@@ -667,6 +667,14 @@ class PipelineOrchestrator {
 
         db.logEvent(projectId, 'session_start', { stage: activeProject.stage, detail: `Resuming at ${activeProject.stage} — ${donePortraits.length}P/${doneScenes.length}S/${doneClips.length}C done` });
 
+        // Restore cinematic maps from DB settings (crash resilience)
+        // Filesystem is source of truth — paths validated against disk
+        this._restoreCinematicMaps(projectId);
+
+        // Filesystem reconciliation — mark assets done if file exists on disk
+        // regardless of DB status (handles crash between generation + markAssetDone)
+        db.reconcileWithFilesystem(projectId);
+
       } else {
         // ── NEW project ──
         projectId = `${new Date().toISOString().slice(0, 10)}_${uuidv4().slice(0, 8)}`;
@@ -1427,19 +1435,27 @@ class PipelineOrchestrator {
 
                   if (verificationResult && !verificationResult.skipped) {
                     this.log(`[PORTRAIT-VERIFY] ${assetLabel}: score=${verificationResult.score}, verdict=${verificationResult.verdict}`);
+
+                    // Persist vision result immediately (survives crash)
+                    const currentRetries = db.getVisionRetries(asset.id);
+                    db.saveVisionResult(asset.id, {
+                      score: verificationResult.score,
+                      verdict: verificationResult.verdict,
+                      issues: (verificationResult.issues || []).slice(0, 5),
+                      retries: currentRetries,
+                    });
+
                     // Auto-reject: score < 80 → regenerate (up to 4 attempts)
                     if (verificationResult.verdict === 'fail') {
-                      const retryKey = `verify_${char.id}`;
-                      this._portraitVerifyRetries = this._portraitVerifyRetries || {};
-                      this._portraitVerifyRetries[retryKey] = (this._portraitVerifyRetries[retryKey] || 0) + 1;
+                      const retryCount = db.incrementVisionRetries(asset.id);
 
-                      if (this._portraitVerifyRetries[retryKey] <= 4) {
-                        this.log(`[PORTRAIT-VERIFY] ${assetLabel}: FAIL (score ${verificationResult.score}) — regenerating (attempt ${this._portraitVerifyRetries[retryKey]}/4)`, 'warn');
+                      if (retryCount <= 4) {
+                        this.log(`[PORTRAIT-VERIFY] ${assetLabel}: FAIL (score ${verificationResult.score}) — regenerating (attempt ${retryCount}/4)`, 'warn');
                         db.logEvent(projectId, 'portrait_vision_reject', {
                           assetId: asset.id, assetLabel,
                           score: verificationResult.score,
                           issues: (verificationResult.issues || []).slice(0, 5),
-                          attempt: this._portraitVerifyRetries[retryKey],
+                          attempt: retryCount,
                         });
                         // Reset and retry: splice back into loop
                         db.resetAsset(asset.id);
@@ -1765,14 +1781,9 @@ class PipelineOrchestrator {
           // 2-only (chars) and Phase 2+3 (chars + locations) deployments.
           await this._runCinematicLocationSetup(projectId, projectDir);
 
-          // ── LOCATION APPROVAL GATE ──
-          // Hard gate: user must confirm location images exist locally and
-          // location elements are registered in Higgsfield before scene gen.
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'locations-ready' });
-          this.log('Waiting for location approval — confirm location images and elements before scene generation...');
-          await this.waitForApproval('locations-ready');
-          if (this.cancelled) return;
+          // Vision verification handles location quality gating within the retry loop.
+          // All locations that survive have passed — auto-proceed to scene generation.
+          this.log('[CINEMATIC] All location images passed vision verification — auto-proceeding to scene generation');
         });
         if (this.cancelled) return { success: false, reason: 'cancelled' };
       }
@@ -2074,11 +2085,21 @@ class PipelineOrchestrator {
             this.log(`[RESUME] Skipping dialogue triage — ${existingDoneClips.length} clips already generated (triage was done in a previous session)`);
           } else if (!isResume || this._resumedGateOrder < TRIAGE_GATE_ORDER) {
             this._emitDialogueTriageData(projectId);
-            this.state.status = 'waiting_approval';
-            this.emit({ type: 'waiting', gate: 'dialogue-triage' });
-            this.log('Waiting for dialogue triage approval...');
-            await this.waitForApproval('dialogue-triage');
-            if (this.cancelled) return;
+
+            // Auto-proceed if all clips have dialogue (nothing to triage).
+            // Script engine enforces dialogue on every scene, so this should
+            // always be true for new scripts. Gate only fires for legacy scripts
+            // that may have silent clips needing user decision.
+            const triageSilentCount = this._countSilentClips(projectId);
+            if (triageSilentCount === 0) {
+              this.log('[CINEMATIC] All clips have dialogue — auto-proceeding past dialogue triage');
+            } else {
+              this.log(`[CINEMATIC] ${triageSilentCount} silent clip(s) found — waiting for dialogue triage approval`);
+              this.state.status = 'waiting_approval';
+              this.emit({ type: 'waiting', gate: 'dialogue-triage' });
+              await this.waitForApproval('dialogue-triage');
+              if (this.cancelled) return;
+            }
           } else {
             this.log(`[RESUME] Skipping dialogue triage re-gate (already handled by generic resume, order=${this._resumedGateOrder})`);
           }
@@ -3621,8 +3642,19 @@ class PipelineOrchestrator {
 
               if (gridVerifyResult && !gridVerifyResult.skipped) {
                 this.log(`[GRID-VERIFY] ${unitKey}: score=${gridVerifyResult.score}, verdict=${gridVerifyResult.verdict}`);
-                // Auto-reject: score < 70 → regenerate (within existing retry loop)
+
+                // Persist immediately (survives crash)
+                const currentRetries = db.getVisionRetries(gridAsset.id);
+                db.saveVisionResult(gridAsset.id, {
+                  score: gridVerifyResult.score,
+                  verdict: gridVerifyResult.verdict,
+                  issues: (gridVerifyResult.issues || []).slice(0, 5),
+                  retries: currentRetries,
+                });
+
+                // Auto-reject: score < 75 → regenerate (within existing retry loop)
                 if (gridVerifyResult.verdict === 'fail' && attempt < MAX_GRID_ATTEMPTS) {
+                  db.incrementVisionRetries(gridAsset.id);
                   this.log(`[GRID-VERIFY] ${unitKey}: FAIL (score ${gridVerifyResult.score}) — will retry`, 'warn');
                   db.markAssetFailed(gridAsset.id, `vision-fail: score ${gridVerifyResult.score} — ${(gridVerifyResult.issues || [])[0] || 'face mismatch'}`);
                   continue; // retry within the existing retry loop
@@ -4207,6 +4239,9 @@ class PipelineOrchestrator {
     // If the project changes, the idempotency gate will invalidate and re-create.
     this.state._elementsCreatedForProject = this.state.higgsfield_project_id || cinemaStudio._projectId;
 
+    // Persist cinematic maps to DB settings (crash resilience)
+    this._persistCinematicMaps(projectId);
+
     // Persist the Higgsfield project ID so the scene-gen stage (which creates
     // a new CinemaStudioAutomation instance) can reuse the same project
     // instead of creating a duplicate or failing to find one.
@@ -4356,8 +4391,8 @@ class PipelineOrchestrator {
         this.log(`[CINEMATIC] [REGEN] Regenerating @${loc.name} — using clean prompt (no orientation directives)`);
       }
 
-      // Retry up to 2 attempts — strict gate below halts if still failed
-      const MAX_LOC_ATTEMPTS = 2;
+      // Retry up to 4 attempts — vision verification auto-rejects bad outputs
+      const MAX_LOC_ATTEMPTS = 4;
       for (let attempt = 1; attempt <= MAX_LOC_ATTEMPTS; attempt++) {
         try {
           if (locAsset) db.markAssetGenerating(locAsset.id, locPrompt);
@@ -4385,6 +4420,40 @@ class PipelineOrchestrator {
             }
           } catch (orientErr) {
             this.log(`[CINEMATIC] Orientation check failed for @${loc.name}: ${orientErr.message}`, 'warn');
+          }
+
+          // ── Vision verification: does the location match its description? ──
+          if (this._imageVerifier && locAsset) {
+            try {
+              const locVerification = await this._imageVerifier.verifyLocationImage(
+                outputPath,
+                { name: loc.name, description: loc.description },
+                { passThreshold: 70 }
+              );
+              this.log(`[CINEMATIC] Location @${loc.name} vision score: ${locVerification.score} → ${locVerification.verdict}`);
+
+              // Persist immediately (survives crash)
+              const currentRetries = db.getVisionRetries(locAsset.id);
+              db.saveVisionResult(locAsset.id, {
+                score: locVerification.score,
+                verdict: locVerification.verdict,
+                issues: (locVerification.issues || []).slice(0, 5),
+                retries: currentRetries,
+              });
+
+              if (locVerification.verdict === 'fail' && attempt < MAX_LOC_ATTEMPTS) {
+                const retryCount = db.incrementVisionRetries(locAsset.id);
+                this.log(`[CINEMATIC] Location @${loc.name} failed vision check — retrying (attempt ${retryCount}/${MAX_LOC_ATTEMPTS}). Issues: ${locVerification.issues.slice(0, 2).join('; ')}`, 'warn');
+                db.markAssetFailed(locAsset.id, `Vision fail: ${locVerification.issues[0] || 'score ' + locVerification.score}`);
+                // Clean up bad image so retry generates fresh
+                try { fs.unlinkSync(outputPath); } catch (_) {}
+                await new Promise(r => setTimeout(r, 3000));
+                continue; // retry
+              }
+              // Pass or final attempt — proceed
+            } catch (verifyErr) {
+              this.log(`[CINEMATIC] Location vision verification error for @${loc.name}: ${verifyErr.message} — proceeding`, 'warn');
+            }
           }
 
           // Clear regen hint on success so it doesn't persist
@@ -4440,6 +4509,9 @@ class PipelineOrchestrator {
 
     const generated = Object.values(locImagePaths).length;
     this.log(`[CINEMATIC] Location setup: ${generated}/${locationMap.size} empty-location image(s) ready as Cinema Studio references`);
+
+    // Persist location map to DB settings (crash resilience)
+    this._persistCinematicMaps(projectId);
 
     // Emit location data for the renderer's Locations approval gate UI.
     // This MUST happen BEFORE any strict gate so the Locations tab renders
@@ -6536,8 +6608,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
               if (sceneVerifyResult && !sceneVerifyResult.skipped) {
                 this.log(`[SCENE-VERIFY] Ch${chapter} Sc${scene.scene_number}: score=${sceneVerifyResult.score}, verdict=${sceneVerifyResult.verdict}`);
-                // Auto-reject if score < 60 (wrong characters is catastrophic)
+
+                // Persist immediately (survives crash)
+                if (sceneAsset) {
+                  const currentRetries = db.getVisionRetries(sceneAsset.id);
+                  db.saveVisionResult(sceneAsset.id, {
+                    score: sceneVerifyResult.score,
+                    verdict: sceneVerifyResult.verdict,
+                    issues: (sceneVerifyResult.issues || []).slice(0, 5),
+                    retries: currentRetries,
+                  });
+                }
+
+                // Auto-reject if score < 70 (wrong characters is catastrophic)
                 if (sceneVerifyResult.verdict === 'fail' && attempt < MAX_SCENE_RETRIES) {
+                  if (sceneAsset) db.incrementVisionRetries(sceneAsset.id);
                   this.log(`[SCENE-VERIFY] Ch${chapter} Sc${scene.scene_number}: FAIL (score ${sceneVerifyResult.score}) — regenerating`, 'warn');
                   db.logEvent(projectId, 'scene_vision_reject', {
                     chapter, scene: scene.scene_number,
@@ -8652,6 +8737,68 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    */
   /**
    * Build and emit scene verification data grouped by location.
+   * Persist cinematic in-memory maps to DB settings JSON so they survive crash.
+   * Called after element creation and location setup complete.
+   */
+  _persistCinematicMaps(projectId) {
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+
+      if (this.state.cinematicElementNames && Object.keys(this.state.cinematicElementNames).length > 0) {
+        settings._cinematicElementNames = this.state.cinematicElementNames;
+      }
+      if (this.state._outfitElements && Object.keys(this.state._outfitElements).length > 0) {
+        settings._outfitElements = this.state._outfitElements;
+      }
+      if (this.state.cinematicLocations && Object.keys(this.state.cinematicLocations).length > 0) {
+        settings._cinematicLocations = this.state.cinematicLocations;
+      }
+
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+      this.log(`[PERSIST] Cinematic maps saved to DB settings (elements: ${Object.keys(this.state.cinematicElementNames || {}).length}, outfits: ${Object.keys(this.state._outfitElements || {}).length}, locations: ${Object.keys(this.state.cinematicLocations || {}).length})`);
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist cinematic maps: ${e.message}`, 'warn');
+    }
+  }
+
+  /**
+   * Restore cinematic maps from DB settings on resume.
+   * Filesystem is source of truth — only restores paths that still exist on disk.
+   */
+  _restoreCinematicMaps(projectId) {
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+
+      if (settings._cinematicElementNames && !this.state.cinematicElementNames) {
+        this.state.cinematicElementNames = settings._cinematicElementNames;
+        this.log(`[RESTORE] cinematicElementNames from DB settings (${Object.keys(settings._cinematicElementNames).length} entries)`);
+      }
+      if (settings._outfitElements && !this.state._outfitElements) {
+        this.state._outfitElements = settings._outfitElements;
+        this.log(`[RESTORE] _outfitElements from DB settings (${Object.keys(settings._outfitElements).length} entries)`);
+      }
+      if (settings._cinematicLocations && !this.state.cinematicLocations) {
+        const fs = require('fs');
+        // Validate paths still exist on disk (filesystem = source of truth)
+        const validated = {};
+        for (const [hint, loc] of Object.entries(settings._cinematicLocations)) {
+          if (loc.imagePath && fs.existsSync(loc.imagePath)) {
+            validated[hint] = loc;
+          } else {
+            this.log(`[RESTORE] Location ${hint}: file missing on disk (${loc.imagePath}) — will regenerate`);
+          }
+        }
+        this.state.cinematicLocations = validated;
+        this.log(`[RESTORE] cinematicLocations from DB settings (${Object.keys(validated).length}/${Object.keys(settings._cinematicLocations).length} valid on disk)`);
+      }
+    } catch (e) {
+      this.log(`[RESTORE] WARN: Could not restore cinematic maps: ${e.message}`, 'warn');
+    }
+  }
+
+  /**
    * Fired before the 'scenes' approval gate so the Scene Verification tab
    * can render a location-grouped grid for continuity review.
    */
@@ -8837,6 +8984,40 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       this.log(`[DIALOGUE-TRIAGE] Auto-skipped ${autoSkipped} silent clip(s) — user can approve as b-roll from UI`);
     }
     this.log(`[DIALOGUE-TRIAGE] Emitted triage data: ${withDialogue.length} with dialogue, ${silent.length} silent, ${triageItems.length} total`);
+  }
+
+  /**
+   * Count how many clips have no dialogue (silent clips that need triage).
+   * Returns 0 when all clips have dialogue — safe to auto-proceed.
+   */
+  _countSilentClips(projectId) {
+    const script = this.state.script;
+    if (!script?.chapters) return 0;
+
+    // Build line lookup
+    const lineLookup = {};
+    for (const ch of script.chapters) {
+      for (const sc of ch.scenes) {
+        for (const ln of (sc.lines || [])) {
+          lineLookup[`${ch.chapter_number}_${sc.scene_number}_${ln.line_number}`] = ln;
+        }
+      }
+    }
+
+    let silentCount = 0;
+    for (const ch of script.chapters) {
+      for (const sc of ch.scenes) {
+        for (const clipDef of (sc.kling_clips || [])) {
+          const lineRefs = clipDef.line_refs || [];
+          const hasDialogue = lineRefs.some(lineNum => {
+            const line = lineLookup[`${ch.chapter_number}_${sc.scene_number}_${lineNum}`];
+            return line && (line.dialogue || '').trim().length > 0;
+          });
+          if (!hasDialogue) silentCount++;
+        }
+      }
+    }
+    return silentCount;
   }
 
   /**

@@ -2799,12 +2799,24 @@ Phase 5: Resume + Recovery
   - `verifyGrid(gridPath, portraitPath, character, { passThreshold = 75 })` — multi-image comparison against approved portrait. Checks face consistency (3x weight), angle coverage, layout quality, clothing consistency, identity stability.
   - `verifySceneImage(scenePath, opts, { passThreshold = 70 })` — checks character presence (3x weight), character identity, setting match, blocking positions, composition. Forced fail if character_presence < 50. Supports portrait reference images.
   - Shared infrastructure: image loading, mime detection from magic bytes, webp→jpeg conversion via ffmpeg, Claude Vision API calls (single + multi-image), JSON parsing, configurable thresholds
+  - `verifyLocationImage(locationPath, location, { passThreshold = 70 })` — checks no people present (3x weight — critical, forced fail if <50), description match (2x), mood/setting (1.5x), composition (1x). Locations must be completely empty backgrounds.
   - Single pass/fail verdict (no review tier). Returns `{ score, issues[], verdict, details }`. Fallback = 'pass' (non-blocking).
 - Orchestrator wiring — **eliminates human approval gates**:
   - Portrait stage: vision verification after generation. Auto-reject + regenerate up to 4 retries. Human gate ONLY if retry cap exhausted (_portraitVerifyExhausted). Otherwise auto-proceeds to grid stage.
   - Grid stage: vision verification after generation + dimension check. Auto-reject within 4-attempt retry loop (MAX_GRID_ATTEMPTS = 4). Auto-proceeds.
+  - Location stage: vision verification after generation + orientation fix. Auto-reject within 4-attempt retry loop (MAX_LOC_ATTEMPTS = 4). Locations-ready approval gate removed — auto-proceeds.
   - Scene image stage: vision verification after generation. Auto-reject within 3-attempt retry loop. All scene approval gates removed — auto-proceeds to video stage.
   - Resume re-gates: replaced with auto-proceed logging (scenes passed verification during generation).
+  - Dialogue triage gate: conditional auto-proceed when all clips have dialogue (silent count = 0). Gate only fires for legacy scripts with silent clips needing user decision.
   - Manual fallback gate preserved: fires only when Cinema Studio automation itself fails (UI reliability issue, not quality).
   - All verification is non-blocking on error (API errors, missing keys) — returns 'pass' so pipeline continues.
-- Thresholds (single pass/fail): Portrait ≥80, Grid ≥75, Scene ≥70. Retry caps: Portrait 4, Grid 4, Scene 3.
+- Thresholds (single pass/fail): Portrait ≥80, Grid ≥75, Location ≥70, Scene ≥70. Retry caps: Portrait 4, Grid 4, Location 4, Scene 3.
+- Crash resilience (filesystem = source of truth):
+  - Migration 017: `vision_score`, `vision_verdict`, `vision_retries`, `vision_issues`, `vision_verified_at` columns on `project_assets`
+  - `db.saveVisionResult(assetId, { score, verdict, issues, retries })` — persisted immediately after verification API call
+  - `db.incrementVisionRetries(assetId)` / `db.getVisionRetries(assetId)` — replaces in-memory retry counters
+  - `db.reconcileWithFilesystem(projectId)` — scans all assets: file exists on disk → mark done; file missing but DB says done → reset to pending
+  - `_persistCinematicMaps(projectId)` — writes `cinematicElementNames`, `_outfitElements`, `cinematicLocations` to `projects.settings` JSON
+  - `_restoreCinematicMaps(projectId)` — rebuilds in-memory maps from DB settings on resume, validates paths against disk
+  - Resume path: calls `_restoreCinematicMaps` + `reconcileWithFilesystem` before any stage logic runs
+  - Principle: local file on disk is the ultimate source of truth. DB is an index that gets reconciled against reality on every resume.

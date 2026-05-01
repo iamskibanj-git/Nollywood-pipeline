@@ -860,6 +860,99 @@ function resetStuckAssets() {
 }
 
 /**
+ * Filesystem reconciliation — the local file is the source of truth.
+ * If an asset has file_path set and the file EXISTS on disk, mark it 'done'
+ * regardless of DB status. If file_path is set but file is MISSING, reset to
+ * 'pending' (needs regeneration). This handles crash scenarios where:
+ * - Generation completed but markAssetDone() never ran (crash after write)
+ * - File was manually deleted (user action)
+ * - DB says 'failed' but file actually exists (retry succeeded post-crash)
+ */
+function reconcileWithFilesystem(projectId) {
+  if (!db) return { recovered: 0, invalidated: 0 };
+
+  const allAssets = queryAll(
+    `SELECT id, file_path, status, type FROM project_assets WHERE project_id = ?`,
+    [projectId]
+  );
+
+  let recovered = 0;
+  let invalidated = 0;
+
+  for (const asset of allAssets) {
+    if (!asset.file_path) continue;
+
+    const fileExists = fs.existsSync(asset.file_path);
+
+    if (fileExists && asset.status !== 'done' && asset.status !== 'archived' && asset.status !== 'skipped') {
+      // File exists on disk but DB doesn't say done → recover
+      runSql(
+        `UPDATE project_assets SET status = 'done', completed_at = COALESCE(completed_at, datetime('now')), error_message = COALESCE(error_message, 'recovered-from-disk') WHERE id = ?`,
+        [asset.id]
+      );
+      recovered++;
+    } else if (!fileExists && asset.status === 'done') {
+      // DB says done but file is missing → invalidate back to pending
+      runSql(
+        `UPDATE project_assets SET status = 'pending', error_message = 'File missing on disk — needs regeneration' WHERE id = ?`,
+        [asset.id]
+      );
+      invalidated++;
+    }
+  }
+
+  if (recovered > 0 || invalidated > 0) {
+    save();
+    console.log(`[DB] Filesystem reconciliation: ${recovered} recovered from disk, ${invalidated} invalidated (file missing)`);
+  }
+  return { recovered, invalidated };
+}
+
+/**
+ * Save vision verification result immediately after API call.
+ * Persists score/verdict/retries so resume doesn't re-run expensive verification.
+ */
+function saveVisionResult(assetId, { score, verdict, issues, retries }) {
+  runSql(
+    `UPDATE project_assets SET
+       vision_score = ?,
+       vision_verdict = ?,
+       vision_retries = ?,
+       vision_issues = ?,
+       vision_verified_at = datetime('now')
+     WHERE id = ?`,
+    [
+      typeof score === 'number' ? score : null,
+      verdict || null,
+      typeof retries === 'number' ? retries : 0,
+      Array.isArray(issues) ? JSON.stringify(issues) : null,
+      assetId,
+    ]
+  );
+}
+
+/**
+ * Increment vision retry count for an asset (called on each vision-fail-triggered retry).
+ * Returns the new count so caller can check against cap.
+ */
+function incrementVisionRetries(assetId) {
+  runSql(
+    `UPDATE project_assets SET vision_retries = COALESCE(vision_retries, 0) + 1 WHERE id = ?`,
+    [assetId]
+  );
+  const row = queryOne(`SELECT vision_retries FROM project_assets WHERE id = ?`, [assetId]);
+  return row ? row.vision_retries : 1;
+}
+
+/**
+ * Get vision retry count for an asset (used on resume to know how many attempts already made).
+ */
+function getVisionRetries(assetId) {
+  const row = queryOne(`SELECT vision_retries FROM project_assets WHERE id = ?`, [assetId]);
+  return row ? (row.vision_retries || 0) : 0;
+}
+
+/**
  * Run on startup after migrations. Handles any state inconsistencies
  * left over from a crash or unclean shutdown.
  */
@@ -867,6 +960,12 @@ function recoverOnStartup() {
   const resetCount = resetStuckAssets();
   if (resetCount > 0) {
     console.log(`[DB] Startup recovery: ${resetCount} assets were mid-generation and have been queued for retry`);
+  }
+
+  // Filesystem reconciliation for all active projects
+  const activeProject = getActiveProject();
+  if (activeProject) {
+    reconcileWithFilesystem(activeProject.id);
   }
 
   // Clean up any stale .tmp file from an interrupted atomic write
@@ -1449,9 +1548,14 @@ module.exports = {
   isTitleProduced,
   // Deduplication
   findExistingGeneration,
-  // Crash recovery
+  // Crash recovery & filesystem reconciliation
   resetStuckAssets,
   recoverOnStartup,
+  reconcileWithFilesystem,
+  // Vision verification persistence
+  saveVisionResult,
+  incrementVisionRetries,
+  getVisionRetries,
   // Pipeline events
   logEvent,
   getRecentEvents,
