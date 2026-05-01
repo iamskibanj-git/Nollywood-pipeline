@@ -385,7 +385,17 @@ Return JSON with this EXACT structure:
       "element_name_hint": "snake_case_name",
       "full_prompt_description": "Full physical description for portrait generation",
       "role": "protagonist|antagonist|confidant|supporting|bplot",
-      "arc_summary": "One sentence: what this character wants and how they change"
+      "arc_summary": "One sentence: what this character wants and how they change",
+      "speech_style": "formal|proverbial|sharp|pleading|sarcastic|spiritual|street-smart|class-conscious|warm-maternal|cold-authoritative",
+      "speech_notes": "1-2 sentences describing HOW this character talks: rhythm, cadence, vocabulary level, cultural markers. E.g. 'Uses proverbs to deflect, never answers directly, speaks in measured Igbo-inflected English.'"
+    }
+  ],
+  "relationship_arcs": [
+    {
+      "characters": ["char_id_1", "char_id_2"],
+      "type": "mother-daughter|husband-wife|rivals|employer-servant|elder-younger|lovers|siblings|mentor-protégé|friends-turned-enemies",
+      "arc": "One sentence: how this relationship changes across the story",
+      "tension_source": "What drives conflict between them"
     }
   ],
   "chapter_outlines": [
@@ -394,6 +404,9 @@ Return JSON with this EXACT structure:
       "chapter_title": "...",
       "act": "setup|rising|midpoint|climax|resolution",
       "narrative_beat": "What happens in this chapter — 2-3 sentences",
+      "power_holder_start": "char_id who holds power at chapter start",
+      "power_holder_end": "char_id who holds power at chapter end",
+      "emotional_temperature": "low-simmer|building|boiling|aftermath",
       "scene_beats": [
         {
           "scene_number": 1,
@@ -401,6 +414,8 @@ Return JSON with this EXACT structure:
           "location_element_hint": "snake_case_location",
           "characters_present": ["char_id_1", "char_id_2"],
           "beat": "What happens in this scene — 1-2 sentences",
+          "scene_purpose": "reveal|confrontation|reversal|temptation|public-shame|private-confession|decision|trap|payoff|setup|pressure|escape|alliance",
+          "power_shift": "char_id_1 → char_id_2 (or 'none' if power doesn't change)",
           "emotional_arc": "tension rises|power shifts|reveal|confrontation|resolution",
           "target_lines": 6,
           "target_clips": 2
@@ -418,7 +433,13 @@ Return JSON with this EXACT structure:
 
 RULES FOR OUTLINE:
 - The character_bible must include full physical descriptions (full_prompt_description) — these are used for portrait generation.
+- Each character MUST have speech_style and speech_notes — these enforce voice consistency when chapters are generated independently. Nigerian drama characters speak differently by class, age, region, and role. A market woman speaks differently than a banker's wife.
+- relationship_arcs: Identify 3-5 key relationships that DRIVE the drama. Nollywood melodrama lives in the space between people — not just in plot events. The arc field describes how the bond transforms. The chapter generator uses these to ensure every scene services at least one relationship.
 - Scene beats should describe WHO is talking about WHAT, not the actual dialogue.
+- Each scene beat MUST have scene_purpose — this is the dramatic function of the scene. A scene without a clear purpose is filler. If you cannot name its purpose from the taxonomy, the scene should not exist.
+- Each scene beat MUST have power_shift — who holds status/authority/leverage at the start vs end. Nollywood conflict thrives on reversals of social power: elder/younger, rich/poor, man/woman, saved/damned. Not every scene shifts power (use 'none'), but at least half should.
+- Chapter-level power_holder_start/end tracks the macro power dynamic across the story — essential for the chapter generator to know who is winning at each point.
+- emotional_temperature per chapter prevents the "constant escalation" trap. A story needs low-simmer chapters (aftermath, setup, quiet tension) as breathing room between boiling-point confrontations. Not every chapter can be at maximum intensity.
 - Each scene beat specifies target_lines (how many dialogue lines) and target_clips (how many Kling clips).
 - Total target_clips across all chapters should be ~${targetClips}.
 - Max 3 characters per scene_beat (Kling constraint).
@@ -501,6 +522,7 @@ ${JSON.stringify(characterBible, null, 2)}
 === FULL STORY OUTLINE ===
 B-Plot: ${outline.bplot_summary || 'N/A'}
 Setup/Payoff pairs: ${JSON.stringify(outline.setup_payoff_pairs || [])}
+Relationship Arcs: ${JSON.stringify(outline.relationship_arcs || [], null, 2)}
 
 Previous chapters (summary):
 ${prevSummary}
@@ -508,10 +530,12 @@ ${prevSummary}
 >>> THIS CHAPTER (${chNum}): "${chOutline?.chapter_title || ''}" <<<
 Act: ${chOutline?.act || 'N/A'}
 Narrative beat: ${chOutline?.narrative_beat || 'N/A'}
+Power dynamic: ${chOutline?.power_holder_start || '?'} holds power at start → ${chOutline?.power_holder_end || '?'} holds power at end
+Emotional temperature: ${chOutline?.emotional_temperature || 'building'}
 Target clips: ~${chOutline?.target_clips || clipsPerChapter}
 Chapter-end hook: ${chOutline?.chapter_end_hook || '(final chapter — resolve)'}
 
-Scene beats to expand:
+Scene beats to expand (each has scene_purpose and power_shift — honour them):
 ${JSON.stringify(chOutline?.scene_beats || [], null, 2)}
 
 Upcoming chapters (summary):
@@ -532,15 +556,18 @@ CRITICAL RULES:
 1. Follow the scene beats from the outline but EXPAND them into full cinematic scenes with rich dialogue, blocking, and kling_clips.
 2. Each scene has as many lines as the story needs — group into clips of exactly 3 lines each. Target ~${chOutline?.target_clips || clipsPerChapter} clips for this chapter.
 3. Max 3 characters per scene.
-4. Maintain character voices and physical descriptions EXACTLY as in the character bible.
+4. Maintain character voices and physical descriptions EXACTLY as in the character bible. Respect each character's speech_style — a proverbial elder speaks in longer rhythmic cadences; a sharp young professional uses clipped sentences; a spiritual character invokes God/destiny. Voice is identity.
 5. Use @element_name_hint references (e.g. @${characterBible[0]?.element_name_hint || 'character_name'}).
 6. ${chNum < totalChapters ? `End on: "${chOutline?.chapter_end_hook || 'a cliffhanger or reveal'}"` : 'Bring the story to a decisive resolution.'}
 7. Use consistent location_element_hint values matching the outline.
+8. Each scene MUST include emotional_state: { "start": "...", "turn": "...", "end": "..." } — these are brief emotional descriptors (2-4 words) that track how the scene FEELS, not what happens. Examples: start: "uneasy calm", turn: "accusation lands", end: "cold fury". This helps continuity between scenes and prevents emotional whiplash.
+9. Each kling_clip MUST include "visual_beat": a single concrete visual action tied to story meaning. NOT complex choreography — one AI-safe action that the camera can reveal. Examples: "clutches the envelope tighter", "slowly removes her ring", "steps back from the table", "hides phone behind her back", "turns the framed photo face-down". This gives Kling something visual to render beyond talking heads. The visual_beat goes into the shot direction of the most dramatically appropriate shot (usually Shot 2 or 3).
+10. Honour the scene_purpose from the outline. A "reveal" scene must actually reveal something the audience didn't know. A "confrontation" must have characters in active opposition. A "setup" scene plants something for later. If the purpose doesn't match the content, the scene is mislabeled or broken.
 
 === STRICT RULES ===
 - Dialogue Only: Only character speech. No narration, SFX, or descriptions.
-- The 9-Word Rule: Every single sentence must be 9 words or less.
-- The Camera Jump: If a character says more than 9 words, break it with [NEW CAMERA ANGLE] + the next short sentence.
+- The 9-Word Rule: Every single sentence must be 9 words or less. EXCEPTION: Characters with speech_style "proverbial" or "spiritual" may use up to 12 words per sentence to preserve cultural cadence (proverbs, blessings, accusations with rhetorical weight). This does NOT mean all their lines can be 12 words — it is a ceiling for lines that genuinely need the rhythmic space.
+- The Camera Jump: If a character says more than 9 words (or 12 for proverbial/spiritual), break it with [NEW CAMERA ANGLE] + the next short sentence.
 
 === RESPONSE FORMAT ===
 Respond in JSON:
@@ -982,6 +1009,49 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
         console.warn(`[SCRIPT] Line count low: ${totalLines} lines (expected ~${expectedLines})`);
       } else {
         console.log(`[SCRIPT] ✓ Line count validated: ${totalLines} (target: ${expectedLines})`);
+      }
+    }
+
+    // ── STORYTELLING FIELD COMPLIANCE (soft warnings — monitor LLM adherence) ──
+    if (isCinematicStoryDriven) {
+      let scenesWithoutEmotional = 0;
+      let scenesWithoutPurpose = 0;
+      let clipsWithoutVisualBeat = 0;
+      let totalScenesChecked = 0;
+      let totalClipsChecked = 0;
+
+      for (const ch of (script.chapters || [])) {
+        for (const sc of (ch.scenes || [])) {
+          totalScenesChecked++;
+          if (!sc.emotional_state || !sc.emotional_state.start) scenesWithoutEmotional++;
+          if (!sc.scene_purpose) scenesWithoutPurpose++;
+          for (const clip of (sc.kling_clips || [])) {
+            totalClipsChecked++;
+            if (!clip.visual_beat) clipsWithoutVisualBeat++;
+          }
+        }
+      }
+
+      if (scenesWithoutEmotional > 0) {
+        console.warn(`[SCRIPT] ⚠ ${scenesWithoutEmotional}/${totalScenesChecked} scenes missing emotional_state (start/turn/end)`);
+      } else if (totalScenesChecked > 0) {
+        console.log(`[SCRIPT] ✓ All ${totalScenesChecked} scenes have emotional_state`);
+      }
+      if (scenesWithoutPurpose > 0) {
+        console.warn(`[SCRIPT] ⚠ ${scenesWithoutPurpose}/${totalScenesChecked} scenes missing scene_purpose`);
+      } else if (totalScenesChecked > 0) {
+        console.log(`[SCRIPT] ✓ All ${totalScenesChecked} scenes have scene_purpose`);
+      }
+      if (clipsWithoutVisualBeat > 0) {
+        console.warn(`[SCRIPT] ⚠ ${clipsWithoutVisualBeat}/${totalClipsChecked} clips missing visual_beat`);
+      } else if (totalClipsChecked > 0) {
+        console.log(`[SCRIPT] ✓ All ${totalClipsChecked} clips have visual_beat`);
+      }
+
+      // Speech style coverage
+      const charsWithoutSpeechStyle = (script.character_bible || []).filter(c => !c.speech_style).length;
+      if (charsWithoutSpeechStyle > 0) {
+        console.warn(`[SCRIPT] ⚠ ${charsWithoutSpeechStyle} character(s) missing speech_style`);
       }
     }
 
@@ -1651,6 +1721,43 @@ STORY-DRIVEN STRUCTURE (CINEMATIC ONLY):
 - TARGET CLIPS: ~${storyBrief.targetClips || 50} total across the entire script. Each clip = 10-12 seconds of footage. Distribute clips across chapters based on dramatic weight — a climactic chapter might get more clips than a transitional one.
 - APPROXIMATE CLIPS PER CHAPTER: ~${Math.ceil((storyBrief.targetClips || 50) / (storyBrief.chapters || 10))} (this is guidance, not a hard rule — distribute based on story needs).
 ` : ''}
+AI-SAFE VISUAL STORYTELLING (visual_beat per clip):
+Cinema is not only dialogue. Each kling_clip MUST include a "visual_beat" field — ONE concrete, simple physical action that carries story meaning and that Kling can reliably render. This prevents "talking heads" syndrome and gives the camera something to reveal.
+
+GOOD visual beats (AI-safe — single character, single action, no complex choreography):
+- "clutches the envelope tighter" (fear of discovery)
+- "slowly removes her wedding ring" (decision made)
+- "steps backward from the table" (power yielded)
+- "hides the phone behind her back" (guilt)
+- "turns the framed photo face-down" (rejection)
+- "sets down the glass with deliberate control" (suppressed rage)
+- "grips the edge of the chair" (restraint under pressure)
+- "closes her eyes, chin lifted" (spiritual surrender)
+
+BAD visual beats (too complex for Kling, multi-character, or silent-only):
+- "grabs his collar and slams him against the wall" (two-character physics)
+- "the room erupts in chaos as everyone stands" (ensemble action)
+- "flashback to the childhood scene" (Kling has no flashback concept)
+- "montage of her walking through the city" (multi-location)
+
+The visual_beat should be written INTO the shot direction of Shot 2 or 3 (whichever carries the most emotional weight). It is NOT a separate silent shot — it accompanies dialogue. Example: "CLOSE-UP on @ada, static. She grips the chair edge, knuckles whitening. [@ada, speaking...]: "I will not beg.""
+
+EMOTIONAL RHYTHM AND BREATHING ROOM:
+Not every scene can be at maximum tension. Real drama needs:
+- PRESSURE scenes (confrontation, reveal, reversal) — high energy, rapid dialogue
+- BREATHING scenes (aftermath, private confession, quiet setup) — slower pace, fewer clips, emotional processing
+- The outline's emotional_temperature field guides this: "low-simmer" chapters should feel reflective, intimate, or quietly ominous — not explosive. "boiling" chapters earn their intensity BECAUSE the previous chapter was quieter.
+- If 3+ consecutive scenes are all confrontations, the viewer experiences fatigue. Alternate scene_purpose types: confrontation → private-confession → setup → reveal.
+- Nollywood melodrama needs moments of RECOGNITION: shame, pride, longing, family duty, spiritual fear, public humiliation. These emotions need SPACE to land — they cannot be rushed through in 3 lines. A shame scene might have a character repeat themselves, trail off, or speak to God rather than the person in front of them.
+
+CULTURAL DIALOGUE CADENCE:
+Nigerian dramatic speech has distinctive patterns that should be preserved:
+- PROVERBIAL characters (elders, traditional authority): May use up to 12 words per sentence. Proverbs are complete units that lose meaning when broken: "The tortoise that tries to fly will break its shell." Do NOT break these with [NEW CAMERA ANGLE] mid-proverb.
+- SPIRITUAL characters (pastors, prayer warriors, market women invoking God): May use up to 12 words. Blessings, curses, and spiritual declarations are rhythmic units: "May the God of our fathers judge between us today."
+- ACCUSATORY cadence: Nigerian confrontation often uses repetition for dramatic weight: "You did this. You. Not them. You." This is intentional rhythm, not wasted words.
+- CLASS MARKERS: A wealthy character uses English differently than a market trader. Vocabulary, sentence structure, and directness all signal social position. Maintain these consistently.
+- The 9-word rule remains the DEFAULT for all other speech_styles. The 12-word ceiling is ONLY for proverbial and spiritual characters on lines that genuinely need the rhythmic space.
+
 CINEMATIC MODE STRUCTURAL BAR IS HIGHER:
 - The structural review grader applies stricter rules to cinematic scripts because each weak Kling clip burns ~18 credits.
 - Blocking completeness is mandatory: every scene must have non-null frame positions for all present characters.
@@ -1982,6 +2089,45 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
       if (p.effective_settings?.length) {
         const sanitized = p.effective_settings.slice(0, 5).map(s => this.sanitizePatternEntry(s));
         parts.push(`Settings that work well: ${sanitized.join(', ')}`);
+      }
+
+      // ── NEW: Relationship, emotional arc, power, and visual patterns ──
+      if (p.relationship_patterns?.length) {
+        const relSummary = p.relationship_patterns.slice(0, 4).map(r => {
+          const type = r.type || r;
+          const why = r.why_it_works || r.tension_formula || '';
+          return why ? `${type} (${this.sanitizePatternEntry(why)})` : type;
+        });
+        parts.push(`Relationship dynamics that drive engagement: ${relSummary.join('; ')}`);
+      }
+      if (p.emotional_arc_patterns) {
+        const eap = p.emotional_arc_patterns;
+        const emotionalParts = [];
+        if (eap.dominant_pacing) emotionalParts.push(`pacing: ${eap.dominant_pacing}`);
+        if (eap.breathing_room) emotionalParts.push(`breathing room: ${this.sanitizePatternEntry(eap.breathing_room)}`);
+        if (eap.emotional_beats_that_hook?.length) {
+          emotionalParts.push(`emotional hooks: ${eap.emotional_beats_that_hook.slice(0, 5).join(', ')}`);
+        }
+        if (emotionalParts.length) parts.push(`Emotional arc patterns: ${emotionalParts.join(' | ')}`);
+      }
+      if (p.power_shift_patterns) {
+        const psp = p.power_shift_patterns;
+        const powerParts = [];
+        if (psp.common_inversions?.length) {
+          powerParts.push(`inversions audiences love: ${psp.common_inversions.slice(0, 4).join(', ')}`);
+        }
+        if (psp.social_axes?.length) {
+          powerParts.push(`axes of power: ${psp.social_axes.slice(0, 4).join(', ')}`);
+        }
+        if (powerParts.length) parts.push(`Power dynamics: ${powerParts.join(' | ')}`);
+      }
+      if (p.effective_visual_beats?.length) {
+        const beats = p.effective_visual_beats.slice(0, 5).map(b => this.sanitizePatternEntry(b));
+        parts.push(`Visual storytelling moments that work: ${beats.join('; ')}`);
+      }
+      if (p.dialogue_voice_patterns?.length) {
+        const voices = p.dialogue_voice_patterns.slice(0, 4).map(v => this.sanitizePatternEntry(v));
+        parts.push(`Dialogue voice patterns: ${voices.join('; ')}`);
       }
     }
 

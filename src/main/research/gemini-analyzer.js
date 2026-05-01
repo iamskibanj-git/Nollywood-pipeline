@@ -301,11 +301,35 @@ Provide your analysis in the following JSON format:
     {"archetype": "The Betrayed Wife", "role": "protagonist", "traits": ["..."]},
     {"archetype": "The Secret Lover", "role": "antagonist", "traits": ["..."]}
   ],
+  "relationship_dynamics": [
+    {
+      "pair": "wife-husband|mother-daughter|elder-younger|employer-servant|rivals|friends-turned-enemies|etc",
+      "tension_source": "What drives conflict between them (e.g. secret, betrayal, class difference)",
+      "power_balance": "Who has power at start vs end (e.g. 'husband dominant → wife reclaims')",
+      "audience_investment": "Why viewers care about this relationship"
+    }
+  ],
+  "emotional_pacing": {
+    "opening_intensity": "high|medium|low — does it start mid-crisis or slow-build?",
+    "escalation_style": "steady-build|explosive-bursts|slow-burn-to-eruption",
+    "breathing_moments": "Does the story pause for emotional processing? Describe if yes.",
+    "climax_type": "public-confrontation|private-revelation|silent-realization|divine-intervention"
+  },
+  "power_dynamics": {
+    "initial_power_holder": "Who has status/authority/leverage at the start",
+    "final_power_holder": "Who has it at the end",
+    "inversion_moment": "When and how power shifts — the moment of reversal",
+    "social_axes": ["class|gender|age|spiritual|financial|family-position — what dimensions of power matter"]
+  },
+  "visual_storytelling_moments": [
+    "Describe any non-dialogue moments that carry story meaning: a gesture, prop interaction, meaningful glance, physical withdrawal, revealing action. Even in AI video, these moments stand out."
+  ],
   "settings": ["village compound", "modern Lagos apartment", "..."],
   "dialogue_style": {
     "tone": "dramatic/comedic/suspenseful/...",
     "cultural_references": ["proverbs used", "traditions referenced"],
-    "language_mix": "English with Pidgin/Yoruba/Igbo phrases"
+    "language_mix": "English with Pidgin/Yoruba/Igbo phrases",
+    "speech_patterns": ["Does the dialogue use proverbs? Short sharp accusations? Spiritual declarations? Repetition for emphasis? Class markers?"]
   },
   "visual_style": {
     "cinematography": "close-ups, wide shots, etc.",
@@ -346,9 +370,14 @@ Provide your analysis in the following JSON format:
       hooks: v.analysis?.engagement_hooks?.title_hooks || [],
       settings: v.analysis?.settings || [],
       whyItWorks: v.analysis?.why_it_works || '',
+      relationships: v.analysis?.relationship_dynamics || [],
+      emotionalPacing: v.analysis?.emotional_pacing || null,
+      powerDynamics: v.analysis?.power_dynamics || null,
+      visualMoments: v.analysis?.visual_storytelling_moments || [],
+      speechPatterns: v.analysis?.dialogue_style?.speech_patterns || [],
     }));
 
-    const prompt = `You are a content strategist. Analyze these ${summaries.length} top-performing AI Nollywood videos and extract the common patterns that make them successful.
+    const prompt = `You are a content strategist specializing in Nollywood drama. Analyze these ${summaries.length} top-performing AI Nollywood videos and extract the common patterns that make them successful — especially relationship dynamics, emotional pacing, and power structures.
 
 Videos analyzed:
 ${JSON.stringify(summaries, null, 2)}
@@ -359,6 +388,27 @@ Identify the patterns and provide actionable insights in JSON:
   "winning_character_archetypes": ["Archetype that audiences respond to"],
   "proven_conflict_types": ["Type of conflict that drives engagement"],
   "effective_settings": ["Settings that resonate"],
+  "relationship_patterns": [
+    {
+      "type": "mother-daughter|husband-wife|elder-younger|employer-servant|rivals|etc",
+      "frequency": "How often this relationship type appears across the videos",
+      "why_it_works": "Why audiences invest in this dynamic",
+      "tension_formula": "The typical source of conflict in this relationship type"
+    }
+  ],
+  "emotional_arc_patterns": {
+    "dominant_pacing": "slow-burn|explosive-opener|steady-escalation — which pacing style dominates the top performers",
+    "breathing_room": "Do successful videos pause for emotional processing, or is it constant escalation?",
+    "climax_types": ["What kinds of climaxes appear most: public-confrontation, private-revelation, etc"],
+    "emotional_beats_that_hook": ["Specific emotional moments that drive retention: shame, longing, spiritual fear, public humiliation, pride, duty"]
+  },
+  "power_shift_patterns": {
+    "common_inversions": ["wife-reclaims-from-husband", "youth-overthrows-elder", "poor-exposes-rich", "etc — power reversals that audiences love"],
+    "social_axes": ["class", "gender", "age", "spiritual", "financial" — which dimensions of power matter most"],
+    "inversion_timing": "When in the story do power shifts typically happen (early, midpoint, climax)?"
+  },
+  "effective_visual_beats": ["Non-dialogue moments that carry story meaning across these videos: gestures, prop interactions, physical withdrawals, meaningful silences"],
+  "dialogue_voice_patterns": ["Speech patterns that appear in successful characters: proverbs, accusations, spiritual declarations, class markers, repetition"],
   "title_patterns": {
     "emotional_words": ["words that appear in successful titles"],
     "structures": ["title formula patterns like 'My [RELATIONSHIP] [BETRAYAL]'"]
@@ -457,6 +507,9 @@ Identify the patterns and provide actionable insights in JSON:
     const themeCounts = {};
     const archetypeCounts = {};
     const settingCounts = {};
+    const relationshipTypeCounts = {};
+    const visualBeatsList = [];
+    const speechPatternsList = [];
 
     for (const v of analyzedVideos) {
       if (!v.analysis) continue;
@@ -471,6 +524,16 @@ Identify the patterns and provide actionable insights in JSON:
       for (const setting of (v.analysis.settings || [])) {
         settingCounts[setting] = (settingCounts[setting] || 0) + 1;
       }
+      for (const rel of (v.analysis.relationship_dynamics || [])) {
+        const type = rel.pair || rel.type || 'unknown';
+        relationshipTypeCounts[type] = (relationshipTypeCounts[type] || 0) + 1;
+      }
+      for (const vb of (v.analysis.visual_storytelling_moments || [])) {
+        if (vb && vb.length > 5) visualBeatsList.push(vb);
+      }
+      for (const sp of (v.analysis.dialogue_style?.speech_patterns || [])) {
+        if (sp && sp.length > 3) speechPatternsList.push(sp);
+      }
     }
 
     const sortByCount = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([k, v]) => k);
@@ -479,11 +542,18 @@ Identify the patterns and provide actionable insights in JSON:
       recurring_themes: sortByCount(themeCounts),
       winning_character_archetypes: sortByCount(archetypeCounts),
       effective_settings: sortByCount(settingCounts),
+      relationship_patterns: sortByCount(relationshipTypeCounts).slice(0, 5).map(type => ({
+        type,
+        frequency: `${relationshipTypeCounts[type]}/${analyzedVideos.length} videos`,
+      })),
+      effective_visual_beats: visualBeatsList.slice(0, 8),
+      dialogue_voice_patterns: speechPatternsList.slice(0, 6),
       content_formula: 'Pattern extracted from local analysis — use Gemini API for deeper insights',
       recommendations: [
         `Focus on top themes: ${sortByCount(themeCounts).slice(0, 3).join(', ')}`,
         `Use proven archetypes: ${sortByCount(archetypeCounts).slice(0, 3).join(', ')}`,
         `Set stories in: ${sortByCount(settingCounts).slice(0, 3).join(', ')}`,
+        `Key relationships: ${sortByCount(relationshipTypeCounts).slice(0, 3).join(', ')}`,
       ],
     };
   }
