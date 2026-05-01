@@ -4404,6 +4404,69 @@ class PipelineOrchestrator {
       rewritten = rewritten.replace(shot1Match[2], shot1Body);
     }
 
+    // ── SCENE-SETTING LINE POSTURE CORRECTION ──
+    // The scene-setting line (text between any existing CHARACTER POSITIONS block
+    // or start-of-prompt and Shot 1) may contain posture descriptions written by
+    // the scriptwriter before the scene image existed (e.g. "mama_okafor now seated
+    // on the sofa" when vision shows her standing). Fix these to match vision truth.
+    const sceneSettingMatch = rewritten.match(/^([\s\S]*?)(Shot\s*1\s*\()/i);
+    if (sceneSettingMatch) {
+      let sceneSettingText = sceneSettingMatch[1];
+      const originalSceneSetting = sceneSettingText;
+      for (const vc of uniqueChars) {
+        const posLower = (vc.position || '').toLowerCase();
+        let targetPosture = null;
+        if (/\bseat(?:ed|s)\b|\bsitting\b|\bsits?\b/.test(posLower)) targetPosture = 'seated';
+        else if (/\bstand(?:s|ing)\b/.test(posLower)) targetPosture = 'standing';
+        else if (/\blean(?:s|ing)\b/.test(posLower)) targetPosture = 'leaning';
+        if (!targetPosture) continue;
+
+        const nameEscaped = vc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Match @name + posture verb (with optional words like "now" between)
+        const scenePostureRe = new RegExp(
+          `(@${nameEscaped})\\s+(?:now\\s+|is\\s+|already\\s+)?(stands?|stand|standing|sits?|sitting|seated|leans?|leaning)\\b`,
+          'gi'
+        );
+        sceneSettingText = sceneSettingText.replace(scenePostureRe, (match, nameRef, currentVerb) => {
+          const isCorrect =
+            (targetPosture === 'seated' && /^(sits?|sitting|seated)$/i.test(currentVerb)) ||
+            (targetPosture === 'standing' && /^(stands?|standing)$/i.test(currentVerb)) ||
+            (targetPosture === 'leaning' && /^(leans?|leaning)$/i.test(currentVerb));
+          if (isCorrect) return match;
+          const verbMap = { seated: 'now seated', standing: 'now standing', leaning: 'now leaning' };
+          const correctPosture = verbMap[targetPosture] || currentVerb;
+          this.log(`[VISION-BLOCKING] Scene-setting posture fix: ${nameRef} "${currentVerb}" → "${correctPosture}" (vision says ${targetPosture})`);
+          return `${nameRef} ${correctPosture}`;
+        });
+
+        // Also catch bare-name references (without @) in scene-setting line
+        // e.g. "Mama Okafor now seated on the sofa" (no @ prefix)
+        const baseName = vc.baseName || vc.name;
+        // Build display-name variants: "mama_okafor" → "Mama Okafor", "mama okafor"
+        const displayName = baseName.replace(/_/g, ' ');
+        const displayNameEscaped = displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const bareNameRe = new RegExp(
+          `(${displayNameEscaped})\\s+(?:now\\s+|is\\s+|already\\s+)?(stands?|stand|standing|sits?|sitting|seated|leans?|leaning)\\b`,
+          'gi'
+        );
+        sceneSettingText = sceneSettingText.replace(bareNameRe, (match, nameRef, currentVerb) => {
+          const isCorrect =
+            (targetPosture === 'seated' && /^(sits?|sitting|seated)$/i.test(currentVerb)) ||
+            (targetPosture === 'standing' && /^(stands?|standing)$/i.test(currentVerb)) ||
+            (targetPosture === 'leaning' && /^(leans?|leaning)$/i.test(currentVerb));
+          if (isCorrect) return match;
+          const verbMap = { seated: 'now seated', standing: 'now standing', leaning: 'now leaning' };
+          const correctPosture = verbMap[targetPosture] || currentVerb;
+          this.log(`[VISION-BLOCKING] Scene-setting posture fix (bare name): "${nameRef} ${currentVerb}" → "${nameRef} ${correctPosture}" (vision says ${targetPosture})`);
+          return `${nameRef} ${correctPosture}`;
+        });
+      }
+      if (sceneSettingText !== originalSceneSetting) {
+        rewritten = rewritten.replace(originalSceneSetting, sceneSettingText);
+        this.log('[VISION-BLOCKING] Scene-setting line posture(s) corrected to match vision');
+      }
+    }
+
     // Build preamble with budget-aware truncation.
     // Each blocking line is trimmed to fit within the character budget.
     const preambleMaxChars = Math.floor(KLING_CHAR_LIMIT * PREAMBLE_BUDGET_RATIO);
