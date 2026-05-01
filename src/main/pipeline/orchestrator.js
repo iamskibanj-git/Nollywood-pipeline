@@ -312,8 +312,8 @@ class PipelineOrchestrator {
     // The library is reusable across stories — title dedup prevents repetition.
   }
 
-  checkDuplicate(title, themes = []) {
-    const stories = this.getProducedStories();
+  checkDuplicate(title, themes = [], poolId = null) {
+    const stories = this.getProducedStories(poolId);
     const normalizedTitle = title.toLowerCase().trim();
     const normalizedThemes = themes.map(t => t.toLowerCase().trim()).sort();
 
@@ -473,11 +473,12 @@ class PipelineOrchestrator {
 
     const projectId = active.id;
     if (duration) {
-      const structure = calculateStoryStructure(duration);
+      const effectiveMode = generatorMode || this.state.generatorMode || 'staged';
+      const structure = calculateStoryStructure(duration, effectiveMode);
       this.state.storyStructure = structure;
       this.state.durationTier = getDurationTier(duration);
       db.updateProject(projectId, { duration_preset: duration });
-      this.log(`[SETTINGS] Duration updated → ${duration} (${structure.totalLines} clips, ~${structure.estimatedDuration} min)`);
+      this.log(`[SETTINGS] Duration updated → ${duration} (${structure.totalLines} clips, ~${structure.estimatedDuration} min, mode=${effectiveMode})`);
     }
     if (aspectRatio && (aspectRatio === '16:9' || aspectRatio === '9:16')) {
       db.setProjectAspectRatio(projectId, aspectRatio);
@@ -1113,7 +1114,7 @@ class PipelineOrchestrator {
 
             // Tag duplicates and similarity warnings
             const taggedTitles = titles.map(t => {
-              const dup = this.checkDuplicate(t.title, this.state.researchData?.patterns?.recurring_themes);
+              const dup = this.checkDuplicate(t.title, this.state.researchData?.patterns?.recurring_themes, this.state.selectedPoolId || null);
               if (dup) {
                 t.isDuplicate = true;
                 t.dupInfo = `Already produced on ${dup.date?.slice(0, 10)}`;
@@ -2360,7 +2361,14 @@ class PipelineOrchestrator {
         while (true) {
           verifyIter++;
           if (verifyIter > MAX_VERIFY_REDO_ITERATIONS) {
-            this.log(`[VERIFY] Max redo iterations (${MAX_VERIFY_REDO_ITERATIONS}) reached — proceeding to assembly with remaining clips`, 'warn');
+            const isCinematicCheck = (this.state.generatorMode || 'staged') === 'cinematic';
+            const checkType = isCinematicCheck ? 'video_clip_cinematic' : 'video_clip';
+            const stillPending = db.getIncompleteAssets(projectId, checkType);
+            if (stillPending.length > 0) {
+              const names = stillPending.slice(0, 5).map(a => a.kling_clip_id || `id=${a.id}`).join(', ');
+              throw new Error(`Verify redo cap reached (${MAX_VERIFY_REDO_ITERATIONS} iterations) but ${stillPending.length} clip(s) still pending: ${names}. Cannot proceed to assembly.`);
+            }
+            this.log(`[VERIFY] Max redo iterations reached but all clips are done — proceeding to assembly`);
             break;
           }
 
@@ -6517,6 +6525,63 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
     }
 
+    // ── STALE / ORPHAN CLEANUP for video_clip_cinematic ──
+    // Remove rows that don't match any clip in the current script.
+    // These accumulate from previous runs with different scripts or from
+    // duplicate _insertExpectedAssets() calls on restart.
+    {
+      const validClipKeys = new Set(allKlingClips.map(item => {
+        const cd = item.clipDef;
+        const cid = cd.clip_id || `ch${item.chapter}_sc${item.scene}_c${allKlingClips.indexOf(item) + 1}`;
+        return `${item.chapter}_${item.scene}_${(cd.line_refs && cd.line_refs[0]) || 'null'}_${cid}`;
+      }));
+      const staleVideoAssets = existingClips.filter(a => {
+        if (a.status === 'archived') return false;
+        // Tagged rows: check if their kling_clip_id is in the current script
+        if (a.kling_clip_id) {
+          return !allKlingClips.some(item => {
+            const cd = item.clipDef;
+            return (cd.clip_id || `ch${item.chapter}_sc${item.scene}_c${allKlingClips.indexOf(item) + 1}`) === a.kling_clip_id;
+          });
+        }
+        // Untagged rows (orphans from _insertExpectedAssets): keep if they could still be adopted
+        return false; // leave untagged rows for the adopt-orphan logic below
+      });
+      if (staleVideoAssets.length > 0) {
+        this.log(`[CINEMATIC] Cleaning up ${staleVideoAssets.length} stale video_clip_cinematic assets (not in current script)`);
+        for (const a of staleVideoAssets) {
+          db.deleteAsset(a.id);
+        }
+        // Remove from our in-memory list too
+        for (const a of staleVideoAssets) {
+          const idx = existingClips.indexOf(a);
+          if (idx >= 0) existingClips.splice(idx, 1);
+        }
+      }
+
+      // ── DEDUP: remove duplicate pending rows for the same chapter+scene+line ──
+      // Keep one untagged pending row per (chapter, scene, line) — prefer done > generating > pending
+      const untaggedPending = existingClips.filter(a => !a.kling_clip_id && a.status === 'pending');
+      const seenVideoKeys = {};
+      const videoDupeIds = [];
+      for (const a of untaggedPending) {
+        const key = `${a.chapter}_${a.scene}_${a.line}`;
+        if (seenVideoKeys[key]) {
+          videoDupeIds.push(a.id);
+        } else {
+          seenVideoKeys[key] = a.id;
+        }
+      }
+      if (videoDupeIds.length > 0) {
+        this.log(`[CINEMATIC] Removing ${videoDupeIds.length} duplicate video_clip_cinematic pending rows`);
+        for (const id of videoDupeIds) {
+          db.deleteAsset(id);
+          const idx = existingClips.findIndex(a => a.id === id);
+          if (idx >= 0) existingClips.splice(idx, 1);
+        }
+      }
+    }
+
     let generated = 0;
     let skipped = 0;
     let failed = 0;
@@ -7120,34 +7185,41 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // Insert/locate asset row — keyed by kling_clip_id for resume idempotency
       let clipAsset = existingClips.find(a => a.kling_clip_id === clipId);
       if (!clipAsset) {
-        // Insert a video_clip_cinematic row. We use chapter + scene to match
-        // schema constraints; the clip-specific identity is on kling_clip_id
-        // (set immediately after insertion).
-        db.insertExpectedAssets(projectId, [{
-          type: 'video_clip_cinematic',
-          chapter,
-          scene,
-          line: (clipDef.line_refs && clipDef.line_refs[0]) || null,
-        }]);
-        clipAsset = db.getAssets(projectId, { type: 'video_clip_cinematic' })
-          .filter(a => a.chapter === chapter && a.scene === scene && !a.kling_clip_id)
-          .slice(-1)[0];
+        // ── ADOPT ORPHAN: try to find a pre-inserted row from _insertExpectedAssets()
+        // that has matching chapter+scene+line but no kling_clip_id yet.
+        // This prevents duplicate row creation — the original row gets tagged.
+        const expectedLine = (clipDef.line_refs && clipDef.line_refs[0]) || null;
+        clipAsset = existingClips.find(a =>
+          !a.kling_clip_id &&
+          a.chapter === chapter &&
+          a.scene === scene &&
+          a.line === expectedLine &&
+          a.status === 'pending'
+        );
+        if (clipAsset) {
+          this.log(`[CINEMATIC] ${clipId}: adopting pre-inserted orphan row (id=${clipAsset.id})`);
+        } else {
+          // No orphan to adopt — insert a fresh row (crash mid-run, manual restart, etc.)
+          db.insertExpectedAssets(projectId, [{
+            type: 'video_clip_cinematic',
+            chapter,
+            scene,
+            line: expectedLine,
+          }]);
+          clipAsset = db.getAssets(projectId, { type: 'video_clip_cinematic' })
+            .filter(a => a.chapter === chapter && a.scene === scene && !a.kling_clip_id)
+            .slice(-1)[0];
+        }
         if (clipAsset) {
           // Tag with clip_id + line_refs JSON so resume can find it
           try {
             const lineRefsJson = JSON.stringify(clipDef.line_refs || []);
-            // Reuse setAssetElementName-style direct UPDATE for the
-            // clip-specific columns added in migration 012.
-            const sql = `UPDATE project_assets SET kling_clip_id = ?, line_refs = ? WHERE id = ?`;
-            // db.runSql is internal; use the exposed setAssetElementName as a model.
-            // We extend with a dedicated helper inline for now.
             db._setKlingClipMeta && db._setKlingClipMeta(clipAsset.id, clipId, lineRefsJson);
-            // Fallback: if the helper isn't available, use a generic column update
             if (!db._setKlingClipMeta) {
-              // Last-resort: use updateProjectAsset to store on a JSON-style
-              // settings field. For now, log a warning.
               this.log(`[CINEMATIC] Warn: kling_clip_id metadata not persisted for ${clipId}`, 'warn');
             }
+            // Update our in-memory array so subsequent iterations see this tag
+            clipAsset.kling_clip_id = clipId;
           } catch (_) {}
         }
       }
