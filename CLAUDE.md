@@ -2826,3 +2826,15 @@ Phase 5: Resume + Recovery
   - `_buildLocationPrompt` injects interior/exterior cultural markers based on location text detection (regex for room/kitchen/etc → interior, else exterior)
   - `verifyLocationImage` receives `culturalContext` + `forbiddenElements` — checks for out-of-place Western elements (CNN, European portraits, non-African art). `cultural_authenticity` weighted 2.5x, forced fail if score < 40.
   - Prevents: Nigerian living room with CNN on TV, European portraits on walls, IKEA furniture, non-African architecture
+
+**Session 30j** — Asset recovery: CDN capture + file integrity checks:
+- CDN URL capture for all generated assets (enables re-download instead of re-generate on crash):
+  - `character_grid`: passes `onGenClicked` callback to `_generateCharacterGrid`, captures `genMeta.cdnUrl` via `db.markAssetCdnUrl()`
+  - `location_image`: passes `onGenClicked` via generateImage options, captures `genMeta.cdnUrl`
+  - `scene_image_cinematic`: already had `onGenClicked`, added `result.cdnUrl` capture
+  - Pattern: `db.markAssetGenClicked(assetId, creditCost)` fires on generation button click (marks credit spent), `db.markAssetCdnUrl(assetId, url)` fires when CDN URL is available from result metadata
+- File integrity check in `reconcileWithFilesystem`:
+  - MIN_FILE_SIZES: images (portrait, grid, location, scene) > 1KB, videos > 10KB
+  - Files below minimum size treated as corrupt — deleted from disk and status reset to pending
+  - Runs before normal recovery/invalidation logic — catches partial downloads from crash mid-write
+  - Prevents pipeline from treating a 0-byte or truncated file as "done"

@@ -879,10 +879,39 @@ function reconcileWithFilesystem(projectId) {
   let recovered = 0;
   let invalidated = 0;
 
+  // Minimum file sizes to detect corrupt/incomplete downloads
+  const MIN_FILE_SIZES = {
+    portrait: 1024,             // images > 1KB
+    character_grid: 1024,
+    location_image: 1024,
+    scene_image_cinematic: 1024,
+    video_clip_cinematic: 10240, // videos > 10KB
+  };
+
   for (const asset of allAssets) {
     if (!asset.file_path) continue;
 
     const fileExists = fs.existsSync(asset.file_path);
+
+    // File integrity check: exists but too small → treat as corrupt
+    if (fileExists) {
+      const minSize = MIN_FILE_SIZES[asset.type] || 0;
+      if (minSize > 0) {
+        try {
+          const stat = fs.statSync(asset.file_path);
+          if (stat.size < minSize) {
+            // Corrupt/incomplete file — remove and invalidate
+            try { fs.unlinkSync(asset.file_path); } catch (_) {}
+            runSql(
+              `UPDATE project_assets SET status = 'pending', error_message = ? WHERE id = ?`,
+              [`Corrupt file (${stat.size} bytes < ${minSize} min) — removed for regeneration`, asset.id]
+            );
+            invalidated++;
+            continue;
+          }
+        } catch (_) { /* stat failed — let normal logic handle */ }
+      }
+    }
 
     if (fileExists && asset.status !== 'done' && asset.status !== 'archived' && asset.status !== 'skipped') {
       // File exists on disk but DB doesn't say done → recover

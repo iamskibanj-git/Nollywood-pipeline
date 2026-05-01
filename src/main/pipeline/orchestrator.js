@@ -3149,7 +3149,7 @@ class PipelineOrchestrator {
    *
    * Returns the generated grid's file path.
    */
-  async _generateCharacterGrid(character, portraitPath, outputPath, portraitCdnUrl = '') {
+  async _generateCharacterGrid(character, portraitPath, outputPath, portraitCdnUrl = '', { onGenClicked } = {}) {
     const prompt = `Create a professional character reference sheet for the attached portrait. Match the current appearance. Plain background. Arrange into four vertical columns, each representing one viewing angle. Each column contains a full-body view on top and a matching close-up portrait directly beneath it. Columns (left → right): Column 1: front view (full body character, front portrait below). Column 2: left profile (full body character facing left, with portrait facing left below). Column 3: right profile (full body character facing right, with portrait facing right below). Column 4: back view (full body character, back of head portrait below). Maintain even spacing and framing around the character portraits. Clean silhouette, consistent alignment, and clean panel separation. Photorealistic, DSLR, muted tones. No text. Single thin borders.`;
     return await this._withSessionRetry(
       () => this.automation.generateImage({
@@ -3158,6 +3158,7 @@ class PipelineOrchestrator {
         references: [portraitPath],
         aspectRatio: '16:9',
         referenceCdnUrl: portraitCdnUrl,
+        onGenClicked,
       }),
       `grid ${character.id}`
     );
@@ -3637,7 +3638,10 @@ class PipelineOrchestrator {
         try {
           db.markAssetGenerating(gridAsset.id, 'character-grid-generation');
           this.log(`[CINEMATIC] Generating grid for ${unitKey} (${char.description_label || '?'}${outfitId ? ' / ' + outfitId : ''})${attempt > 1 ? ` [retry ${attempt}/${MAX_GRID_ATTEMPTS}]` : ''}`);
-          const genMeta = await this._generateCharacterGrid(char, portraitFilePath, gridPath, portraitCdnUrl);
+          const genMeta = await this._generateCharacterGrid(char, portraitFilePath, gridPath, portraitCdnUrl, {
+            onGenClicked: (creditCost) => db.markAssetGenClicked(gridAsset.id, creditCost),
+          });
+          if (genMeta?.cdnUrl) db.markAssetCdnUrl(gridAsset.id, genMeta.cdnUrl);
 
           const dimsOk = await this._verifyGridDimensions(gridPath);
           if (!dimsOk) {
@@ -4422,9 +4426,11 @@ class PipelineOrchestrator {
               outputPath,
               references: [],
               aspectRatio: this.state.aspectRatio || '16:9',
+              onGenClicked: locAsset ? (creditCost) => db.markAssetGenClicked(locAsset.id, creditCost) : undefined,
             }),
             `location ${loc.name}`
           );
+          if (locAsset && genMeta?.cdnUrl) db.markAssetCdnUrl(locAsset.id, genMeta.cdnUrl);
           if (locAsset) db.markAssetDone(locAsset.id, outputPath, genMeta);
           locImagePaths[hint] = outputPath;
 
@@ -6676,6 +6682,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[SCENE-VERIFY] Verification failed (non-blocking): ${verifyErr.message}`, 'warn');
           }
 
+          if (sceneAsset && result?.cdnUrl) db.markAssetCdnUrl(sceneAsset.id, result.cdnUrl);
           const sceneMeta = { model: result.model, sourceGenId: result.sourceGenId };
           if (sceneVerifyResult && !sceneVerifyResult.skipped) {
             sceneMeta.vision_score = sceneVerifyResult.score;
