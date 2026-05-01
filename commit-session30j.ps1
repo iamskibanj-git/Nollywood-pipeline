@@ -15,6 +15,13 @@ CDN URL capture (re-download instead of re-generate on crash):
 - scene_image_cinematic: already had onGenClicked wired, added
   result.cdnUrl capture before markAssetDone
 
+CDN capture on error/timeout paths (orchestrator.js):
+- Grid outer catch: captures e.detectedCdnUrl before markAssetFailed
+- Location outer catch: captures e.detectedCdnUrl before markAssetFailed
+- Scene outer catch: captures e.detectedCdnUrl before markAssetFailed
+- Matches existing portrait + video pattern — timeout-but-completed
+  generations can now be re-downloaded on resume
+
 File integrity check in reconcileWithFilesystem (db.js):
 - MIN_FILE_SIZES map: images (portrait, grid, location, scene) > 1KB,
   videos (video_clip_cinematic) > 10KB

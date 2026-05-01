@@ -2838,3 +2838,8 @@ Phase 5: Resume + Recovery
   - Files below minimum size treated as corrupt — deleted from disk and status reset to pending
   - Runs before normal recovery/invalidation logic — catches partial downloads from crash mid-write
   - Prevents pipeline from treating a 0-byte or truncated file as "done"
+- CDN capture on error paths (timeout recovery):
+  - Grid outer catch (~line 3700): captures `e.detectedCdnUrl` before markAssetFailed
+  - Location outer catch (~line 4506): captures `e.detectedCdnUrl` before markAssetFailed
+  - Scene outer catch (~line 6696): captures `e.detectedCdnUrl` before markAssetFailed
+  - Pattern matches portrait + video stages which already had this — ensures timeout-but-completed generations can be re-downloaded on resume instead of re-generated

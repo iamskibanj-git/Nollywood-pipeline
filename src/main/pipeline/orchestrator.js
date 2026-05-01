@@ -3698,6 +3698,7 @@ class PipelineOrchestrator {
           gridMap[unitKey] = gridPath;
           break; // success
         } catch (e) {
+          if (e.detectedCdnUrl) db.markAssetCdnUrl(gridAsset.id, e.detectedCdnUrl);
           this.log(`[CINEMATIC] Grid gen failed for ${unitKey} (attempt ${attempt}/${MAX_GRID_ATTEMPTS}): ${e.message}`, 'warn');
           db.markAssetFailed(gridAsset.id, e.message);
           if (attempt < MAX_GRID_ATTEMPTS) {
@@ -4503,6 +4504,7 @@ class PipelineOrchestrator {
 
           break; // success
         } catch (e) {
+          if (locAsset && e.detectedCdnUrl) db.markAssetCdnUrl(locAsset.id, e.detectedCdnUrl);
           this.log(`[CINEMATIC] Location image gen failed for @${loc.name} (attempt ${attempt}/${MAX_LOC_ATTEMPTS}): ${e.message}`, 'warn');
           if (locAsset) db.markAssetFailed(locAsset.id, e.message);
           if (attempt < MAX_LOC_ATTEMPTS) {
@@ -6692,6 +6694,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           sceneSuccess = true;
           break; // Success — exit retry loop
         } catch (e) {
+          if (sceneAsset && e.detectedCdnUrl) db.markAssetCdnUrl(sceneAsset.id, e.detectedCdnUrl);
           this.log(`[CINEMATIC] Scene image ATTEMPT ${attempt}/${MAX_SCENE_RETRIES} failed Ch${chapter} Sc${scene.scene_number}: ${e.message}`, 'warn');
 
           // ── CASCADE DETECTION: if the error indicates browser death or user abort, stop retrying ──
