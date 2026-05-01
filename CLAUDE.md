@@ -2792,3 +2792,19 @@ Phase 5: Resume + Recovery
   - Video stage @reference resolution: outfit-aware via `characterOutfits` passed through allKlingClips
   - Bare character name auto-fix: outfit-aware resolution
 - Backward compatibility: scripts without `outfits[]` array continue working unchanged (single element per character)
+
+**Session 30h** — Vision verification — fully automated quality gates (Automation Roadmap Phase 2):
+- New file: `src/main/verify/imageVerifier.js` — ImageVerifier class
+  - `verifyPortrait(portraitPath, character, { passThreshold = 80 })` — checks gender, age, skin tone, build, hair, clothing, overall impression against character bible. Weighted scoring (gender/skin_tone 3x, overall 2x).
+  - `verifyGrid(gridPath, portraitPath, character, { passThreshold = 75 })` — multi-image comparison against approved portrait. Checks face consistency (3x weight), angle coverage, layout quality, clothing consistency, identity stability.
+  - `verifySceneImage(scenePath, opts, { passThreshold = 70 })` — checks character presence (3x weight), character identity, setting match, blocking positions, composition. Forced fail if character_presence < 50. Supports portrait reference images.
+  - Shared infrastructure: image loading, mime detection from magic bytes, webp→jpeg conversion via ffmpeg, Claude Vision API calls (single + multi-image), JSON parsing, configurable thresholds
+  - Single pass/fail verdict (no review tier). Returns `{ score, issues[], verdict, details }`. Fallback = 'pass' (non-blocking).
+- Orchestrator wiring — **eliminates human approval gates**:
+  - Portrait stage: vision verification after generation. Auto-reject + regenerate up to 4 retries. Human gate ONLY if retry cap exhausted (_portraitVerifyExhausted). Otherwise auto-proceeds to grid stage.
+  - Grid stage: vision verification after generation + dimension check. Auto-reject within 4-attempt retry loop (MAX_GRID_ATTEMPTS = 4). Auto-proceeds.
+  - Scene image stage: vision verification after generation. Auto-reject within 3-attempt retry loop. All scene approval gates removed — auto-proceeds to video stage.
+  - Resume re-gates: replaced with auto-proceed logging (scenes passed verification during generation).
+  - Manual fallback gate preserved: fires only when Cinema Studio automation itself fails (UI reliability issue, not quality).
+  - All verification is non-blocking on error (API errors, missing keys) — returns 'pass' so pipeline continues.
+- Thresholds (single pass/fail): Portrait ≥80, Grid ≥75, Scene ≥70. Retry caps: Portrait 4, Grid 4, Scene 3.

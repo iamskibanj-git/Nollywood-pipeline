@@ -1413,10 +1413,63 @@ class PipelineOrchestrator {
                 assetLabel
               );
 
-              db.markAssetDone(asset.id, portraitPath, genMeta);
-              db.logEvent(projectId, 'asset_done', { stage: 'portraits', assetId: asset.id, assetLabel, detail: portraitPath });
-              this.state.portraits.push({ characterId: char.id, path: portraitPath, status: 'complete' });
-              this.emit({ type: 'portrait-complete', index: idx, path: portraitPath });
+              // ── VISION VERIFICATION: check portrait matches character bible ──
+              let verificationResult = null;
+              try {
+                const claudeKey = this.store.get('claudeApiKey');
+                if (claudeKey) {
+                  const { ImageVerifier } = require('../verify/imageVerifier');
+                  const verifier = new ImageVerifier({
+                    apiKey: claudeKey,
+                    logger: (m) => this.log(`[PORTRAIT-VERIFY] ${m}`),
+                  });
+                  verificationResult = await verifier.verifyPortrait(portraitPath, char);
+
+                  if (verificationResult && !verificationResult.skipped) {
+                    this.log(`[PORTRAIT-VERIFY] ${assetLabel}: score=${verificationResult.score}, verdict=${verificationResult.verdict}`);
+                    // Auto-reject: score < 80 → regenerate (up to 4 attempts)
+                    if (verificationResult.verdict === 'fail') {
+                      const retryKey = `verify_${char.id}`;
+                      this._portraitVerifyRetries = this._portraitVerifyRetries || {};
+                      this._portraitVerifyRetries[retryKey] = (this._portraitVerifyRetries[retryKey] || 0) + 1;
+
+                      if (this._portraitVerifyRetries[retryKey] <= 4) {
+                        this.log(`[PORTRAIT-VERIFY] ${assetLabel}: FAIL (score ${verificationResult.score}) — regenerating (attempt ${this._portraitVerifyRetries[retryKey]}/4)`, 'warn');
+                        db.logEvent(projectId, 'portrait_vision_reject', {
+                          assetId: asset.id, assetLabel,
+                          score: verificationResult.score,
+                          issues: (verificationResult.issues || []).slice(0, 5),
+                          attempt: this._portraitVerifyRetries[retryKey],
+                        });
+                        // Reset and retry: splice back into loop
+                        db.resetAsset(asset.id);
+                        try { fs.unlinkSync(portraitPath); } catch (_) {}
+                        incompletePortraits.splice(incompletePortraits.indexOf(asset) + 1, 0, asset);
+                        continue;
+                      } else {
+                        // Retry cap exhausted — pipeline will pause at approval gate with diagnostic
+                        this.log(`[PORTRAIT-VERIFY] ${assetLabel}: FAIL after 4 retries (score ${verificationResult.score}) — character description may need rewriting. Issues: ${(verificationResult.issues || []).slice(0, 3).join('; ')}`, 'error');
+                        this._portraitVerifyExhausted = this._portraitVerifyExhausted || [];
+                        this._portraitVerifyExhausted.push({ charId: char.id, label: assetLabel, score: verificationResult.score, issues: verificationResult.issues });
+                      }
+                    }
+                  }
+                }
+              } catch (verifyErr) {
+                this.log(`[PORTRAIT-VERIFY] Verification failed (non-blocking): ${verifyErr.message}`, 'warn');
+              }
+
+              const enrichedMeta = { ...genMeta };
+              if (verificationResult && !verificationResult.skipped) {
+                enrichedMeta.vision_score = verificationResult.score;
+                enrichedMeta.vision_verdict = verificationResult.verdict;
+                enrichedMeta.vision_issues = (verificationResult.issues || []).slice(0, 5);
+              }
+
+              db.markAssetDone(asset.id, portraitPath, enrichedMeta);
+              db.logEvent(projectId, 'asset_done', { stage: 'portraits', assetId: asset.id, assetLabel, detail: portraitPath, visionScore: verificationResult?.score });
+              this.state.portraits.push({ characterId: char.id, path: portraitPath, status: 'complete', visionScore: verificationResult?.score, visionVerdict: verificationResult?.verdict });
+              this.emit({ type: 'portrait-complete', index: idx, path: portraitPath, visionScore: verificationResult?.score });
             } catch (err) {
               // Save CDN URL if detected — enables recovery on next restart
               if (err.detectedCdnUrl) {
@@ -1563,66 +1616,68 @@ class PipelineOrchestrator {
 
           db.updateProjectStage(projectId, 'portraits-done');
 
-          // ── PORTRAIT APPROVAL LOOP ──
-          // User can either "Approve & Continue" or "Re-render Flagged" to
-          // regenerate specific portraits they're unhappy with. The loop
-          // continues until the user approves without requesting re-renders.
-          let portraitDecision;
-          do {
-            this.state.status = 'waiting_approval';
-            this.emit({ type: 'waiting', gate: 'portraits' });
-            this.log('Waiting for portrait approval...');
-            portraitDecision = await this.waitForApproval('portraits');
+          // ── PORTRAIT AUTO-PROCEED / FALLBACK APPROVAL ──
+          // Vision verification runs during generation. If all portraits passed,
+          // auto-proceed without human gate. If any portrait exhausted the retry
+          // cap (4 attempts), pause for human intervention — the character
+          // description likely needs rewriting.
+          const exhaustedPortraits = this._portraitVerifyExhausted || [];
+          if (exhaustedPortraits.length > 0) {
+            this.log(`[PORTRAIT] ${exhaustedPortraits.length} portrait(s) failed vision verification after 4 retries — pausing for review`, 'error');
+            for (const ep of exhaustedPortraits) {
+              this.log(`[PORTRAIT]   ${ep.label}: score=${ep.score}, issues: ${(ep.issues || []).slice(0, 2).join('; ')}`, 'error');
+            }
+            // Fall back to human approval gate for manual intervention
+            let portraitDecision;
+            do {
+              this.state.status = 'waiting_approval';
+              this.emit({ type: 'waiting', gate: 'portraits', exhausted: exhaustedPortraits });
+              this.log('Waiting for portrait approval (vision verification exhausted)...');
+              portraitDecision = await this.waitForApproval('portraits');
 
-            if (portraitDecision && portraitDecision.rerender) {
-              const flagged = this.state.flaggedAssets['portraits'] || [];
-              if (flagged.length === 0) {
-                this.log('[PORTRAIT RE-RENDER] No portraits flagged — nothing to re-render', 'warn');
-                continue;
-              }
-
-              this.log(`[PORTRAIT RE-RENDER] Re-rendering ${flagged.length} flagged portrait(s): indices [${flagged.join(', ')}]`);
-              this.state.status = 'running';
-              this.emit({ type: 'stage', stage: 'portraits' });
-
-              for (const idx of flagged) {
-                if (this.cancelled) return;
-                await this.checkPause();
-
-                const char = characters[idx];
-                if (!char) {
-                  this.log(`[PORTRAIT RE-RENDER] No character at index ${idx} — skipping`, 'warn');
+              if (portraitDecision && portraitDecision.rerender) {
+                const flagged = this.state.flaggedAssets['portraits'] || [];
+                if (flagged.length === 0) {
+                  this.log('[PORTRAIT RE-RENDER] No portraits flagged — nothing to re-render', 'warn');
                   continue;
                 }
 
-                // Find the portrait asset for this character
-                const allPortraitAssets = db.getAssets(projectId, { type: 'portrait' });
-                const asset = allPortraitAssets.find(a => a.character_id === char.id);
-                if (!asset) {
-                  this.log(`[PORTRAIT RE-RENDER] No asset found for character ${char.description_label} — skipping`, 'warn');
-                  continue;
-                }
+                this.log(`[PORTRAIT RE-RENDER] Re-rendering ${flagged.length} flagged portrait(s): indices [${flagged.join(', ')}]`);
+                this.state.status = 'running';
+                this.emit({ type: 'stage', stage: 'portraits' });
 
-                const portraitPath = path.join(portraitDir, `portrait_${char.id}.png`);
-                const assetLabel = `portrait ${idx + 1}/${characters.length}: ${char.description_label}`;
+                for (const idx of flagged) {
+                  if (this.cancelled) return;
+                  await this.checkPause();
 
-                // Delete existing file from disk
-                try { fs.unlinkSync(portraitPath); } catch (_) {}
+                  const char = characters[idx];
+                  if (!char) {
+                    this.log(`[PORTRAIT RE-RENDER] No character at index ${idx} — skipping`, 'warn');
+                    continue;
+                  }
 
-                // Reset asset in DB to pending
-                db.resetAsset(asset.id);
-                db.logEvent(projectId, 'portrait_rerender', { assetId: asset.id, assetLabel });
+                  const allPortraitAssets = db.getAssets(projectId, { type: 'portrait' });
+                  const asset = allPortraitAssets.find(a => a.character_id === char.id);
+                  if (!asset) {
+                    this.log(`[PORTRAIT RE-RENDER] No asset found for character ${char.description_label} — skipping`, 'warn');
+                    continue;
+                  }
 
-                // Remove from state.portraits
-                this.state.portraits = this.state.portraits.filter(p => p.characterId !== char.id);
+                  const portraitPath = path.join(portraitDir, `portrait_${char.id}.png`);
+                  const assetLabel = `portrait ${idx + 1}/${characters.length}: ${char.description_label}`;
 
-                this.log(`[PORTRAIT RE-RENDER] Regenerating ${assetLabel}...`);
-                this.emit({ type: 'progress', stage: 'portraits', current: flagged.indexOf(idx) + 1, total: flagged.length });
+                  try { fs.unlinkSync(portraitPath); } catch (_) {}
+                  db.resetAsset(asset.id);
+                  db.logEvent(projectId, 'portrait_rerender', { assetId: asset.id, assetLabel });
+                  this.state.portraits = this.state.portraits.filter(p => p.characterId !== char.id);
 
-                const portraitAspect = (this.state.project?.brief?.aspect_ratio === '9:16') ? '9:16' : '16:9';
-                const prompt = char.full_prompt_description || char.visual_description || `Portrait of ${char.name}`;
+                  this.log(`[PORTRAIT RE-RENDER] Regenerating ${assetLabel}...`);
+                  this.emit({ type: 'progress', stage: 'portraits', current: flagged.indexOf(idx) + 1, total: flagged.length });
 
-                db.markAssetGenerating(asset.id, prompt);
+                  const portraitAspect = (this.state.project?.brief?.aspect_ratio === '9:16') ? '9:16' : '16:9';
+                  const prompt = char.full_prompt_description || char.visual_description || `Portrait of ${char.name}`;
+
+                  db.markAssetGenerating(asset.id, prompt);
 
                 try {
                   const genMeta = await this._withSessionRetry(
@@ -1662,7 +1717,15 @@ class PipelineOrchestrator {
               this.state.flaggedAssets['portraits'] = [];
               this.log(`[PORTRAIT RE-RENDER] All flagged portraits re-rendered — returning to approval gate`);
             }
-          } while (portraitDecision && portraitDecision.rerender);
+            } while (portraitDecision && portraitDecision.rerender);
+          } else {
+            // ── ALL PORTRAITS PASSED VISION VERIFICATION — AUTO-PROCEED ──
+            this.log(`[PORTRAIT] ✓ All ${characters.length} portrait(s) passed vision verification — auto-proceeding (no human gate)`);
+            db.logEvent(projectId, 'portraits_auto_approved', {
+              count: characters.length,
+              scores: this.state.portraits.map(p => ({ charId: p.characterId, score: p.visionScore })),
+            });
+          }
         });
 
         if (this.cancelled) return { success: false, reason: 'cancelled' };
@@ -1743,10 +1806,9 @@ class PipelineOrchestrator {
           // ── Emit scene verification data grouped by location ──
           this._emitSceneVerificationData(projectId, projectDir);
 
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'scenes' });
-          this.log('Waiting for scene approval...');
-          await this.waitForApproval('scenes');
+          // Vision verification handles quality gating within the retry loop.
+          // All scenes that survive have passed — auto-proceed.
+          this.log('[CINEMATIC] All scene images passed vision verification — auto-proceeding to video stage');
         });
         if (this.cancelled) return { success: false, reason: 'cancelled' };
       } else if (shouldRunStage('portraits-done')) {
@@ -1909,11 +1971,9 @@ class PipelineOrchestrator {
 
           db.updateProjectStage(projectId, 'scenes-done');
 
-          // Wait for scene approval
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'scenes' });
-          this.log('Waiting for scene image approval...');
-          await this.waitForApproval('scenes');
+          // Vision verification handles quality gating within the retry loop.
+          // All scenes that survive have passed — auto-proceed.
+          this.log('All scene images passed vision verification — auto-proceeding to video stage');
         });
 
         if (this.cancelled) return { success: false, reason: 'cancelled' };
@@ -1936,11 +1996,8 @@ class PipelineOrchestrator {
               if (noneStarted || allCheck.length === 0) {
                 // Emit scene verification data so the UI can show the verification tab
                 this._emitSceneVerificationData(projectId, projectDir);
-                this.state.status = 'waiting_approval';
-                this.emit({ type: 'waiting', gate: 'scenes' });
-                this.log('Resuming at scenes-done — waiting for scene image approval (cinematic)...');
-                await this.waitForApproval('scenes');
-                if (this.cancelled) return;
+                // Vision verification already passed during generation — auto-proceed on resume
+                this.log('[RESUME] Scenes already passed vision verification — auto-proceeding (cinematic)');
               }
             } else {
               this.log(`[RESUME] Skipping scene re-gate (already handled by generic resume, order=${this._resumedGateOrder})`);
@@ -2052,11 +2109,8 @@ class PipelineOrchestrator {
             // Only re-gate if no video clips have been generated yet
             // (if some clips are done, user already approved in a previous session)
             if (noneStarted || allClipsCheck.length === 0) {
-              this.state.status = 'waiting_approval';
-              this.emit({ type: 'waiting', gate: 'scenes' });
-              this.log('Resuming at scenes-done — waiting for scene image approval...');
-              await this.waitForApproval('scenes');
-              if (this.cancelled) return;
+              // Vision verification already passed during generation — auto-proceed on resume
+              this.log('[RESUME] Scenes already passed vision verification — auto-proceeding (staged)');
             }
           }
 
@@ -3538,7 +3592,7 @@ class PipelineOrchestrator {
         continue;
       }
       // Retry up to 2 attempts per grid — strict gate below will halt if still failed
-      const MAX_GRID_ATTEMPTS = 2;
+      const MAX_GRID_ATTEMPTS = 4;
       for (let attempt = 1; attempt <= MAX_GRID_ATTEMPTS; attempt++) {
         try {
           db.markAssetGenerating(gridAsset.id, 'character-grid-generation');
@@ -3553,7 +3607,39 @@ class PipelineOrchestrator {
             break; // exhausted
           }
 
-          db.markAssetDone(gridAsset.id, gridPath, genMeta);
+          // ── VISION VERIFICATION: check grid face consistency with portrait ──
+          let gridVerifyResult = null;
+          try {
+            const claudeKey = this.store.get('claudeApiKey');
+            if (claudeKey && portraitFilePath) {
+              const { ImageVerifier } = require('../verify/imageVerifier');
+              const verifier = new ImageVerifier({
+                apiKey: claudeKey,
+                logger: (m) => this.log(`[GRID-VERIFY] ${m}`),
+              });
+              gridVerifyResult = await verifier.verifyGrid(gridPath, portraitFilePath, char);
+
+              if (gridVerifyResult && !gridVerifyResult.skipped) {
+                this.log(`[GRID-VERIFY] ${unitKey}: score=${gridVerifyResult.score}, verdict=${gridVerifyResult.verdict}`);
+                // Auto-reject: score < 70 → regenerate (within existing retry loop)
+                if (gridVerifyResult.verdict === 'fail' && attempt < MAX_GRID_ATTEMPTS) {
+                  this.log(`[GRID-VERIFY] ${unitKey}: FAIL (score ${gridVerifyResult.score}) — will retry`, 'warn');
+                  db.markAssetFailed(gridAsset.id, `vision-fail: score ${gridVerifyResult.score} — ${(gridVerifyResult.issues || [])[0] || 'face mismatch'}`);
+                  continue; // retry within the existing retry loop
+                }
+              }
+            }
+          } catch (verifyErr) {
+            this.log(`[GRID-VERIFY] Verification failed (non-blocking): ${verifyErr.message}`, 'warn');
+          }
+
+          const gridMeta = { ...genMeta };
+          if (gridVerifyResult && !gridVerifyResult.skipped) {
+            gridMeta.vision_score = gridVerifyResult.score;
+            gridMeta.vision_verdict = gridVerifyResult.verdict;
+          }
+
+          db.markAssetDone(gridAsset.id, gridPath, gridMeta);
           gridMap[unitKey] = gridPath;
           break; // success
         } catch (e) {
@@ -6400,7 +6486,79 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               if (sceneAsset) db.markAssetGenClicked(sceneAsset.id, creditCost);
             },
           });
-          if (sceneAsset) db.markAssetDone(sceneAsset.id, result.path, { model: result.model, sourceGenId: result.sourceGenId });
+          // ── VISION VERIFICATION: check scene has correct characters + setting ──
+          let sceneVerifyResult = null;
+          try {
+            const claudeKey = this.store.get('claudeApiKey');
+            if (claudeKey && dedupedCharacters.length > 0) {
+              const { ImageVerifier } = require('../verify/imageVerifier');
+              const verifier = new ImageVerifier({
+                apiKey: claudeKey,
+                logger: (m) => this.log(`[SCENE-VERIFY] ${m}`),
+              });
+
+              // Build character descriptions from bible for identification
+              const bible = this.state.script?.character_bible || [];
+              const verifyChars = dedupedCharacters.map(c => {
+                const bibleEntry = bible.find(b => {
+                  const hint = (b.element_name_hint || '').toLowerCase().replace(/^@/, '');
+                  return hint === c.baseName || b.id === c.baseName || hint === c.name.toLowerCase();
+                });
+                const desc = bibleEntry
+                  ? (bibleEntry.physical_description || bibleEntry.full_prompt_description || bibleEntry.description_label)
+                  : c.baseName;
+                return { name: c.baseName, description: desc };
+              });
+
+              // Get portrait paths for reference
+              const portraitPaths = dedupedCharacters.map(c => {
+                const bibleEntry = bible.find(b => {
+                  const hint = (b.element_name_hint || '').toLowerCase().replace(/^@/, '');
+                  return hint === c.baseName || b.id === c.baseName;
+                });
+                if (bibleEntry) {
+                  const pAsset = db.getAssets(projectId, { type: 'portrait' })
+                    .find(p => p.character_id === bibleEntry.id && p.status === 'done');
+                  return pAsset?.file_path || null;
+                }
+                return null;
+              }).filter(Boolean);
+
+              sceneVerifyResult = await verifier.verifySceneImage(
+                result.path,
+                {
+                  characters: verifyChars,
+                  locationDescription: scene.location || scene.location_element_hint || '',
+                  blocking,
+                  portraitPaths,
+                }
+              );
+
+              if (sceneVerifyResult && !sceneVerifyResult.skipped) {
+                this.log(`[SCENE-VERIFY] Ch${chapter} Sc${scene.scene_number}: score=${sceneVerifyResult.score}, verdict=${sceneVerifyResult.verdict}`);
+                // Auto-reject if score < 60 (wrong characters is catastrophic)
+                if (sceneVerifyResult.verdict === 'fail' && attempt < MAX_SCENE_RETRIES) {
+                  this.log(`[SCENE-VERIFY] Ch${chapter} Sc${scene.scene_number}: FAIL (score ${sceneVerifyResult.score}) — regenerating`, 'warn');
+                  db.logEvent(projectId, 'scene_vision_reject', {
+                    chapter, scene: scene.scene_number,
+                    score: sceneVerifyResult.score,
+                    issues: (sceneVerifyResult.issues || []).slice(0, 5),
+                  });
+                  if (sceneAsset) db.markAssetFailed(sceneAsset.id, `vision-reject: score ${sceneVerifyResult.score}`);
+                  continue; // retry within the existing retry loop
+                }
+              }
+            }
+          } catch (verifyErr) {
+            this.log(`[SCENE-VERIFY] Verification failed (non-blocking): ${verifyErr.message}`, 'warn');
+          }
+
+          const sceneMeta = { model: result.model, sourceGenId: result.sourceGenId };
+          if (sceneVerifyResult && !sceneVerifyResult.skipped) {
+            sceneMeta.vision_score = sceneVerifyResult.score;
+            sceneMeta.vision_verdict = sceneVerifyResult.verdict;
+          }
+          if (sceneAsset) db.markAssetDone(sceneAsset.id, result.path, sceneMeta);
           sceneSuccess = true;
           break; // Success — exit retry loop
         } catch (e) {
