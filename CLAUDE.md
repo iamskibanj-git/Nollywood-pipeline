@@ -2592,3 +2592,185 @@ Currently `NO SUBTITLES.` is appended as a suffix by the orchestrator. If Kling 
 **G. Difficult-Word Replacement Dictionary**
 
 Pre-generation pass scanning dialogue for words Kling's TTS consistently mangles. Known problem words: "urgently"→"urgencently", "managed"→mangled, acronyms like "EFCC", verb→noun substitutions ("investigates"→"investigation"). Implementation: regex dictionary or lightweight LLM pass applied to dialogue lines before prompt injection. Build dictionary incrementally from production observations.
+
+### Multi-Outfit Character System (Planned — Not Yet Implemented)
+
+**Problem:** Characters currently have one visual identity across the entire video. In a 20-30 minute drama spanning days/locations, characters realistically change clothes — a corporate scene vs. a home scene vs. a night scene. One fixed element per character produces visual monotony and breaks believability.
+
+**Design Decision: Element = Character + Outfit**
+
+Each Higgsfield element represents a character in ONE outfit. A character with 3 outfits across the story gets 3 separate elements. The script writes a single `@character_name` reference; the orchestrator swaps it for the correct outfit-specific element at generation time.
+
+**Element Naming Format (recommended):**
+
+```
+@{baseName}_o{N}_{suffix}
+```
+
+- `{baseName}` = character's `element_name_hint` (e.g. `ada`, `mama_adaeze`)
+- `o{N}` = outfit number (o1, o2, o3...)
+- `{suffix}` = existing project suffix (e.g. `bpdr_0419`)
+- Full examples: `@ada_o1_bpdr_0419`, `@ada_o2_bpdr_0419`, `@mama_adaeze_o1_bpdr_0419`
+
+Outfit 1 is the default/primary outfit. If a character only has 1 outfit, the `_o1_` segment is still included for consistency.
+
+**Rationale for `_o{N}` over descriptive names:** Element names have practical UI length limits in Higgsfield (~30 chars before truncation). Descriptive names like `@ada_formal_business_bpdr_0419` exceed that. The outfit description lives in the script data — the element name only needs to be a unique, parseable key.
+
+**Script Engine Schema Changes:**
+
+Character bible gets an `outfits` array:
+```json
+{
+  "id": "ada_okonkwo",
+  "element_name_hint": "ada",
+  "description_label": "Ada Okonkwo",
+  "full_prompt_description": "...(physical features, face, build — EXCLUDES clothing)...",
+  "outfits": [
+    {
+      "outfit_id": "o1",
+      "description": "Corporate Lagos — navy fitted power suit, gold stud earrings, straight shoulder-length wig, nude heels",
+      "context": "Office scenes, corporate meetings, public appearances"
+    },
+    {
+      "outfit_id": "o2",
+      "description": "At home — coral ankara wrapper tied at the waist, matching head tie, bare feet, no makeup",
+      "context": "Home scenes, private moments, morning/evening"
+    }
+  ],
+  "speech_style": "sharp",
+  "speech_notes": "..."
+}
+```
+
+Each scene declares which outfit each character wears:
+```json
+{
+  "scene_number": 3,
+  "characters_present": ["ada", "emeka"],
+  "character_outfits": {
+    "ada": "o2",
+    "emeka": "o1"
+  }
+}
+```
+
+**Note:** `full_prompt_description` describes PHYSICAL FEATURES ONLY (face, build, skin tone, hair texture, distinguishing marks). Clothing moves to the `outfits` array. This separation ensures face identity is preserved across outfit changes.
+
+**Portrait Generation Flow:**
+
+1. **Master portrait (outfit 1):** Generated from `full_prompt_description` + `outfits[0].description`. This is the identity anchor — the face that all subsequent outfit portraits must match.
+2. **Outfit N portrait:** Generated using master portrait AS REFERENCE IMAGE + prompt: `"Same person as the reference. [full_prompt_description]. Now wearing: [outfits[N].description]. Same face, same build, different clothing. Photorealistic, studio lighting."` The reference image ensures face consistency across outfits.
+3. **Grid per outfit:** Each outfit portrait → its own 4-column reference grid (same `_generateCharacterGrid` logic, just operating on the outfit-specific portrait).
+4. **Element per outfit:** Each grid → its own Higgsfield element with name `@{baseName}_o{N}_{suffix}`.
+
+**Orchestrator @Reference Swap (generation-time):**
+
+The script and all prompt templates use bare `@character_name` references (e.g. `@ada`). At scene image generation time and video clip generation time, the orchestrator:
+
+1. Looks up the scene's `character_outfits` mapping
+2. Resolves `@ada` → `@ada_o2_bpdr_0419` based on the outfit declared for that scene
+3. Performs the replacement in: blocking prompts, scene image prompts, kling_clip multi_shot_prompt, CHARACTER POSITIONS preamble
+
+This swap happens in the same transform pipeline as the existing `cinematicElementNames` map resolution — it's an extension of the existing `@baseName → @suffixedName` replacement logic.
+
+**`cinematicElementNames` Map Extension:**
+
+Currently maps: `baseName → suffixedName`, `@baseName → suffixedName`
+
+New mapping adds per-scene resolution:
+```javascript
+// Existing (global lookup):
+cinematicElementNames['ada'] = 'ada_o1_bpdr_0419'; // default outfit
+
+// New (per-scene resolution in prompt transform):
+// getElementNameForScene(characterHint, scene) checks scene.character_outfits
+// and returns the correct outfit-specific element name
+```
+
+**Credit Impact:**
+
+Per additional outfit: +1 portrait gen (~1 credit via Nano Banana Pro) + 1 grid gen (~1 credit) + 1 element creation (free). For a typical 10-character drama:
+- Conservative (2 outfits for 3 main characters): +3 portraits + 3 grids = ~6 extra credits
+- Full (2-3 outfits for 6 characters): +8 portraits + 8 grids = ~16 extra credits
+
+**Implementation Plan (ordered by dependency):**
+
+```
+Phase 1: Script Schema + Scaffolding (no runtime changes)
+├── 1a. Update character_bible schema: split full_prompt_description into 
+│       physical_description (face/build) + outfits[] array
+├── 1b. Add character_outfits field to scene schema in outline + chapter prompts
+├── 1c. Update _buildCinematicScaffolding with outfit authoring rules
+├── 1d. Update _validateScriptCompleteness: warn if outfits[] missing or
+│       character_outfits not declared per scene
+└── 1e. Update outline prompt: instruct Claude to assign outfits based on
+        narrative context (time of day, location type, social setting)
+
+Phase 2: Portrait + Grid Generation (orchestrator.js)
+├── 2a. Modify portrait stage: generate master portrait from physical_description
+│       + outfit[0].description
+├── 2b. Add outfit portrait loop: for each additional outfit, generate portrait
+│       using master as reference image + outfit[N].description
+├── 2c. New asset type: 'portrait_outfit' (or extend existing portrait with
+│       outfit_id metadata)
+├── 2d. Modify grid stage: generate one grid per character/outfit pair
+├── 2e. New asset type: 'character_grid_outfit' (or extend existing grid with
+│       outfit_id metadata)
+└── 2f. Update insertExpectedAssets to create portrait + grid rows per outfit
+
+Phase 3: Element Creation (orchestrator.js)
+├── 3a. Element creation loop: one element per character/outfit with naming
+│       format @{baseName}_o{N}_{suffix}
+├── 3b. Update cinematicElementNames map to index by outfit:
+│       'ada_o1' → 'ada_o1_bpdr_0419', 'ada_o2' → 'ada_o2_bpdr_0419'
+├── 3c. Update 3-layer idempotency gate to handle N elements per character
+└── 3d. Update @ button verification to check all outfit elements
+
+Phase 4: Prompt Transform — @Reference Swap (orchestrator.js)
+├── 4a. Add getOutfitElementName(characterHint, scene) helper
+├── 4b. Update scene image prompt transform: resolve @character → @character_oN
+│       based on scene.character_outfits
+├── 4c. Update video clip prompt transform (same logic, kling_clip level)
+├── 4d. Update CHARACTER POSITIONS preamble injection to use outfit-specific refs
+└── 4e. Update vision blocking verification to recognise outfit-specific names
+
+Phase 5: Resume + Recovery
+├── 5a. Extend DB asset schema: outfit_id column on portrait + grid assets
+├── 5b. Update portrait resume/recovery to handle multiple portraits per character
+├── 5c. Update element resume: restore full outfit-aware cinematicElementNames map
+└── 5d. Update check-rejections.js utility to display outfit info
+```
+
+**Backward Compatibility:**
+
+- Scripts without `outfits[]` in character_bible continue to work as-is (single outfit, `_o1_` naming applied by default)
+- The `character_outfits` field on scenes is optional — if missing, outfit 1 is assumed for all characters
+- Migration: existing projects with elements named `@ada_bpdr_0419` (no `_o{N}_`) are treated as outfit 1
+
+**Open Questions:**
+
+1. How many outfits per character is practical? Recommend cap at 3 (one formal/public, one private/home, one occasion-specific). More than 3 increases credit cost and element count without proportional storytelling benefit.
+2. Should the outline or the chapter generator decide outfits? Recommend: outline declares available outfits in character_bible, chapter generator assigns per scene via `character_outfits`. The outline knows the full story; the chapter knows the specific scene context.
+3. Higgsfield element limit per project? Untested beyond 12 elements. A 10-character × 3 outfit drama = 30 elements. Need empirical testing.
+
+### Session 30d-f Summary (Bug Fixes + Story Treatment Layer)
+
+**Session 30d** — P1/P2 bug fixes from code review:
+- P1: Cinematic clip row duplication — adopt-orphan logic + stale cleanup
+- P1: Settings update using staged structure for cinematic — passes generatorMode
+- P2: Title dedup scoped to current research pool
+- P2: Verify redo cap throws instead of silently proceeding
+- recordProducedTitle uniqueness guard
+- getActiveProjectStatus cinematic asset type mapping
+- Script completeness hard-fail thresholds (chapters < 50%, clips < 50%)
+
+**Session 30e** — Story treatment layer (script-engine.js):
+- Outline enrichment: speech_style, speech_notes, relationship_arcs, scene_purpose, power_shift, emotional_temperature, power_holder_start/end
+- Chapter enrichment: emotional_state per scene, visual_beat per clip, proverbial/spiritual 12-word exception
+- Cinematic scaffolding: AI-safe visual storytelling section, emotional rhythm/breathing room, cultural dialogue cadence
+- Soft validation for new fields in _validateScriptCompleteness
+
+**Session 30f** — Research → script storytelling pipeline:
+- Per-video Gemini analysis: relationship_dynamics, emotional_pacing, power_dynamics, visual_storytelling_moments, speech_patterns
+- Cross-video pattern extraction: relationship_patterns, emotional_arc_patterns, power_shift_patterns, effective_visual_beats, dialogue_voice_patterns
+- buildScriptResearchContext wiring: all new patterns passed to outline + chapter generation

@@ -41,6 +41,12 @@ buildScriptResearchContext wiring (script-engine.js):
 - Passes effective visual beats
 - Passes dialogue voice patterns
 - All sanitized through sanitizePatternEntry to strip specifics
+
+CLAUDE.md knowledge base:
+- Multi-outfit character system: full design doc, element naming format
+  (@baseName_oN_suffix), schema changes, portrait/grid/element flow,
+  orchestrator @reference swap logic, 5-phase implementation plan
+- Session 30d-f summary documenting all changes this session
 "@
 
 git add -A
