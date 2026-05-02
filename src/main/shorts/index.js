@@ -153,7 +153,8 @@ class ShortsController {
       await this.uploader.close();
     }
     this.uploader = new FacebookUploader(this.uploaderOptions);
-    await this.uploader.launch();
+    this._emitProgress({ phase: 'upload', status: 'logging_in', message: 'Waiting for Facebook login + 2FA...' });
+    await this.uploader.launch(); // Waits for login + 2FA before returning
     this.log('[SHORTS] Upload session started — uploading all shorts');
 
     let uploaded = 0;

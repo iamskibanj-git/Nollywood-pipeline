@@ -46,6 +46,17 @@ Renderer:
 - Progress text changed from <p> to <pre> for multi-line clip labels
 - Assembly progress shows descriptive text per step with elapsed/ETA
 
+Facebook uploader — login wait + timing fixes:
+- _waitForLogin(): navigates to facebook.com on launch, polls for
+  logged-in indicators (profile, notifications, messenger icons)
+- If not logged in, waits up to 3 min for user to complete login + 2FA
+- Polls every 3s with elapsed/remaining time in console logs
+- Auto-proceeds once logged-in indicators detected
+- CLICK_TIMEOUT raised 15s -> 20s for slow FB DOM
+- POST_CLICK_SETTLE raised 3s -> 4s
+- POST_NAV_SETTLE raised 4s -> 6s
+- POST_SCHEDULE_CONFIRM raised 10s -> 15s
+
 CLAUDE.md: Pipeline progress stats documentation
 "@
 

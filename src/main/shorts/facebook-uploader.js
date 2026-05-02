@@ -34,12 +34,13 @@ const path = require('path');
 
 // ── Timeout defaults ──
 const NAV_TIMEOUT = 30000;
-const CLICK_TIMEOUT = 15000;
+const CLICK_TIMEOUT = 20000;
+const LOGIN_WAIT_TIMEOUT = 180000; // 3 minutes for login + 2FA
 const UPLOAD_TIMEOUT = 180000; // Video upload can take a while (3 min for large files)
 const POST_UPLOAD_SETTLE = 15000; // Wait for FB to process uploaded video
-const POST_CLICK_SETTLE = 3000;  // Standard settle after a UI click
-const POST_NAV_SETTLE = 4000;    // Settle after navigation/page load
-const POST_SCHEDULE_CONFIRM = 10000; // Wait for FB to confirm scheduled post
+const POST_CLICK_SETTLE = 4000;  // Standard settle after a UI click
+const POST_NAV_SETTLE = 6000;    // Settle after navigation/page load
+const POST_SCHEDULE_CONFIRM = 15000; // Wait for FB to confirm scheduled post
 const DESCRIPTION_TYPE_DELAY = 15; // ms between keystrokes (avoid FB's anti-bot)
 
 // ── Selectors (best-effort — refine during live testing) ──
@@ -120,6 +121,81 @@ class FacebookUploader {
     }
 
     this.log('[FB-UPLOAD] Browser launched');
+
+    // Navigate to Facebook and wait for the user to be logged in
+    await this._waitForLogin();
+  }
+
+  /**
+   * Navigate to Facebook and wait for the user to be fully logged in.
+   * If not already logged in, waits up to LOGIN_WAIT_TIMEOUT for the user
+   * to complete login + 2FA manually. Polls for a known logged-in indicator.
+   */
+  async _waitForLogin() {
+    this.log('[FB-UPLOAD] Navigating to Facebook — checking login status...');
+    await this.page.goto('https://www.facebook.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: NAV_TIMEOUT,
+    });
+    await this.page.waitForTimeout(3000);
+
+    // Check if already logged in — look for profile/avatar indicators
+    const isLoggedIn = async () => {
+      try {
+        // Multiple indicators of a logged-in Facebook session:
+        // 1. Profile link/avatar in the top nav
+        // 2. Notifications bell icon
+        // 3. Create post area on the feed
+        // 4. URL not being /login or containing login_attempt
+        const url = this.page.url();
+        if (url.includes('/login') || url.includes('login_attempt')) return false;
+
+        const loggedInIndicators = [
+          '[aria-label="Your profile"]',
+          '[aria-label="Account"]',
+          '[aria-label="Notifications"]',
+          '[aria-label="Messenger"]',
+          '[role="banner"] [role="navigation"]',
+          'div[role="navigation"] a[href*="/me"]',
+        ];
+        for (const sel of loggedInIndicators) {
+          const el = await this.page.$(sel);
+          if (el) return true;
+        }
+        return false;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    if (await isLoggedIn()) {
+      this.log('[FB-UPLOAD] Already logged in — proceeding');
+      return;
+    }
+
+    // Not logged in — wait for user to complete login + 2FA
+    this.log('[FB-UPLOAD] Not logged in — waiting for you to log in and complete 2FA...');
+    this.log('[FB-UPLOAD] You have 3 minutes. The upload will start automatically once logged in.');
+
+    const startTime = Date.now();
+    const POLL_INTERVAL = 3000;
+
+    while (Date.now() - startTime < LOGIN_WAIT_TIMEOUT) {
+      await this.page.waitForTimeout(POLL_INTERVAL);
+
+      if (await isLoggedIn()) {
+        this.log('[FB-UPLOAD] Login detected — proceeding with uploads');
+        // Extra settle time after login for page to fully load
+        await this.page.waitForTimeout(3000);
+        return;
+      }
+
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const remaining = Math.round((LOGIN_WAIT_TIMEOUT - (Date.now() - startTime)) / 1000);
+      this.log(`[FB-UPLOAD] Still waiting for login... (${elapsed}s elapsed, ${remaining}s remaining)`);
+    }
+
+    throw new Error('Login timeout — could not detect a logged-in Facebook session after 3 minutes. Please log in and try again.');
   }
 
   /**

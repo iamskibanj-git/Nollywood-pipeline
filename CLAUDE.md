@@ -3075,6 +3075,16 @@ Pipeline progress stats with ETA (all major stages):
   (shows clip labels/IDs below the counter).
 - `formatETA()` and `formatElapsed()` helpers for human-readable time strings.
 
+Facebook uploader — login wait + timing fixes:
+- `_waitForLogin()` added to `launch()`: navigates to facebook.com, polls for
+  logged-in indicators (profile avatar, notifications, messenger icons in nav).
+- If not already logged in, waits up to 3 minutes (LOGIN_WAIT_TIMEOUT) for user
+  to complete login + 2FA manually. Polls every 3s with elapsed/remaining logs.
+- Auto-proceeds once any logged-in indicator is detected.
+- Increased timeouts: CLICK_TIMEOUT 15→20s, POST_CLICK_SETTLE 3→4s,
+  POST_NAV_SETTLE 4→6s, POST_SCHEDULE_CONFIRM 10→15s.
+- Upload flow emits `logging_in` progress status before `launch()` returns.
+
 Aspect ratio threading (from session 30k, completed):
 - Orchestrator's `generateThumbnail()` and `generateCustomThumbnail()` now read
   `project.aspect_ratio` and pass it to ThumbnailGenerator. All 3 thumbnail stages
