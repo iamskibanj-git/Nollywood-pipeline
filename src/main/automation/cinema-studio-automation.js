@@ -2977,7 +2977,7 @@ class CinemaStudioAutomation {
   // SCENE IMAGE GENERATION
   // ═══════════════════════════════════════════════════════════
 
-  async generateSceneImage({ locationImagePath, locationElementName, characters, lighting, outputPath, aspectRatio = '16:9', projectName, onGenClicked = null }) {
+  async generateSceneImage({ locationImagePath, characters, lighting, outputPath, aspectRatio = '16:9', projectName, onGenClicked = null }) {
     if (!characters || characters.length === 0) {
       throw new Error('generateSceneImage: at least one character required');
     }

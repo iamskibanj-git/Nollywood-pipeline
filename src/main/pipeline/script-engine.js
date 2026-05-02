@@ -17,7 +17,7 @@ C1. BLOCKING COMPLETENESS (+5 pts max)
   - Deduct for blocking that says "@claire is in the scene" without frame position or posture
 
 C2. KLING CLIP COHERENCE (+5 pts max)
-  - Full: every scene has kling_clips covering ALL lines via line_refs; clip durations are 6-12s; no clip exceeds 2500 chars in its multi_shot_prompt; shot count per clip is EXACTLY 3 (hard rule). Total clip count within 20% of target (if target provided). No scene has more than 3 characters in characters_present.
+  - Full: every scene has kling_clips covering ALL lines via line_refs; clip duration_seconds is 15; no clip exceeds 2500 chars in its multi_shot_prompt; shot count per clip is EXACTLY 3 (hard rule); every shot has at least 1 dialogue line. Total clip count within 20% of target (if target provided). No scene has more than 3 characters in characters_present.
   - Half: minor issues (one clip slightly over, one missing line_ref, clip count 20-30% off target)
   - Zero: scenes have no kling_clips, or clips don't cover their lines, or clip count >30% off target
   - Deduct for any clip whose duration > 12s (Kling degradation zone)
@@ -968,7 +968,7 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
 
               newClips.push({
                 clip_id: newClipId,
-                duration_seconds: 10,
+                duration_seconds: 15,
                 line_refs: chunkRefs,
                 multi_shot_prompt: i === 0
                   ? clip.multi_shot_prompt  // first chunk keeps original prompt (best effort)
@@ -1612,7 +1612,7 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
    * In cinematic mode, Claude must additionally author:
    *   - scene.blocking: explicit frame positions (left/center/right) per character
    *   - scene.kling_clips: ordered array of Kling multi-shot prompts, each covering
-   *     1-3 dialogue lines within a 10-12s clip, exactly 3 shots per clip
+   *     1-3 dialogue lines within a 15s clip, exactly 3 shots per clip (each with dialogue)
    *   - scene.location_element_hint: a snake_case hint for the location element
    *     name (used downstream by Phase 3 location-generation stage)
    *   - scene.props_in_scene: array of prop element hints (Chekhov's gun scaffolding)
@@ -1653,14 +1653,14 @@ This project runs the CINEMATIC pipeline (Cinema Studio 2.0 scene images + Kling
 
 4. KLING_CLIPS — ordered array of multi-shot video generations that cover this scene's dialogue.
    - Each clip covers EXACTLY 3 dialogue lines. Not 1, not 2, not 4, not 5 — exactly 3. The ONLY exception is the LAST clip in a scene when the remaining lines don't divide evenly by 3 (e.g. 7 lines = clip of 3 + clip of 3 + clip of 1). Even then, the final clip must have at minimum 1 line and at maximum 3. NEVER pack 4+ lines into a single clip — this is a hard structural failure that causes dialogue to be dropped.
-   - Each clip has EXACTLY 3 shots, one dialogue line per shot. This is a hard rule — not 2, not 4, not 6. Kling 3.0 renders 4+ shots unreliably (skipped shots, misattributed dialogue). 3 shots is the proven sweet spot for 10-12s clips. If a clip has fewer than 3 lines (allowed only for the last clip in a scene), it still gets exactly 3 shots — distribute the dialogue across shots and use the extra shot(s) for reaction beats or silent continuation.
-   - Duration: 10-12 seconds per clip. Target 10s. Never exceed 12s.
+   - Each clip has EXACTLY 3 shots, each shot MUST have at least 1 line of dialogue. This is a hard rule — not 2, not 4, not 6. Kling 3.0 renders 4+ shots unreliably (skipped shots, misattributed dialogue). 3 shots is the proven sweet spot. If a clip has fewer than 3 lines (allowed only for the last clip in a scene), it still gets exactly 3 shots — distribute the dialogue across shots and use the extra shot(s) for reaction beats with brief dialogue continuation.
+   - Duration: Fixed at 15 seconds per clip. Let the video model decide timing allocation across shots — do NOT include timing brackets in shot headers (no "0-3s", "3-7s" etc.). The model paces shots naturally based on dialogue length and action.
    - Shots within a clip are continuous beats of the same scene (same location, same lighting) — not "cuts between different scenes."
    - Each clip's \`multi_shot_prompt\` must stay under 2500 characters.
    - Use Kling's dialogue syntax: [@character, speaking in a <tone> Nigerian English accent]: "<dialogue>"
    - NEVER use @element_name inside dialogue quotes — not in kling_clip multi_shot_prompt dialogue, not in scene line dialogue. Inside quotes, characters speak their HUMAN NAME (e.g. "Ngozi", "Emeka"), not their @tag. The @ prefix triggers Higgsfield element resolution and corrupts the spoken audio. Wrong: [@ngozi, speaking...]: "I told @emeka the truth." Right: [@ngozi, speaking...]: "I told Emeka the truth." This rule is violated constantly — double-check every dialogue string.
    - BLOCKING → SHOT 1 CONSISTENCY (MANDATORY): The FIRST kling_clip's Shot 1 MUST match \`scene.blocking\` exactly — same postures, same positions. Write blocking FIRST, then write kling_clips Shot 1 as a visual realization of that blocking.
-   - EVERY SHOT MUST HAVE DIALOGUE: The start frame image and a CHARACTER POSITIONS preamble already establish the scene composition for the video model. Do NOT waste Shot 1 as a silent establishing shot — include the first dialogue line in Shot 1. A 3-shot clip with 3 dialogue lines = 1 line per shot. Shot 1 can still set the camera (WIDE, MEDIUM, etc.) but MUST include dialogue. The video model only has ~10s — every shot must carry dialogue or the last lines get dropped.
+   - EVERY SHOT MUST HAVE DIALOGUE: The start frame image and a CHARACTER POSITIONS preamble already establish the scene composition for the video model. Do NOT waste Shot 1 as a silent establishing shot — include the first dialogue line in Shot 1. A 3-shot clip with 3 dialogue lines = 1 line per shot. Shot 1 can still set the camera (WIDE, MEDIUM, etc.) but MUST include dialogue. Every shot must carry dialogue — no silent shots allowed.
    - ONE CHARACTER PER SHOT (MANDATORY — Shots 2 and 3): Shot 1 is a WIDE establishing shot where all characters are visible — multiple @references are allowed in Shot 1 only. For Shot 2 and Shot 3, each shot direction must ONLY describe the character delivering the dialogue. Absolutely NO references to other characters — no @element names, no human names, no pronouns referring to others. The CHARACTER POSITIONS preamble already tells the model where everyone is. Any mention of another character in a shot direction confuses the video model and causes dialogue to be assigned to the wrong face. Wrong: "Shot 2: CLOSE-UP on @ada. She points at @emeka." Wrong: "Shot 2: CLOSE-UP on @ada. She points at Emeka." Right: "Shot 2: CLOSE-UP on @ada. She points sharply ahead, eyes blazing." The ONLY @reference in Shot 2 or Shot 3 is the speaker. Describe reactions, gestures, and emotions of the speaker alone.
    - Shot vocabulary: WIDE ESTABLISHING, WIDE, MEDIUM, CLOSE-UP, EXTREME CLOSE-UP, OVER-SHOULDER, REACTION, INSERT
    - Camera movement vocabulary: STATIC, SLOW PUSH-IN, SLOW PUSH-OUT, PAN LEFT, PAN RIGHT, TILT UP, TILT DOWN, HANDHELD, TRACKING
@@ -1712,9 +1712,9 @@ EXAMPLE scene excerpt with cinematic fields:
   "kling_clips": [
     {
       "clip_id": "ch3_sc3_c1",
-      "duration_seconds": 10,
+      "duration_seconds": 15,
       "line_refs": [1, 2, 3],
-      "multi_shot_prompt": "Inside the kitchen from the reference image at dusk, warm kerosene lamp light.\\n\\nShot 1 (0-3s): WIDE ESTABLISHING, static camera. @claire_obi frame-left near the wooden table, @richard_eze frame-right near the doorway.\\n[@claire_obi, speaking in a strained Nigerian English accent]: \\"I saw you at the market yesterday.\\"\\n\\nShot 2 (3-7s): CUT TO MEDIUM SHOT on @richard_eze, static. His jaw tightens.\\n[@richard_eze, speaking in a controlled Nigerian English accent]: \\"You saw nothing.\\"\\n\\nShot 3 (7-10s): CUT TO CLOSE-UP on @claire_obi, slow push-in. Her eyes narrow, fists clenching at her sides.\\n[@claire_obi, speaking in a sharp Nigerian English accent]: \\"Then why are you shaking?\\""
+      "multi_shot_prompt": "Inside the kitchen from the reference image at dusk, warm kerosene lamp light.\\n\\nShot 1 (WIDE ESTABLISHING, static): @claire_obi frame-left near the wooden table, @richard_eze frame-right near the doorway.\\n[@claire_obi, speaking in a strained Nigerian English accent]: \\"I saw you at the market yesterday.\\"\\n\\nShot 2 (MEDIUM, static): CUT TO @richard_eze. His jaw tightens.\\n[@richard_eze, speaking in a controlled Nigerian English accent]: \\"You saw nothing.\\"\\n\\nShot 3 (CU, slow push-in): CUT TO @claire_obi. Her eyes narrow, fists clenching at her sides.\\n[@claire_obi, speaking in a sharp Nigerian English accent]: \\"Then why are you shaking?\\""
     }
   ]
 }

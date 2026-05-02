@@ -69,9 +69,20 @@ contextBridge.exposeInMainWorld('api', {
   scoreSceneThumbnails: () => ipcRenderer.invoke('score-scene-thumbnails'),
   setThumbnailScene: (id) => ipcRenderer.invoke('set-thumbnail-scene', id),
   generateThumbnail: (options) => ipcRenderer.invoke('generate-thumbnail', options),
+  generateCustomThumbnail: (options) => ipcRenderer.invoke('generate-custom-thumbnail', options),
+  getPublishCharacters: () => ipcRenderer.invoke('get-publish-characters'),
   generateSEOMetadata: () => ipcRenderer.invoke('generate-seo-metadata'),
   updatePlatformMetadata: (platform, fields) => ipcRenderer.invoke('update-platform-metadata', platform, fields),
   approvePublish: () => ipcRenderer.invoke('approve-publish'),
+
+  // Shorts tab
+  getShortsProjects: () => ipcRenderer.invoke('shorts:getProjects'),
+  getShortsStatus: (projectId) => ipcRenderer.invoke('shorts:getStatus', projectId),
+  planShortsCalendar: (projectId, options) => ipcRenderer.invoke('shorts:planCalendar', projectId, options),
+  assembleShorts: (projectId) => ipcRenderer.invoke('shorts:assemble', projectId),
+  startShortsUpload: () => ipcRenderer.invoke('shorts:startUpload'),
+  uploadNextShort: (projectId) => ipcRenderer.invoke('shorts:uploadNext', projectId),
+  closeShortsUpload: () => ipcRenderer.invoke('shorts:closeUpload'),
 
   // API connectivity test
   testApiKeys: () => ipcRenderer.invoke('test-api-keys'),

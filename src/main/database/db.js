@@ -872,7 +872,7 @@ function reconcileWithFilesystem(projectId) {
   if (!db) return { recovered: 0, invalidated: 0 };
 
   const allAssets = queryAll(
-    `SELECT id, file_path, status, type FROM project_assets WHERE project_id = ?`,
+    `SELECT id, file_path, status, type, locked_at FROM project_assets WHERE project_id = ?`,
     [projectId]
   );
 
@@ -890,6 +890,15 @@ function reconcileWithFilesystem(projectId) {
 
   for (const asset of allAssets) {
     if (!asset.file_path) continue;
+
+    // Locked assets are NEVER reset (except video clips which are always redo-eligible)
+    if (asset.locked_at && asset.type !== 'video_clip_cinematic') {
+      const fileExists = fs.existsSync(asset.file_path);
+      if (!fileExists) {
+        console.error(`[DB] CRITICAL: Locked asset ${asset.id} (${asset.type}) file missing: ${asset.file_path} — requires manual intervention`);
+      }
+      continue; // skip all reconciliation for locked assets
+    }
 
     const fileExists = fs.existsSync(asset.file_path);
 
@@ -935,6 +944,88 @@ function reconcileWithFilesystem(projectId) {
     console.log(`[DB] Filesystem reconciliation: ${recovered} recovered from disk, ${invalidated} invalidated (file missing)`);
   }
   return { recovered, invalidated };
+}
+
+/**
+ * Lock an asset permanently. Locked assets are never reset by reconciliation.
+ * Called when vision verification passes threshold.
+ */
+function lockAsset(assetId) {
+  if (!db) return;
+  runSql(`UPDATE project_assets SET locked_at = datetime('now') WHERE id = ? AND locked_at IS NULL`, [assetId]);
+}
+
+/**
+ * Check if an asset is locked.
+ */
+function isAssetLocked(assetId) {
+  if (!db) return false;
+  const row = queryOne(`SELECT locked_at FROM project_assets WHERE id = ?`, [assetId]);
+  return !!(row && row.locked_at);
+}
+
+/**
+ * Lock all upstream dependencies of a certified asset.
+ * Propagates lock based on asset type and matching keys (character_id, chapter/scene).
+ *
+ * Lock rules:
+ *   grid certified → lock its portrait (same character_id)
+ *   scene_image certified → lock its location_image + all character grids + portraits used
+ *
+ * video_clip_cinematic is NEVER locked (always eligible for verify redo).
+ */
+function lockUpstream(assetId, projectId) {
+  if (!db) return;
+  const asset = queryOne(`SELECT * FROM project_assets WHERE id = ?`, [assetId]);
+  if (!asset) return;
+
+  // Lock self first
+  lockAsset(assetId);
+
+  if (asset.type === 'character_grid') {
+    // Lock the portrait for this character
+    const portraits = queryAll(
+      `SELECT id FROM project_assets WHERE project_id = ? AND type = 'portrait' AND character_id = ? AND locked_at IS NULL`,
+      [projectId, asset.character_id]
+    );
+    for (const p of portraits) lockAsset(p.id);
+
+  } else if (asset.type === 'scene_image_cinematic') {
+    // Lock the location_image used by this scene
+    // We need to find which location this scene uses — stored in prompt_used JSON
+    let locHint = null;
+    try {
+      const meta = asset.prompt_used ? JSON.parse(asset.prompt_used) : {};
+      locHint = meta.location_hint || null;
+    } catch (_) {}
+
+    if (locHint) {
+      // element_name on location_image rows is "{hint}_{initials}" or the cleaned hint.
+      // Match by LIKE prefix since the raw hint may not include the title initials suffix.
+      const cleanHint = locHint.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      const locAssets = queryAll(
+        `SELECT id FROM project_assets WHERE project_id = ? AND type = 'location_image' AND (element_name = ? OR element_name LIKE ? OR element_name = ?) AND locked_at IS NULL`,
+        [projectId, locHint, `${cleanHint}%`, cleanHint]
+      );
+      for (const la of locAssets) lockAsset(la.id);
+    }
+
+    // Lock all character grids + portraits for this project
+    // (scene certification means all character elements that composed it are valid)
+    const grids = queryAll(
+      `SELECT id, character_id FROM project_assets WHERE project_id = ? AND type = 'character_grid' AND locked_at IS NULL`,
+      [projectId]
+    );
+    for (const g of grids) {
+      lockAsset(g.id);
+      // Lock portraits for this character
+      const portraits = queryAll(
+        `SELECT id FROM project_assets WHERE project_id = ? AND type = 'portrait' AND character_id = ? AND locked_at IS NULL`,
+        [projectId, g.character_id]
+      );
+      for (const p of portraits) lockAsset(p.id);
+    }
+  }
 }
 
 /**
@@ -1585,6 +1676,10 @@ module.exports = {
   saveVisionResult,
   incrementVisionRetries,
   getVisionRetries,
+  // Asset locking (vision certification)
+  lockAsset,
+  isAssetLocked,
+  lockUpstream,
   // Pipeline events
   logEvent,
   getRecentEvents,
@@ -1598,4 +1693,8 @@ module.exports = {
   getProjectCreditUsage,
   // Migration
   migrateFromStore,
+  // Low-level query helpers (for modules that need custom SQL)
+  queryAll,
+  queryOne,
+  runSql,
 };

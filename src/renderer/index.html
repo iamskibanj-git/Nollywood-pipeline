@@ -166,6 +166,7 @@
     <div class="header">
       <h1>NOLLYWOOD AI PIPELINE</h1>
       <button class="header-btn" onclick="openStandalonePublish()" id="btn-publish-standalone" title="Open Publish for any completed project" style="border-color:var(--accent2);color:var(--accent2);">Publish</button>
+      <button class="header-btn" onclick="openShortsTab()" id="btn-shorts-standalone" title="Repurpose clips as Facebook Reels" style="border-color:#f59e0b;color:#f59e0b;">Shorts</button>
       <button class="header-btn" onclick="toggleSettings()">Settings</button>
     </div>
 
@@ -671,12 +672,31 @@
 
           <!-- THUMBNAIL TAB -->
           <div id="publish-tab-thumbnail" class="publish-tab-content">
+            <!-- Thumbnail Mode Toggle -->
+            <div style="display:flex;gap:8px;margin-bottom:14px;">
+              <button class="btn btn-ghost thumb-mode-btn active" data-mode="scene" onclick="switchThumbMode('scene')" style="font-size:11px;padding:5px 12px;">Scene-based</button>
+              <button class="btn btn-ghost thumb-mode-btn" data-mode="custom" onclick="switchThumbMode('custom')" style="font-size:11px;padding:5px 12px;">Custom Close-up</button>
+            </div>
+
             <div style="display:flex;gap:16px;flex-wrap:wrap;">
-              <!-- Scene candidates -->
+              <!-- Left panel: Scene candidates (scene mode) OR Character picker (custom mode) -->
               <div style="flex:0 0 200px;">
-                <h3 style="font-size:13px;margin-bottom:8px;">Scene Candidates</h3>
-                <div id="publish-scene-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
-                  <div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>
+                <!-- Scene-based: scene grid -->
+                <div id="publish-scene-panel">
+                  <h3 style="font-size:13px;margin-bottom:8px;">Scene Candidates</h3>
+                  <div id="publish-scene-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
+                    <div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>
+                  </div>
+                </div>
+                <!-- Custom: character + expression picker -->
+                <div id="publish-custom-panel" style="display:none;">
+                  <h3 style="font-size:13px;margin-bottom:8px;">Character</h3>
+                  <select id="publish-character-select" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px 8px;font-size:12px;margin-bottom:12px;">
+                    <option value="">Loading characters...</option>
+                  </select>
+                  <h3 style="font-size:13px;margin-bottom:8px;">Expression</h3>
+                  <input id="publish-expression-input" type="text" placeholder="e.g. fierce determined" style="width:100%;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px 8px;font-size:12px;margin-bottom:6px;">
+                  <div id="publish-expression-hint" style="font-size:10px;color:var(--muted);margin-bottom:8px;">Auto-suggested from script tone. Override if desired.</div>
                 </div>
               </div>
               <!-- Preview -->
@@ -738,6 +758,81 @@
           <!-- Project auto-closes once thumbnail is generated (final video + thumbnail both exist) -->
 
           </div><!-- /publish-tools -->
+        </div>
+      </div>
+
+      <!-- SHORTS TAB VIEW -->
+      <div id="view-shorts" style="display:none">
+        <div class="card">
+          <!-- Project selector bar -->
+          <div id="shorts-project-bar" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border);">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <select id="shorts-project-selector" onchange="switchShortsProject(this.value)" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;">
+                <option value="">Select a project...</option>
+              </select>
+              <button class="btn btn-ghost" onclick="exitShortsTab()" style="font-size:11px;padding:6px 10px;">Back</button>
+            </div>
+            <div id="shorts-project-status" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
+          </div>
+
+          <h2>Shorts — Facebook Reels</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Repurpose completed project clips into a 30-day Reel calendar.</p>
+
+          <!-- Shorts tools (hidden until project selected) -->
+          <div id="shorts-tools" style="display:none;">
+
+            <!-- Planning controls -->
+            <div id="shorts-plan-section" style="margin-bottom:20px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Plan Calendar</h3>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                <select id="shorts-mode" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px 8px;font-size:12px;">
+                  <option value="standalone_impact">Best clips first</option>
+                  <option value="chronological">Chronological order</option>
+                </select>
+                <label style="font-size:11px;color:var(--muted);">Calendar days:</label>
+                <input id="shorts-calendar-days" type="number" min="1" max="90" style="width:55px;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px;font-size:12px;">
+                <button class="btn btn-primary" onclick="planShortsCalendar()" id="btn-plan-shorts" style="font-size:12px;">Plan Calendar</button>
+                <button class="btn btn-primary" onclick="assembleShortsAndSEO()" id="btn-assemble-shorts" style="font-size:12px;background:#e67e22;border-color:#e67e22;" disabled>Assemble + SEO</button>
+              </div>
+              <div id="shorts-plan-progress" style="font-size:11px;color:var(--muted);"></div>
+              <!-- Stats bar (shown after planning) -->
+              <div id="shorts-stats" style="display:none;margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:6px;font-size:12px;gap:20px;flex-wrap:wrap;">
+              </div>
+            </div>
+
+            <!-- Calendar / status table -->
+            <div id="shorts-calendar-section" style="margin-bottom:20px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Schedule</h3>
+              <div id="shorts-calendar" style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">
+                <table style="width:100%;font-size:11px;border-collapse:collapse;">
+                  <thead>
+                    <tr style="background:var(--bg3);position:sticky;top:0;">
+                      <th style="padding:6px 8px;text-align:left;">#</th>
+                      <th style="padding:6px 8px;text-align:left;">Date</th>
+                      <th style="padding:6px 8px;text-align:left;">Time</th>
+                      <th style="padding:6px 8px;text-align:left;">Duration</th>
+                      <th style="padding:6px 8px;text-align:left;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="shorts-calendar-body">
+                    <tr><td colspan="5" style="padding:12px;color:var(--muted);text-align:center;">Plan a calendar to see schedule</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Upload controls -->
+            <div id="shorts-upload-section" style="border-top:1px solid var(--border);padding-top:16px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Upload to Facebook</h3>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <button class="btn btn-ghost" onclick="startUploadSession()" id="btn-start-upload" style="font-size:12px;">Launch Browser</button>
+                <button class="btn btn-primary" onclick="uploadNextShort()" id="btn-upload-next" style="font-size:12px;" disabled>Upload Next</button>
+                <button class="btn btn-ghost" onclick="closeUploadSession()" id="btn-close-upload" style="font-size:11px;" disabled>Close Browser</button>
+              </div>
+              <div id="shorts-upload-status" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
+            </div>
+
+          </div><!-- /shorts-tools -->
         </div>
       </div>
 
@@ -2381,14 +2476,89 @@
       }
     }
 
+    // ── Thumbnail Mode Toggle ──
+    let currentThumbMode = 'scene'; // 'scene' or 'custom'
+    let publishCharactersLoaded = false;
+
+    function switchThumbMode(mode) {
+      currentThumbMode = mode;
+      document.querySelectorAll('.thumb-mode-btn').forEach(b => b.classList.remove('active'));
+      document.querySelector(`.thumb-mode-btn[data-mode="${mode}"]`).classList.add('active');
+      document.getElementById('publish-scene-panel').style.display = mode === 'scene' ? 'block' : 'none';
+      document.getElementById('publish-custom-panel').style.display = mode === 'custom' ? 'block' : 'none';
+      if (mode === 'custom' && !publishCharactersLoaded) {
+        loadPublishCharacters();
+      }
+      if (mode === 'scene' && !publishScenesLoaded) {
+        loadSceneCandidates();
+      }
+    }
+
+    let publishScenesLoaded = false;
+
+    async function loadSceneCandidates() {
+      const grid = document.getElementById('publish-scene-grid');
+      grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>';
+      try {
+        const candidates = await window.api.scoreSceneThumbnails();
+        if (candidates && candidates.length > 0) {
+          renderSceneCandidates(candidates);
+          publishScenesLoaded = true;
+        } else {
+          grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">No scene images on disk</div>';
+        }
+      } catch (se) {
+        grid.innerHTML = `<div style="color:var(--red);font-size:11px;grid-column:span 2;">Scene scoring failed: ${se.message}</div>`;
+      }
+    }
+
+
+    async function loadPublishCharacters() {
+      try {
+        const data = await window.api.getPublishCharacters();
+        const select = document.getElementById('publish-character-select');
+        select.innerHTML = '';
+        if (data && data.characters && data.characters.length > 0) {
+          data.characters.forEach((c, i) => {
+            const opt = document.createElement('option');
+            opt.value = c.elementName || c.elementNameHint || c.name;
+            opt.textContent = `${c.name} (${c.dialogueCount} lines)`;
+            if (i === 0) opt.selected = true;
+            select.appendChild(opt);
+          });
+          publishCharactersLoaded = true;
+        } else {
+          select.innerHTML = '<option value="">No characters found</option>';
+        }
+        // Auto-suggest expression
+        if (data && data.suggestedExpression) {
+          document.getElementById('publish-expression-input').value = data.suggestedExpression;
+        }
+      } catch (e) {
+        addLog(`Failed to load characters: ${e.message}`, 'error');
+      }
+    }
+
     async function generatePublishThumbnail() {
       const placement = document.getElementById('publish-placement').value;
       const genre = document.getElementById('publish-genre').value;
       const btn = document.querySelector('[onclick="generatePublishThumbnail()"]');
       if (btn) { btn.disabled = true; btn.textContent = 'Launching browser...'; }
-      addLog('Generating thumbnail...', 'info');
+      addLog(`Generating ${currentThumbMode} thumbnail...`, 'info');
       try {
-        const result = await window.api.generateThumbnail({ placement, genre });
+        let result;
+        if (currentThumbMode === 'custom') {
+          const characterElementName = document.getElementById('publish-character-select').value;
+          const expression = document.getElementById('publish-expression-input').value || 'intense determined';
+          if (!characterElementName) {
+            addLog('Select a character first', 'warn');
+            if (btn) { btn.disabled = false; btn.textContent = 'Generate Thumbnail'; }
+            return;
+          }
+          result = await window.api.generateCustomThumbnail({ placement, genre, characterElementName, expression });
+        } else {
+          result = await window.api.generateThumbnail({ placement, genre });
+        }
         if (result && result.error === 'login-required') {
           addLog(result.message, 'warn');
           const preview = document.getElementById('publish-thumbnail-preview');
@@ -2506,11 +2676,7 @@
         projects.forEach(p => {
           const opt = document.createElement('option');
           opt.value = p.id;
-          const badges = [];
-          if (p.sceneCount) badges.push(`${p.sceneCount} scenes`);
-          if (p.published_at) badges.push('published');
-          else if (p.thumbnail_path) badges.push('has thumbnail');
-          opt.textContent = `${p.title || 'Untitled'}${badges.length ? ' (' + badges.join(', ') + ')' : ''}`;
+          opt.textContent = `${p.id} — ${p.title || 'Untitled'}`;
           selector.appendChild(opt);
         });
 
@@ -2571,18 +2737,9 @@
           }
         }
 
-        // Score scene candidates in the background
-        const grid = document.getElementById('publish-scene-grid');
-        grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>';
-        try {
-          const candidates = await window.api.scoreSceneThumbnails();
-          if (candidates && candidates.length > 0) {
-            renderSceneCandidates(candidates);
-          } else {
-            grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">No scene images on disk</div>';
-          }
-        } catch (se) {
-          grid.innerHTML = `<div style="color:var(--red);font-size:11px;grid-column:span 2;">Scene scoring failed: ${se.message}</div>`;
+        // Only score scene candidates if currently in scene-based mode
+        if (currentThumbMode === 'scene') {
+          loadSceneCandidates();
         }
       } catch (e) {
         statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
@@ -2612,12 +2769,263 @@
       document.getElementById('publish-thumbnail-preview').innerHTML = '<span style="color:var(--muted);font-size:12px;">Generate to preview</span>';
       // Reset scene grid
       document.getElementById('publish-scene-grid').innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">Select a project to score scenes</div>';
+      // Reset custom panel + scene scoring
+      publishCharactersLoaded = false;
+      publishScenesLoaded = false;
+      document.getElementById('publish-character-select').innerHTML = '<option value="">Loading characters...</option>';
+      document.getElementById('publish-expression-input').value = '';
+      // Reset mode to scene-based
+      switchThumbMode('scene');
       // Reset YouTube
       document.getElementById('publish-yt-loading').style.display = 'block';
       document.getElementById('publish-yt-fields').style.display = 'none';
       // Reset Facebook
       document.getElementById('publish-fb-loading').style.display = 'block';
       document.getElementById('publish-fb-fields').style.display = 'none';
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SHORTS TAB
+    // ═══════════════════════════════════════════════════════════════════════
+
+    let shortsProjectId = null;
+
+    async function openShortsTab() {
+      document.getElementById('stepper').style.display = 'none';
+      showView('view-shorts');
+      document.getElementById('shorts-tools').style.display = 'none';
+
+      // Default calendar days = remaining days in the month (starting from tomorrow)
+      const now = new Date();
+      const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+      const today = now.getDate();
+      const remaining = lastDayOfMonth - today; // tomorrow through end of month
+      document.getElementById('shorts-calendar-days').value = Math.max(remaining, 1);
+
+      const selector = document.getElementById('shorts-project-selector');
+      selector.innerHTML = '<option value="">Select a project...</option>';
+      const statusEl = document.getElementById('shorts-project-status');
+      statusEl.textContent = 'Loading projects...';
+
+      try {
+        const projects = await window.api.getShortsProjects();
+        if (!projects || projects.length === 0) {
+          statusEl.innerHTML = '<span style="color:var(--yellow);">No completed projects with scene images found.</span>';
+          return;
+        }
+        projects.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = `${p.id} — ${p.title || 'Untitled'}`;
+          selector.appendChild(opt);
+        });
+        statusEl.textContent = `${projects.length} project${projects.length > 1 ? 's' : ''} available`;
+
+        if (projects.length === 1) {
+          selector.value = projects[0].id;
+          await switchShortsProject(projects[0].id);
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+      }
+    }
+
+    function exitShortsTab() {
+      document.getElementById('stepper').style.display = 'flex';
+      showView('view-launcher');
+      shortsProjectId = null;
+    }
+
+    async function switchShortsProject(projectId) {
+      shortsProjectId = projectId || null;
+      if (!projectId) {
+        document.getElementById('shorts-tools').style.display = 'none';
+        return;
+      }
+      document.getElementById('shorts-tools').style.display = 'block';
+      // Load existing shorts status if any
+      await refreshShortsCalendar();
+    }
+
+    async function refreshShortsCalendar() {
+      if (!shortsProjectId) return;
+      try {
+        const data = await window.api.getShortsStatus(shortsProjectId);
+        renderShortsCalendar(data.shorts || []);
+        const statusEl = document.getElementById('shorts-project-status');
+        if (data.summary) {
+          const s = data.summary;
+          const planned = s.planned || 0;
+          statusEl.textContent = `${s.total} shorts — ${planned} planned, ${s.scheduled} scheduled, ${s.seo_done} ready, ${s.failed} failed`;
+          // Enable assemble if there are planned shorts
+          document.getElementById('btn-assemble-shorts').disabled = planned === 0;
+        }
+        // Enable upload button if there are shorts ready
+        document.getElementById('btn-upload-next').disabled = !(data.summary && data.summary.seo_done > 0);
+      } catch (e) {
+        // No shorts planned yet — that's fine
+        document.getElementById('shorts-project-status').textContent = 'No shorts planned yet. Click "Plan Calendar" to start.';
+      }
+    }
+
+    function renderShortsCalendar(shorts) {
+      const tbody = document.getElementById('shorts-calendar-body');
+      if (!shorts || shorts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;color:var(--muted);text-align:center;">No shorts planned</td></tr>';
+        return;
+      }
+      tbody.innerHTML = '';
+      shorts.forEach(s => {
+        const statusColors = { planned: '#888', pending: 'var(--muted)', assembled: 'var(--yellow)', seo_done: 'var(--accent)', scheduled: 'var(--green)', failed: 'var(--red)' };
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--border)';
+        tr.innerHTML = `
+          <td style="padding:5px 8px;">${s.short_number}</td>
+          <td style="padding:5px 8px;">${s.scheduled_date || '—'}</td>
+          <td style="padding:5px 8px;">${s.scheduled_time || '—'}</td>
+          <td style="padding:5px 8px;">${s.duration_seconds ? s.duration_seconds + 's' : '—'}</td>
+          <td style="padding:5px 8px;color:${statusColors[s.status] || 'var(--muted)'}">${s.status}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    let currentShortsPlan = null; // holds { calendar, stats } from last plan
+
+    async function planShortsCalendar() {
+      if (!shortsProjectId) return;
+      const btn = document.getElementById('btn-plan-shorts');
+      btn.disabled = true;
+      btn.textContent = 'Planning...';
+      const progressEl = document.getElementById('shorts-plan-progress');
+      progressEl.textContent = 'Probing clip durations and computing calendar...';
+
+      try {
+        const mode = document.getElementById('shorts-mode').value;
+        const calendarDays = parseInt(document.getElementById('shorts-calendar-days').value) || 30;
+        const result = await window.api.planShortsCalendar(shortsProjectId, { mode, calendarDays });
+        currentShortsPlan = result;
+        renderShortsStats(result.stats);
+        renderPlannedCalendar(result.calendar);
+        progressEl.innerHTML = `<span style="color:var(--green);">Planned ${result.stats.totalShorts} shorts. Review the calendar, then click Assemble + SEO.</span>`;
+        document.getElementById('btn-assemble-shorts').disabled = false;
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Plan Calendar';
+    }
+
+    function renderPlannedCalendar(calendar) {
+      const tbody = document.getElementById('shorts-calendar-body');
+      if (!calendar || calendar.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;color:var(--muted);text-align:center;">No shorts planned</td></tr>';
+        return;
+      }
+      tbody.innerHTML = '';
+      calendar.forEach(s => {
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--border)';
+        tr.innerHTML = `
+          <td style="padding:5px 8px;">${s.shortNumber}</td>
+          <td style="padding:5px 8px;">${s.scheduledDate}</td>
+          <td style="padding:5px 8px;">${s.scheduledTime}</td>
+          <td style="padding:5px 8px;">${s.duration ? s.duration.toFixed(1) + 's' : '—'}</td>
+          <td style="padding:5px 8px;color:var(--muted);">planned</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function assembleShortsAndSEO() {
+      if (!shortsProjectId) return;
+      const btn = document.getElementById('btn-assemble-shorts');
+      btn.disabled = true;
+      btn.textContent = 'Assembling...';
+      const progressEl = document.getElementById('shorts-plan-progress');
+
+      try {
+        progressEl.textContent = 'Assembling shorts with FFmpeg + generating SEO descriptions...';
+        const result = await window.api.assembleShorts(shortsProjectId);
+        progressEl.innerHTML = `<span style="color:var(--green);">Done! ${result.assembled}/${result.total} shorts assembled.</span>`;
+        currentShortsPlan = null;
+        await refreshShortsCalendar();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Assemble + SEO';
+    }
+
+    function renderShortsStats(stats) {
+      const el = document.getElementById('shorts-stats');
+      if (!stats) { el.style.display = 'none'; return; }
+      const totalMin = Math.floor(stats.totalDuration / 60);
+      const totalSec = stats.totalDuration % 60;
+      el.style.display = 'flex';
+      el.innerHTML = `
+        <span><strong style="color:var(--accent);">${stats.totalClips}</strong> clips</span>
+        <span><strong style="color:var(--accent);">${totalMin}m ${totalSec}s</strong> total</span>
+        <span><strong style="color:var(--accent);">${stats.totalShorts}</strong> shorts</span>
+        <span><strong style="color:var(--accent);">~${stats.targetPerShort}s</strong> each</span>
+        <span><strong style="color:var(--accent);">${stats.postsPerDay}</strong>/day</span>
+        <span><strong style="color:var(--green);">${stats.startDate}</strong> → <strong style="color:var(--green);">${stats.endDate}</strong></span>
+        <span><strong style="color:var(--accent);">${stats.calendarDays}</strong> days</span>
+      `;
+    }
+
+    async function startUploadSession() {
+      const btn = document.getElementById('btn-start-upload');
+      btn.disabled = true;
+      btn.textContent = 'Launching...';
+      const statusEl = document.getElementById('shorts-upload-status');
+
+      try {
+        await window.api.startShortsUpload();
+        statusEl.innerHTML = '<span style="color:var(--green);">Browser ready. Log into Facebook if needed, then click "Upload Next".</span>';
+        document.getElementById('btn-upload-next').disabled = false;
+        document.getElementById('btn-close-upload').disabled = false;
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Launch failed: ${e.message}</span>`;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Launch Browser';
+    }
+
+    async function uploadNextShort() {
+      if (!shortsProjectId) return;
+      const btn = document.getElementById('btn-upload-next');
+      btn.disabled = true;
+      btn.textContent = 'Uploading...';
+      const statusEl = document.getElementById('shorts-upload-status');
+
+      try {
+        const result = await window.api.uploadNextShort(shortsProjectId);
+        if (result.shortId === null) {
+          statusEl.innerHTML = '<span style="color:var(--green);">All shorts uploaded! Project marked as repurposed.</span>';
+          btn.disabled = true;
+        } else if (result.success) {
+          statusEl.innerHTML = `<span style="color:var(--green);">Short #${result.shortNumber} scheduled for ${result.scheduledDate}. ${result.remaining} remaining.</span>`;
+          btn.disabled = false;
+        } else {
+          statusEl.innerHTML = `<span style="color:var(--red);">Short #${result.shortNumber} failed: ${result.error}. ${result.remaining} remaining.</span>`;
+          btn.disabled = false;
+        }
+        await refreshShortsCalendar();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Upload error: ${e.message}</span>`;
+        btn.disabled = false;
+      }
+      btn.textContent = 'Upload Next';
+    }
+
+    async function closeUploadSession() {
+      try {
+        await window.api.closeShortsUpload();
+        document.getElementById('shorts-upload-status').textContent = 'Browser closed.';
+        document.getElementById('btn-upload-next').disabled = true;
+        document.getElementById('btn-close-upload').disabled = true;
+      } catch (_) {}
     }
 
     // ── Project Logs Viewer ──

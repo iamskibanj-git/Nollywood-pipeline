@@ -1094,7 +1094,10 @@ class HiggsfieldElements {
   }
 
   /**
-   * Create a location element. Uses an empty location image as reference.
+   * @deprecated Locations are NOT Higgsfield elements — they are reference images
+   * attached via the + button at scene-gen time. This method is retained for
+   * potential future use but is NOT called from the orchestrator pipeline.
+   * See orchestrator.js Phase 3 comment block for full rationale.
    */
   async createLocationElement({ name, locationImagePath, description }) {
     if (!locationImagePath) throw new Error('createLocationElement: locationImagePath required');

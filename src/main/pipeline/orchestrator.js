@@ -34,7 +34,7 @@ const AVG_CLIP_DURATION = 7;         // 6-8 seconds per clip, average 7 (staged/
 const CREDITS_PER_CLIP = 12;         // Veo 3.1 Lite: 12 credits per 8s clip (staged)
 
 // ── Cinematic (Kling) Duration Constants ──
-const KLING_CLIP_DURATION = 11;      // 10-12 seconds per Kling clip, average 11
+const KLING_CLIP_DURATION = 15;      // Fixed 15s per Kling clip — duration alone doesn't degrade lip sync
 const KLING_CREDITS_PER_CLIP = 11;   // ~11 credits per Kling multi-shot clip
 const KLING_CREDITS_PER_SCENE = 2;   // ~2 credits per scene image (Nano Banana Pro)
 const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
@@ -1487,6 +1487,9 @@ class PipelineOrchestrator {
                         this._portraitVerifyExhausted = this._portraitVerifyExhausted || [];
                         this._portraitVerifyExhausted.push({ charId: char.id, label: assetLabel, score: verificationResult.score, issues: verificationResult.issues });
                       }
+                    } else {
+                      // Vision pass — lock this portrait permanently
+                      db.lockAsset(asset.id);
                     }
                   }
                 }
@@ -1782,7 +1785,7 @@ class PipelineOrchestrator {
       // immediately on resume.
       if (shouldRunStage('portraits-done') && (this.state.generatorMode || 'staged') === 'cinematic') {
         await this.runStage('elements-setup', async () => {
-          this.log('[CINEMATIC] Element setup stage starting — character grids + character + location element creation');
+          this.log('[CINEMATIC] Element setup stage starting — character grids + character elements + location images');
           await this._runCinematicElementSetup(projectId, projectDir);
 
           // ── ELEMENT APPROVAL GATE ──
@@ -2801,6 +2804,11 @@ class PipelineOrchestrator {
       });
       this.log('Story recorded for title dedup — pattern library remains available for next story');
 
+      // Mark project as completed — assembly is the end of production.
+      // Everything after (publish, shorts) is distribution.
+      db.completeProject(projectId);
+      this.log('Project marked as completed (assembly done)');
+
       // ── Stage 6: Publish (thumbnail + SEO metadata) ──
       if (shouldRunStage('assembled')) {
         await this.runStage('publish', async () => {
@@ -2869,9 +2877,6 @@ class PipelineOrchestrator {
           this.log('Publish stage complete — output package ready');
         });
       }
-
-      // Mark project as completed in DB
-      db.completeProject(projectId);
 
       const cacheStatus = this.getResearchCacheStatus();
 
@@ -3681,6 +3686,9 @@ class PipelineOrchestrator {
                   this.log(`[GRID-VERIFY] ${unitKey}: FAIL (score ${gridVerifyResult.score}) — will retry`, 'warn');
                   db.markAssetFailed(gridAsset.id, `vision-fail: score ${gridVerifyResult.score} — ${(gridVerifyResult.issues || [])[0] || 'face mismatch'}`);
                   continue; // retry within the existing retry loop
+                } else if (gridVerifyResult.verdict === 'pass') {
+                  // Vision pass — lock grid + upstream portrait
+                  db.lockUpstream(gridAsset.id, projectId);
                 }
               }
             }
@@ -4291,7 +4299,7 @@ class PipelineOrchestrator {
   }
 
   /**
-   * Phase 3 stage: location image generation + location element creation.
+   * Phase 3 stage: location image generation.
    * Walks the script, collects unique location_element_hint values, generates
    * an empty location image per hint via Nano Banana Pro (no characters in
    * the image — characters are composited in by Cinema Studio 3.5 in the
@@ -4482,6 +4490,9 @@ class PipelineOrchestrator {
                 try { fs.unlinkSync(outputPath); } catch (_) {}
                 await new Promise(r => setTimeout(r, 3000));
                 continue; // retry
+              } else if (locVerification.verdict === 'pass') {
+                // Vision pass — lock location permanently
+                db.lockAsset(locAsset.id);
               }
               // Pass or final attempt — proceed
             } catch (verifyErr) {
@@ -4533,10 +4544,7 @@ class PipelineOrchestrator {
     this.state.cinematicLocations = {};
     for (const [hint, loc] of locationMap.entries()) {
       this.state.cinematicLocations[hint] = {
-        // elementName retained on the object for backwards-compat with any
-        // logging / display code that reads it, but it's NOT a Higgsfield
-        // element name — it's just a stable identifier derived from the hint.
-        elementName: loc.name,
+        name: loc.name,
         imagePath: locImagePaths[hint] || null,
       };
     }
@@ -4941,7 +4949,64 @@ class PipelineOrchestrator {
       return `${prefix}${pos}`;
     });
 
-    let preamble = `${preamblePrefix}${blockingLines.join('; ')}${preambleSuffix}`;
+    // ── EYELINE DIRECTION DERIVATION (180-degree rule at shot level) ──
+    // From each character's spatial position, derive which direction they
+    // should gaze in close-up shots. This enforces the 180-degree rule at
+    // the individual shot level — not just the establishing shot.
+    let eyelineSection = '';
+    if (uniqueChars.length >= 2) {
+      // Parse horizontal position for each character: left / center / right
+      const horizontalPositions = uniqueChars.map(c => {
+        const pos = (c.position || '').toLowerCase();
+        let hPos = 'center'; // default
+        if (/\bleft\b/.test(pos) && !/\bright\b/.test(pos)) hPos = 'left';
+        else if (/\bright\b/.test(pos) && !/\bleft\b/.test(pos)) hPos = 'right';
+        else if (/\bcenter\b|\bcentre\b|\bmiddle\b/.test(pos)) hPos = 'center';
+        // Fallback: parse fractional positions if present (e.g. "occupies 30% from left")
+        const pctMatch = pos.match(/(\d+)%\s*(?:from\s+)?left/);
+        if (pctMatch) {
+          const pct = parseInt(pctMatch[1], 10);
+          if (pct < 40) hPos = 'left';
+          else if (pct > 60) hPos = 'right';
+          else hPos = 'center';
+        }
+        return { name: c.name, hPos };
+      });
+
+      // Build eyeline directions: each character gazes TOWARD their scene partner(s)
+      const eyelineEntries = [];
+      for (const charPos of horizontalPositions) {
+        // Find the "center of mass" of other characters relative to this one
+        const others = horizontalPositions.filter(o => o.name !== charPos.name);
+        if (others.length === 0) continue;
+
+        const posToNum = { left: 0, center: 1, right: 2 };
+        const myNum = posToNum[charPos.hPos];
+        const avgOther = others.reduce((sum, o) => sum + posToNum[o.hPos], 0) / others.length;
+
+        let gazeDir = null;
+        if (avgOther > myNum + 0.3) gazeDir = 'RIGHT';
+        else if (avgOther < myNum - 0.3) gazeDir = 'LEFT';
+        // If center vs center or negligible difference, derive from first other char
+        if (!gazeDir && others.length > 0) {
+          if (posToNum[others[0].hPos] > myNum) gazeDir = 'RIGHT';
+          else if (posToNum[others[0].hPos] < myNum) gazeDir = 'LEFT';
+        }
+
+        if (gazeDir) {
+          eyelineEntries.push(`@${charPos.name} gazes ${gazeDir}`);
+        }
+      }
+
+      if (eyelineEntries.length > 0) {
+        eyelineSection = `\nEYELINES (180° rule — gaze direction for close-ups): ${eyelineEntries.join('; ')}.\n`;
+        this.log(`[VISION-BLOCKING] Eyeline directions: ${eyelineEntries.join('; ')}`);
+      }
+    }
+
+    let preamble = eyelineSection
+      ? `${preamblePrefix}${blockingLines.join('; ')}.${eyelineSection}\n`
+      : `${preamblePrefix}${blockingLines.join('; ')}${preambleSuffix}`;
 
     // Final budget check: if preamble + prompt > limit, trim preamble further
     const totalLen = preamble.length + rewritten.length;
@@ -4966,7 +5031,9 @@ class PipelineOrchestrator {
         }
         return `${prefix}${pos}`;
       });
-      preamble = `${preamblePrefix}${tighterLines.join('; ')}${preambleSuffix}`;
+      preamble = eyelineSection
+        ? `${preamblePrefix}${tighterLines.join('; ')}.${eyelineSection}\n`
+        : `${preamblePrefix}${tighterLines.join('; ')}${preambleSuffix}`;
     }
 
     // Strip the original "CHARACTER POSITIONS:" line from the prompt body.
@@ -5529,6 +5596,18 @@ class PipelineOrchestrator {
       const sceneContext = scene.blocking?.notes || '';
       const orientation = aspectRatio === '9:16' ? 'vertical/portrait (9:16 — tall frame, characters stacked in depth)' : 'horizontal/landscape (16:9 — wide frame, characters spread laterally)';
 
+      // Extract dialogue context from kling_clips to inform blocking
+      let dialogueContext = '';
+      if (scene.kling_clips && scene.kling_clips.length > 0) {
+        const dialogueLines = scene.kling_clips
+          .map(clip => (clip.dialogue || '').trim())
+          .filter(Boolean)
+          .slice(0, 4); // max 4 clips worth of dialogue
+        if (dialogueLines.length > 0) {
+          dialogueContext = `\nDIALOGUE IN THIS SCENE:\n${dialogueLines.join('\n')}\nUse the dialogue to inform spatial relationships — the speaker should face/orient toward the listener, eyelines should cross naturally.`;
+        }
+      }
+
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey });
 
@@ -5586,7 +5665,7 @@ CONTINUITY REFERENCE: The second image is the PREVIOUS SCENE at this same locati
 LOCATION IMAGE: This is the reference location where the scene takes place.
 FRAME ORIENTATION: ${orientation}
 CHARACTERS IN SCENE: ${charList} (${charCount} character${charCount > 1 ? 's' : ''})
-SCENE MOOD: ${sceneContext || 'dramatic confrontation'}${continuityClause}
+SCENE MOOD: ${sceneContext || 'dramatic confrontation'}${dialogueContext}${continuityClause}
 
 YOUR TASK:
 1. Study the location image. Identify spatial anchors: furniture, doorways, counters, stalls, signage, props, depth planes, natural framing elements.
@@ -5603,8 +5682,9 @@ RULES:
 - Characters must NEVER look at or acknowledge the camera. They are in a candid, natural moment — interacting with each other, looking at objects, working, reacting. Describe their gaze direction explicitly (e.g., "eyes on the grill", "glancing sideways at X", "looking down at her hands").
 - Keep each character's blocking to ONE concise sentence.
 - The blocking will be used as text in an AI image generation prompt, so be descriptive but compact.
+- 180-DEGREE RULE: Imagine an invisible axis (the "line of action") between characters in conversation. The camera stays on ONE side of this axis. This means: if Character A is on the LEFT and Character B is on the RIGHT, they MUST maintain those sides for ALL scenes at this location. Never cross the line — it disorients the viewer.${charCount > 1 ? ' Place the speaker facing the listener across this axis.' : ''}
 - VISUAL CONSISTENCY: All scenes share the same location. Maintain consistent camera distance (medium-wide), consistent naturalistic lighting, and consistent documentary tone across scenes. Avoid dramatic close-ups or posed compositions.
-- LOCATION FIDELITY: The generated image must match the reference location EXACTLY. Do NOT introduce props, furniture, objects, or architectural details that are not visible in the reference image. Only reference things you can actually see in the photo.${previousSceneImagePath ? '\n- SPATIAL CONTINUITY: Characters who appeared in the previous scene at this location MUST stay on the same side / in the same position unless the scene describes them moving. If a character was seated behind the desk on the right, they must remain there.' : ''}
+- LOCATION FIDELITY: The generated image must match the reference location EXACTLY. Do NOT introduce props, furniture, objects, or architectural details that are not visible in the reference image. Only reference things you can actually see in the photo.${previousSceneImagePath ? '\n- SPATIAL CONTINUITY: Characters who appeared in the previous scene at this location MUST stay on the same side / in the same position unless the scene describes them moving. If a character was seated behind the desk on the right, they must remain there. This enforces the 180-degree rule across cuts.' : ''}
 
 OUTPUT FORMAT (JSON array, one object per character, same order as input):
 [
@@ -6594,7 +6674,6 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           if (sceneAsset) db.markAssetGenerating(sceneAsset.id, visionBlockingJson);
           const result = await cinema.generateSceneImage({
             locationImagePath: locInfo.imagePath,
-            locationElementName: locInfo.elementName,
             characters: refinedCharacters,
             lighting: blocking.notes || '',
             outputPath,
@@ -6677,6 +6756,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                   });
                   if (sceneAsset) db.markAssetFailed(sceneAsset.id, `vision-reject: score ${sceneVerifyResult.score}`);
                   continue; // retry within the existing retry loop
+                } else if (sceneVerifyResult.verdict === 'pass' && sceneAsset) {
+                  // Vision pass — lock scene + all upstream (location, grids, portraits)
+                  db.lockUpstream(sceneAsset.id, projectId);
                 }
               }
             }
@@ -6901,7 +6983,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    * Phase 4 stage: Kling 3.0 multi-shot video generation.
    *
    * Iterates the script's scene.kling_clips arrays. Each clip is one Kling
-   * generation containing 2-4 dialogue lines packed into a single 10-12s
+   * generation containing 1-3 dialogue lines packed into a single 15s
    * multi-shot output with native lip-synced audio.
    *
    * Start frame for each clip = the scene's scene_image_cinematic asset
@@ -7376,6 +7458,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // blocking that references actual objects in the location photo. We rewrite the
       // prompt's blocking to match the start frame so the animation is consistent.
       let finalMultiShotPrompt = clipDef.multi_shot_prompt || '';
+
+      // ── Strip legacy timing brackets from shot headers ──
+      // Old scripts have "Shot 1 (0-3s):" or "Shot 2 (CU, push-in, 3-7s):" format.
+      // Remove timing brackets so Kling decides pacing naturally within 15s.
+      finalMultiShotPrompt = finalMultiShotPrompt.replace(
+        /(\bShot\s*\d+\s*\([^)]*?),?\s*\d+-\d+s([^)]*\))/gi,
+        '$1$2'
+      ).replace(
+        /(\bShot\s*\d+)\s*\(\s*\d+-\d+s\s*\)/gi,
+        '$1'
+      );
+
       if (visionRefinedChars && visionRefinedChars.length > 0) {
         finalMultiShotPrompt = this._injectVisionBlocking(finalMultiShotPrompt, visionRefinedChars);
         this.log(`[CINEMATIC] ${clipId}: injected vision-refined blocking into multi_shot_prompt`);
@@ -7653,32 +7747,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       }
 
-      // ── SMART DURATION — ensure dialogue fits ──
-      // Count dialogue words from the prompt and calculate minimum needed time.
-      // Formula: (words / 2.5) + (shotTransitions * 0.5) + 1.0s buffer
-      // If the calculated duration exceeds the script's requested duration,
-      // bump up. Kling supports 3-15s; cap at 15.
-      const effectiveDuration = (() => {
-        const scriptDur = clipDef.duration_seconds || 10;
-        // Extract dialogue words: text inside quotes after speaker tags []: "..."
-        const dialogueMatches = finalMultiShotPrompt.match(/\]:\s*"([^"]*)"/g) || [];
-        const allDialogueText = dialogueMatches.map(m => {
-          const q = m.match(/"([^"]*)"/);
-          return q ? q[1] : '';
-        }).join(' ');
-        const wordCount = allDialogueText.split(/\s+/).filter(w => w.length > 0).length;
-        // Count shot transitions (number of shots - 1)
-        const shotCount = (finalMultiShotPrompt.match(/Shot \d+/gi) || []).length;
-        const transitions = Math.max(0, shotCount - 1);
-        // Observed speaking rate: ~2.5 words/sec for Kling's accented delivery
-        // (was 2.0 — too conservative, caused 3-4s dead air where Kling fills with phantom animations)
-        const minDuration = Math.ceil((wordCount / 2.5) + (transitions * 0.5) + 1.0);
-        const effective = Math.min(15, Math.max(5, Math.max(scriptDur, minDuration)));
-        if (effective > scriptDur) {
-          this.log(`[DURATION] ${clipId}: script says ${scriptDur}s but dialogue needs ~${minDuration}s (${wordCount} words, ${shotCount} shots) → bumped to ${effective}s`);
-        }
-        return effective;
-      })();
+      // ── FIXED DURATION — 15s for all Kling clips ──
+      // Duration alone doesn't degrade lip sync. 15s gives Kling maximum room
+      // to pace 3 shots naturally without cramming dialogue. The video model
+      // decides timing allocation across shots.
+      const effectiveDuration = KLING_CLIP_DURATION; // 15s
 
       const outputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
 
@@ -8833,6 +8906,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         const validated = {};
         for (const [hint, loc] of Object.entries(settings._cinematicLocations)) {
           if (loc.imagePath && fs.existsSync(loc.imagePath)) {
+            // Normalize legacy elementName → name
+            if (loc.elementName && !loc.name) loc.name = loc.elementName;
+            delete loc.elementName;
             validated[hint] = loc;
           } else {
             this.log(`[RESTORE] Location ${hint}: file missing on disk (${loc.imagePath}) — will regenerate`);
@@ -8875,7 +8951,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const locImageMap = {}; // key: location_hint → file_path
     const locAssets = db.getAssets(projectId, { type: 'location_image', status: 'done' });
     for (const la of locAssets) {
-      // element_name stores the location hint for location_image assets (set via setAssetElementName)
+      // element_name column stores the location hint/identifier for location_image assets
+      // (repurposed — locations are NOT Higgsfield elements, just reference images)
       const hint = (la.element_name || '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
       if (hint && la.file_path && fs.existsSync(la.file_path)) {
         locImageMap[hint] = la.file_path;
@@ -9129,7 +9206,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             }
           } catch (_) {}
         }
-        // Derive a meaningful hint from element_name or file path basename
+        // Derive a meaningful hint from element_name (location identifier) or file path basename
         // (file paths like .../locations/rooftop_party.png → "rooftop_party")
         const locHint = asset.element_name
           || (asset.file_path ? path.basename(asset.file_path, path.extname(asset.file_path)) : null)
@@ -10105,7 +10182,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
     }
 
-    this.log(`[PUBLISH] Generating thumbnail (genre: ${genre}, placement: ${options.placement || 'lower-third'})...`);
+    const aspectRatio = project.aspect_ratio || '16:9';
+
+    this.log(`[PUBLISH] Generating thumbnail (genre: ${genre}, aspect: ${aspectRatio}, placement: ${options.placement || 'lower-third'})...`);
     this.emit({ type: 'publish-status', message: 'Generating thumbnail...' });
 
     try {
@@ -10119,6 +10198,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         outputDir,
         placement: options.placement || 'lower-third',
         sceneImagePath,
+        aspectRatio,
       });
 
       // Persist paths
@@ -10149,6 +10229,142 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       return result;
     } finally {
       // Close standalone browser after generation completes
+      if (standaloneAutomation) {
+        this.log('[PUBLISH] Closing standalone browser session');
+        try { await automation.close(); } catch (_) {}
+        this._standaloneAutomation = null;
+      }
+    }
+  }
+
+  /**
+   * Get characters + suggested expression for the custom thumbnail picker.
+   * Used by the renderer's "Custom close-up" mode.
+   */
+  getPublishCharacters() {
+    const project = this._getProjectForPublish(this._standalonePublishProjectId);
+    if (!project) return { characters: [], suggestedExpression: 'intense determined' };
+
+    const { ThumbnailGenerator } = require('../publish/thumbnailGenerator');
+    const thumbGen = new ThumbnailGenerator(null, {});
+
+    const script = project.script_json ? JSON.parse(project.script_json) : null;
+    if (!script) return { characters: [], suggestedExpression: 'intense determined' };
+
+    const settings = project.settings ? JSON.parse(project.settings) : {};
+    const suffix = settings.element_name_suffix || null;
+
+    const characters = thumbGen.getCharactersForThumbnail(script, suffix);
+    const suggestedExpression = thumbGen.suggestExpression(script);
+
+    return { characters, suggestedExpression };
+  }
+
+  /**
+   * Generate custom close-up thumbnail (character portrait + title card composite).
+   */
+  async generateCustomThumbnail(options = {}) {
+    const project = this._getProjectForPublish(this._standalonePublishProjectId);
+    if (!project) return null;
+
+    const projectDir = project.project_dir;
+    const outputDir = path.join(projectDir, 'output');
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    // Reuse same automation launch logic as generateThumbnail
+    let automation = this.automation;
+    let standaloneAutomation = false;
+
+    if (!automation && this._standaloneAutomation) {
+      automation = this._standaloneAutomation;
+      const loggedIn = await automation.isLoggedIn();
+      if (!loggedIn) {
+        this.emit({ type: 'publish-status', message: 'Still not logged in — please log in to the browser window.' });
+        return { error: 'login-required', message: 'Please log in to Higgsfield in the browser window.' };
+      }
+    } else if (!automation) {
+      this.log('[PUBLISH] No active browser — launching Playwright for custom thumbnail...');
+      this.emit({ type: 'publish-status', message: 'Launching browser...' });
+      automation = new HiggsFieldAutomation(null, projectDir);
+      standaloneAutomation = true;
+
+      try {
+        await automation.ensureBrowser();
+        await automation.page.goto('https://higgsfield.ai/studio', {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        }).catch(() => {});
+
+        const loggedIn = await automation.isLoggedIn();
+        if (!loggedIn) {
+          this.log('[PUBLISH] Not logged in — please log in to the browser window, then retry.');
+          this.emit({ type: 'publish-status', message: 'Please log in to Higgsfield in the browser window, then click Generate again.' });
+          this._standaloneAutomation = automation;
+          return { error: 'login-required', message: 'Please log in to Higgsfield in the browser window.' };
+        }
+      } catch (e) {
+        this.log(`[PUBLISH] Browser launch failed: ${e.message}`);
+        try { await automation.close(); } catch (_) {}
+        throw e;
+      }
+    }
+
+    const { ThumbnailGenerator } = require('../publish/thumbnailGenerator');
+    const geminiKey = this.store.get('geminiApiKey', '');
+    const thumbGen = new ThumbnailGenerator(automation, { geminiApiKey: geminiKey });
+
+    const script = project.script_json ? JSON.parse(project.script_json) : {};
+    const settings = project.settings ? JSON.parse(project.settings) : {};
+    const genre = script.genre || options.genre || 'drama';
+
+    if (!options.characterElementName) {
+      throw new Error('characterElementName is required for custom thumbnail');
+    }
+
+    const aspectRatio = project.aspect_ratio || '16:9';
+
+    this.log(`[PUBLISH] Generating custom thumbnail (character: ${options.characterElementName}, expression: ${options.expression || 'intense determined'}, aspect: ${aspectRatio})...`);
+    this.emit({ type: 'publish-status', message: 'Generating custom close-up thumbnail...' });
+
+    try {
+      const result = await thumbGen.generateCustomThumbnail({
+        title: project.title,
+        tagline: settings.tagline || '',
+        genre,
+        characterElementName: options.characterElementName,
+        expression: options.expression || 'intense determined',
+        outputDir,
+        placement: options.placement || 'lower-third',
+        aspectRatio,
+      });
+
+      // Persist paths
+      db.updateProject(project.id, {
+        thumbnail_path: result.thumbnailPath,
+        thumbnail_key_art_path: result.keyArtPath,
+        thumbnail_title_card_path: result.titleCardPath,
+      });
+
+      if (this.state.publishState) {
+        this.state.publishState.thumbnailGenerated = true;
+        this.state.publishState.thumbnailPath = result.thumbnailPath;
+      }
+
+      this.log(`[PUBLISH] Custom thumbnail generated: ${result.thumbnailPath}`);
+      this.emit({ type: 'thumbnail-generated', ...result });
+
+      // Auto-resolve publish gate
+      if (this._publishResolver) {
+        this.log('[PUBLISH] Final video + thumbnail both exist — auto-closing project');
+        db.updateProject(project.id, { published_at: new Date().toISOString() });
+        this._publishResolver();
+        this._publishResolver = null;
+        this.state.status = 'running';
+        this.state.currentApprovalGate = null;
+      }
+
+      return result;
+    } finally {
       if (standaloneAutomation) {
         this.log('[PUBLISH] Closing standalone browser session');
         try { await automation.close(); } catch (_) {}

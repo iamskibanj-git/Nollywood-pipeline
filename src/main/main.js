@@ -260,9 +260,32 @@ ipcMain.handle('load-publish-project', (_, projectId) => pipeline ? pipeline.loa
 ipcMain.handle('score-scene-thumbnails', () => pipeline ? pipeline.scoreSceneThumbnails() : []);
 ipcMain.handle('set-thumbnail-scene', (_, sceneAssetId) => pipeline ? pipeline.setThumbnailScene(sceneAssetId) : null);
 ipcMain.handle('generate-thumbnail', (_, options) => pipeline ? pipeline.generateThumbnail(options) : null);
+ipcMain.handle('generate-custom-thumbnail', (_, options) => pipeline ? pipeline.generateCustomThumbnail(options) : null);
+ipcMain.handle('get-publish-characters', () => pipeline ? pipeline.getPublishCharacters() : { characters: [], suggestedExpression: 'intense determined' });
 ipcMain.handle('generate-seo-metadata', () => pipeline ? pipeline.generateSEOMetadata() : null);
 ipcMain.handle('update-platform-metadata', (_, platform, fields) => pipeline ? pipeline.updatePlatformMetadata(platform, fields) : null);
 ipcMain.handle('approve-publish', () => pipeline ? pipeline.approvePublish() : null);
+
+// Shorts tab
+const { ShortsController } = require('./shorts');
+let shortsController = null;
+function getShortsController() {
+  if (!shortsController) {
+    shortsController = new ShortsController(db, {
+      apiKey: store.get('claudeApiKey', ''),
+      userDataDir: store.get('chromeUserDataDir', null),
+      log: (...args) => console.log('[SHORTS]', ...args),
+    });
+  }
+  return shortsController;
+}
+ipcMain.handle('shorts:getProjects', () => getShortsController().getProjects());
+ipcMain.handle('shorts:getStatus', (_, projectId) => getShortsController().getStatus(projectId));
+ipcMain.handle('shorts:planCalendar', (_, projectId, options) => getShortsController().planCalendar(projectId, options));
+ipcMain.handle('shorts:assemble', (_, projectId) => getShortsController().assembleShorts(projectId));
+ipcMain.handle('shorts:startUpload', () => getShortsController().startUploadSession());
+ipcMain.handle('shorts:uploadNext', (_, projectId) => getShortsController().uploadNext(projectId));
+ipcMain.handle('shorts:closeUpload', () => getShortsController().closeUploadSession());
 
 // API connectivity test — validates keys work before starting a pipeline run
 ipcMain.handle('test-api-keys', async () => {

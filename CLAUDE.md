@@ -303,8 +303,8 @@ Research → Title → Script (cinematic schema with blocking + kling_clips)
 **Phase 3 (Migration 011, asset types: `location_image`, `scene_image_cinematic`):**
 - Extended `HiggsfieldElements` with `createLocationElement()` + `createPropElement()` (refactored common path into `_createElement({category})` helper)
 - New automation module: `src/main/automation/cinema-studio-automation.js` — `CinemaStudioAutomation` class with `_ensureCinemaStudioActive`, `_setupToolbarSequence` (master 7-step setup: Generations→Image→CinematicCameras→1/4→aspect→2K→1x1), `_clickGenerationsReset` (stuck recovery), `_runStepWithStuckGuard` (5s timeout per step), `_ensureImageMode` (aria-selected on leftmost dual tabs), `_ensureCinematicCamerasModel` (model dropdown with Elements-panel guard), `_setImageCount`, `_setResolution2K`, `_setGrid1x1`, `_attachLocationReference`, `_setAspectRatio`, `_typeBlockingPrompt` (execCommand for Lexical + keyboard.type for @mentions), `_ensureGenerationsView` (Elements panel detection + Generations click), `generateSceneImage`, `_waitAndDownload` (polls images.higgs.ai gallery), `_readToolbarState` (mode/model/aspect/cost from aria-selected + button text)
-- Orchestrator: new `_runCinematicLocationSetup()` (extracts unique `location_element_hint` values from script, generates empty location images, creates location elements) + `_runCinematicSceneImageStage()` (per scene: resolves @location + @character refs, builds blocking, generates via Cinema Studio 2.0)
-- Element-setup stage now runs both character + location element creation in sequence
+- Orchestrator: new `_runCinematicLocationSetup()` (extracts unique `location_element_hint` values from script, generates empty location images as reference images for scene gen) + `_runCinematicSceneImageStage()` (per scene: resolves @location + @character refs, builds blocking, generates via Cinema Studio 2.0)
+- Element-setup stage now runs character element creation + location image generation in sequence
 - Stage 3B forks based on `generatorMode`: cinematic → `_runCinematicSceneImageStage`, staged → existing Nano Banana per-line generation (unchanged)
 
 **Phase 4 (Migration 012, asset type: `video_clip_cinematic`):**
@@ -2843,3 +2843,201 @@ Phase 5: Resume + Recovery
   - Location outer catch (~line 4506): captures `e.detectedCdnUrl` before markAssetFailed
   - Scene outer catch (~line 6696): captures `e.detectedCdnUrl` before markAssetFailed
   - Pattern matches portrait + video stages which already had this — ensures timeout-but-completed generations can be re-downloaded on resume instead of re-generated
+
+**IMPORTANT: Locations are NOT Higgsfield elements.**
+Locations are reference images — generated empty backgrounds (no people) that get attached
+via the + button → "Image Generations" picker at scene-gen time. Only characters have
+@element names in Cinema Studio. The `element_name` column on `location_image` DB rows is
+repurposed as a location identifier/hint (the snake_case key from `location_element_hint`
+in the script). The field `location_element_hint` in scripts is a naming convention only —
+it does NOT correspond to a Higgsfield element. `createLocationElement()` in
+`higgsfield-elements.js` is deprecated and unused.
+
+**Asset locking — vision certification = permanent lock:**
+- Once an asset passes vision verification at its threshold, it is permanently locked
+  (`locked_at` timestamp set). Locked assets are NEVER reset to pending by
+  `reconcileWithFilesystem` or any other mechanism — even if the file is missing
+  (that's a critical error requiring manual intervention, not auto-regen).
+- Lock propagation (upstream): when an asset is certified, all its upstream
+  dependencies are also locked — they produced a verified-good result.
+  - portrait certified (≥80) → lock portrait
+  - grid certified (≥75) → lock grid + its portrait
+  - scene_image certified (≥70) → lock scene + its location_image + character grids + portraits
+- Exception: `video_clip_cinematic` is NEVER locked. Kling video gen is non-deterministic;
+  clips can always be redone at the verify stage from a stable, locked scene image.
+- Asset dependency chain (correct):
+  - portrait → character_grid → @element (Playwright UI step) → scene_image_cinematic → video_clip_cinematic
+  - location_image → scene_image_cinematic (as reference image, not an element)
+- `reconcileWithFilesystem` behavior with locking:
+  - `locked_at IS NOT NULL` → skip entirely (never invalidate)
+  - `locked_at IS NULL` + file missing → reset to pending
+  - `video_clip_cinematic` → always eligible for reset regardless of any state
+- Migration 018: adds `locked_at` column to `project_assets`
+- `db.lockAsset(assetId)` — sets locked_at = now
+- `db.lockUpstream(assetId, projectId)` — locks all upstream deps based on asset type + matching keys
+
+**Scene blocking — cinematography rules (Session 30j):**
+- `_refineBlockingWithVision` now receives scene dialogue + 180-degree rule guidance
+- Dialogue context: the scene's `kling_clips[].dialogue` lines are extracted and fed to Vision
+  so blocking reflects who is speaking to whom (speaker faces listener, eyelines cross naturally)
+- 180-degree rule: once a character is placed left/right of their scene partner, they must
+  stay on that side for all scenes at the same location. The previous scene image (continuity ref)
+  enforces this visually, and the prompt explicitly states the rule.
+- This makes blocking more cinematic: characters don't just occupy space, they relate to each
+  other through spatial relationships informed by the dialogue and standard film grammar.
+
+**180-degree rule at shot direction level (Session 30j):**
+- Problem: close-up shots often show characters looking the wrong direction (e.g., @ama should
+  look RIGHT toward @frank based on spatial positions, but the shot has her gazing left)
+- Fix: `_injectVisionBlocking` now derives eyeline/gaze directions from vision-refined positions
+- Parses horizontal position (left/center/right) from each character's blocking text
+- Calculates gaze direction: character looks TOWARD the "center of mass" of scene partners
+- Injects EYELINES section into the CHARACTER POSITIONS preamble (lives in header, NOT inside
+  shot directions — so no conflict with one-@element-per-shot-direction rule)
+- Output format: `EYELINES (180° rule — gaze direction for close-ups): @ama gazes RIGHT; @frank gazes LEFT.`
+- Only activates for multi-character scenes (≥2 unique characters)
+- Budget-aware: preserved in both normal and tight preamble rebuilds
+
+**Video generation — duration and timing (Session 30j):**
+- Fixed 15s duration for ALL Kling clips. Duration alone doesn't degrade lip sync.
+- No timing brackets in shot headers: "Shot 1 (CU, push-in):" NOT "Shot 1 (CU, push-in, 0-3s):"
+- Let the video model decide pacing across 3 shots based on dialogue length and action.
+- Legacy timing brackets stripped at runtime (regex in orchestrator before vision blocking).
+- HARD RULES preserved: exactly 3 shots per clip, every shot MUST have at least 1 dialogue line.
+- Smart duration calculator removed — no more variable durations based on word count.
+- Shot format: `Shot N (CAMERA_TYPE, movement):` — camera info only, no timing.
+
+**Shorts Scheduler — Facebook Reels repurposing (Session 30j):**
+- Standalone module: `src/main/shorts/` — NOT part of the pipeline. Dedicated Electron tab.
+- Purpose: repurpose completed project clips into 30-day Facebook Reel calendar.
+- Flow: select project → curate clips → FFmpeg assemble → generate SEO → Playwright upload
+- Clips are already 9:16; same watermark overlay as long-form (`branding 916.fw.png`).
+- REDO backups excluded via naming convention (`*_redo_backup_*`).
+- Clip selection modes: `standalone_impact` (ranked by engagement potential) or `chronological`.
+- Shorts: 2-6 clips combined per reel (~60s target, 30-90s range).
+- SEO: dialogue-driven hooks, auto-generated hashtags, CTA ("Follow for next episode").
+- Playwright: Facebook Professional Dashboard → Content → Scheduled → Create → Reel.
+  One upload per navigation cycle; confirm done → tagged in DB → persist.
+- DB: `shorts` table (migration 019) + `projects.repurposed_at` column.
+- Architecture: `ShortsController` (index.js) → `ShortsScheduler` + `FacebookUploader`.
+- IPC-ready: controller methods map to `ipcMain.handle('shorts:*')` calls.
+
+**Publish Tab — standalone + custom thumbnail (Session 30j):**
+- Publish is now a standalone tab (like Shorts) — accessible at any time.
+- Eligible projects: any project with scene images generated (not just fully completed).
+- Two thumbnail modes:
+  - **Scene-based**: existing flow — pick scene image → title card → composite
+  - **Custom close-up**: generate portrait of main character via @element → title card → composite
+- Custom thumbnail: `generateCustomKeyArt()` in ThumbnailGenerator uses tight close-up prompt
+  with @element reference for face consistency via Nano Banana Pro.
+- Character picker: `getCharactersForThumbnail()` returns characters sorted by dialogue count.
+  User selects from dropdown.
+- Expression auto-suggest: `suggestExpression()` analyzes script tone markers, maps to
+  thumbnail-friendly expressions (e.g., most frequent dramatic tone → "fierce defiant").
+  User can override.
+- `PublishController` (publish/index.js): IPC-ready controller with `getProjects()`,
+  `getCharacters()`, `suggestExpression()`, `generateSceneThumbnail()`,
+  `generateCustomThumbnail()`, `generateSEO()`.
+- Session wait: `_ensureLoggedIn()` + `_waitForLogin()` added to ThumbnailGenerator.
+  Detects SESSION_EXPIRED, relaunches browser to higgsfield.ai, polls `isLoggedIn()`
+  every 10s for up to 10 min. No more wasted retries on dead sessions.
+
+**Session 30k — Publish UI wiring + Facebook uploader wait times:**
+
+Publish tab UI — full custom thumbnail mode:
+- Thumbnail tab has "Scene-based" / "Custom Close-up" toggle buttons
+- Custom mode shows: character dropdown (sorted by dialogue count) + expression input
+  (auto-suggested from script tone, user can override)
+- Scene scoring deferred: `loadSceneCandidates()` only fires when scene-based mode is
+  active. Was previously auto-firing on project load regardless of selected mode.
+- Project dropdown format: `projectId — Title` for clear identification
+- Dropdown `onchange` → `switchPublishProject(id)` → `loadPublishProject(id)` sets
+  `_standalonePublishProjectId` — all publish operations target the selected project
+- Eligibility: any project with scene images on disk (scene images = elements exist)
+- IPC: `get-publish-characters` → `getPublishCharacters()` returns characters + suggested
+  expression. `generate-custom-thumbnail` → `generateCustomThumbnail(options)` with full
+  browser launch/login check, @element close-up gen, title card, composite, auto-resolve.
+- Preload: `getPublishCharacters()`, `generateCustomThumbnail(options)` exposed
+
+Shorts tab UI — full wiring:
+- Header button "Shorts" (orange) opens dedicated view
+- Project dropdown: `projectId — Title` for completed projects with video clips
+- Plan controls: mode (best clips / chronological), posts/day, "Plan + Assemble + SEO"
+- Calendar table: #, date, time, duration, status (color-coded)
+- Upload controls: Launch Browser → Upload Next (one at a time) → Close Browser
+- IPC: shorts:getProjects, shorts:getStatus, shorts:plan, shorts:startUpload,
+  shorts:uploadNext, shorts:closeUpload
+- Preload: 6 methods wired to ShortsController
+- Main.js: lazy-initialized ShortsController with all 6 handlers
+
+@element autocomplete in generateImage (higgsfield.js):
+- Reuses `parsePromptSegments` from kling-automation.js (no wheel reinvention)
+- Detects @element references in prompt → segments into plain text + {at: name}
+- Plain text typed at 25ms/char, @elements typed at 80ms/char with autocomplete:
+  type '@' → wait 400ms → type name at 80ms/char → wait 1500ms for dropdown → Enter
+- Same timings as the proven Kling video gen workflow
+- Ensures @ follows whitespace (autocomplete only triggers after space/newline)
+- Retry with 2000ms extra wait if dropdown not detected
+- Enables custom thumbnail's @element reference to properly bind the character
+
+Facebook uploader — proper wait times (facebook-uploader.js):
+- Named timeout constants used throughout `scheduleReel()`:
+  - `POST_NAV_SETTLE` (4s) — after navigation/page loads
+  - `POST_CLICK_SETTLE` (3s) — after standard UI clicks
+  - `POST_UPLOAD_SETTLE` (15s) — after upload-to-next transition
+  - `POST_SCHEDULE_CONFIRM` (10s) — wait for schedule confirmation
+  - `UPLOAD_TIMEOUT` (180s) — max wait for video processing
+  - `DESCRIPTION_TYPE_DELAY` (15ms/key) — anti-bot keystroke pacing
+- `_waitForUploadProcessing()`: polls every 3s for Next button enabled or progress bar
+  gone (max 3min). Video uploads need time to transcode/thumbnail on FB side.
+- `_waitForScheduleConfirmation()`: polls every 2s for success toast, Scheduled tab
+  becoming active, or URL returning to content page. Falls back after 10s.
+- `_enterDescription()` uses `DESCRIPTION_TYPE_DELAY` to avoid FB anti-bot detection.
+
+**Session 30L — Shorts planner rework + bugfixes:**
+
+Shorts planner — real durations + calendar-aware grouping:
+- `_probeClipDurations()`: ffprobe every clip upfront before planning (falls back to
+  ffmpeg stderr parsing, then 10s fallback constant)
+- Calendar-driven grouping: total clip duration ÷ calendar days = target per short.
+  Clamped between MIN_SHORT_DURATION (30s) and MAX_SHORT_DURATION (90s).
+- Posts/day computed automatically: total shorts ÷ calendar days. Not a user input.
+- Start date defaults to tomorrow (never today — today is already gone for scheduling).
+  If shorts already exist for the project, starts from day after last scheduled date.
+- Calendar days defaults to remaining days in current month (e.g. May 1 → 30 days).
+- Stats returned: totalClips, totalDuration, totalShorts, targetPerShort, postsPerDay,
+  startDate, endDate, calendarDays.
+
+Shorts tab — 3-phase flow with persistence:
+- **Plan Calendar** button: probes durations, computes groups, fills schedule table,
+  persists to DB with status `planned`. Plan survives app restarts.
+- **Assemble + SEO** button (enabled after plan): reads planned shorts from DB, runs
+  FFmpeg sequentially, generates SEO via Claude API, updates each row to `seo_done`.
+  Resumable — skips already-assembled shorts.
+- **Upload** controls: reads `seo_done` shorts, Playwright uploads one at a time.
+- Previous single "Plan + Assemble + SEO" button replaced with two-step flow so user
+  can review calendar before committing to FFmpeg + API batch.
+- `savePlan()`: clears previous `planned` rows, inserts new plan. Doesn't touch
+  assembled/scheduled shorts.
+- `updateShortAssembled()`: updates existing row with file_path, duration, SEO data.
+- `getPlannedShorts()`: returns `planned` status rows for assembly.
+
+Shorts eligibility — clip-based, not completion-based:
+- `getEligibleProjects()` now shows any project with cinematic clips done (not just
+  `completed_at IS NOT NULL`). Projects at publish gate already have all clips ready.
+- Subquery wraps the clip_count computation to avoid HAVING-without-GROUP-BY error.
+
+DB module fixes:
+- `queryAll`, `queryOne`, `runSql` now exported from db.js for modules needing custom SQL.
+- ShortsScheduler + ShortsController import db singleton directly instead of broken
+  `this.db.queryAll()` pattern (db exports functions, not methods on an object).
+
+Pipeline lifecycle fix:
+- `completeProject()` moved to right after assembly finishes (before publish stage).
+  Assembly = end of production. Publish/shorts are distribution, not production.
+  Previously set after publish gate approval, blocking shorts for projects at publish.
+
+Aspect ratio threading (from session 30k, completed):
+- Orchestrator's `generateThumbnail()` and `generateCustomThumbnail()` now read
+  `project.aspect_ratio` and pass it to ThumbnailGenerator. All 3 thumbnail stages
+  (key art, title card, composite) generate in the project's configured orientation.

@@ -793,9 +793,70 @@ class HiggsFieldAutomation {
       await page.waitForTimeout(150);
       await page.keyboard.press('Backspace');
       await page.waitForTimeout(300);
-      // 25ms delay (was 5ms) — slow enough to avoid React contenteditable dropping keystrokes
-      await page.keyboard.type(prompt, { delay: 25 });
-      await page.waitForTimeout(800);
+
+      // ── SEGMENTED TYPING: detect @element references and use autocomplete ──
+      // Reuses parsePromptSegments from kling-automation (same Higgsfield UI).
+      const { parsePromptSegments } = require('./kling-automation');
+      const segments = parsePromptSegments(prompt);
+      const hasAtRef = segments.some(s => s && s.at);
+
+      if (hasAtRef) {
+        console.log(`[IMG] Prompt contains @element reference(s) — using autocomplete typing`);
+        for (const seg of segments) {
+          if (typeof seg === 'string') {
+            await page.keyboard.type(seg, { delay: 25 });
+          } else if (seg && seg.at) {
+            const name = seg.at.toLowerCase().replace(/^@+/, '');
+            console.log(`[IMG] Typing @mention: "@${name}" (slow autocomplete)`);
+
+            // Ensure @ follows whitespace (autocomplete only triggers after space/newline)
+            const lastChar = await page.evaluate(() => {
+              const tb = document.querySelector('[role="textbox"][contenteditable="true"]');
+              const text = tb ? (tb.innerText || tb.textContent || '') : '';
+              return text.slice(-1);
+            }).catch(() => '');
+            if (lastChar && lastChar !== ' ' && lastChar !== '\n') {
+              await page.keyboard.type(' ');
+              await page.waitForTimeout(50);
+            }
+
+            // Type @ + full name slowly for autocomplete to resolve
+            await page.keyboard.type('@', { delay: 0 });
+            await page.waitForTimeout(400);
+            await page.keyboard.type(name, { delay: 80 });
+            await page.waitForTimeout(1500);
+
+            // Check for autocomplete dropdown
+            const dropdownInfo = await page.evaluate(() => {
+              const options = document.querySelectorAll('[role="option"]');
+              const visibleOptions = [...(options || [])].filter(o => o.getBoundingClientRect().width > 0);
+              return {
+                found: visibleOptions.length > 0,
+                optionCount: visibleOptions.length,
+                firstOptionText: visibleOptions[0]?.textContent?.trim()?.slice(0, 50) || '',
+              };
+            }).catch(() => ({ found: false, optionCount: 0 }));
+
+            if (dropdownInfo.found) {
+              await page.keyboard.press('Enter');
+              await page.waitForTimeout(300);
+              console.log(`[IMG] @mention resolved: @${name} → "${dropdownInfo.firstOptionText}"`);
+            } else {
+              // Retry with longer wait
+              console.log(`[IMG] No dropdown for "@${name}" — retrying...`);
+              await page.waitForTimeout(2000);
+              await page.keyboard.press('Enter');
+              await page.waitForTimeout(300);
+            }
+          }
+        }
+        await page.waitForTimeout(800);
+      } else {
+        // No @element references — simple fast typing
+        // 25ms delay — slow enough to avoid React contenteditable dropping keystrokes
+        await page.keyboard.type(prompt, { delay: 25 });
+        await page.waitForTimeout(800);
+      }
 
       // Verify the prompt was typed — whitespace-tolerant comparison
       // (contenteditable divs normalize whitespace, so strict equality always fails)
