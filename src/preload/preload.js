@@ -79,23 +79,4 @@ contextBridge.exposeInMainWorld('api', {
   getShortsProjects: () => ipcRenderer.invoke('shorts:getProjects'),
   getShortsStatus: (projectId) => ipcRenderer.invoke('shorts:getStatus', projectId),
   planShortsCalendar: (projectId, options) => ipcRenderer.invoke('shorts:planCalendar', projectId, options),
-  assembleShorts: (projectId) => ipcRenderer.invoke('shorts:assemble', projectId),
-  startShortsUpload: () => ipcRenderer.invoke('shorts:startUpload'),
-  uploadNextShort: (projectId) => ipcRenderer.invoke('shorts:uploadNext', projectId),
-  closeShortsUpload: () => ipcRenderer.invoke('shorts:closeUpload'),
-
-  // API connectivity test
-  testApiKeys: () => ipcRenderer.invoke('test-api-keys'),
-
-  // Selectors
-  getSelectors: () => ipcRenderer.invoke('get-selectors'),
-  saveSelectors: (sel) => ipcRenderer.invoke('save-selectors', sel),
-
-  // Events from main process
-  onPipelineEvent: (callback) => {
-    ipcRenderer.on('pipeline-event', (_, event) => callback(event));
-  },
-  onLogMessage: (callback) => {
-    ipcRenderer.on('log-message', (_, msg) => callback(msg));
-  },
-});
+  assembleShorts: (

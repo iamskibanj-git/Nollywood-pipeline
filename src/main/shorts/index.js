@@ -34,6 +34,7 @@ class ShortsController {
       log: options.log || console.log,
     };
     this.log = options.log || console.log;
+    this.onProgress = options.onProgress || null;
   }
 
   /**
@@ -80,23 +81,34 @@ class ShortsController {
     const projectDir = project.project_dir || path.join(process.cwd(), 'output', projectId);
     const shortsDir = path.join(projectDir, 'shorts');
 
+    // Load all cinematic clip assets once (avoid N+1 queries per short)
+    const allClipAssets = db.getAssets(projectId, { type: 'video_clip_cinematic' });
+    const clipById = new Map(allClipAssets.map(a => [a.id, a]));
+
     let assembled = 0;
+    let skipped = 0;
+    const total = planned.length;
+    const startTime = Date.now();
+
     for (const short of planned) {
       // Reconstruct clip objects from source_clips (asset IDs)
       const clipIds = JSON.parse(short.source_clips || '[]');
-      const clips = clipIds.map(id => {
-        const assets = db.getAssets(projectId, { type: 'video_clip_cinematic' });
-        return assets.find(a => a.id === id);
-      }).filter(Boolean);
+      const clips = clipIds.map(id => clipById.get(id)).filter(Boolean);
 
       if (clips.length === 0) {
         this.log(`[SHORTS] Short #${short.short_number}: no valid clips found, skipping`);
+        skipped++;
+        this._emitProgress({ phase: 'assembly', current: assembled + skipped, total, shortNumber: short.short_number, status: 'skipped' });
         continue;
       }
+
+      this._emitProgress({ phase: 'assembly', current: assembled + skipped, total, shortNumber: short.short_number, status: 'assembling', startTime });
 
       // Assemble via FFmpeg
       const plan = { clips, shortNumber: short.short_number };
       const { filePath, duration } = await this.scheduler.assembleShort(plan, shortsDir);
+
+      this._emitProgress({ phase: 'seo', current: assembled + skipped, total, shortNumber: short.short_number, status: 'generating_seo', startTime });
 
       // Generate SEO
       let seo = null;
@@ -109,7 +121,14 @@ class ShortsController {
       // Update the existing DB row
       this.scheduler.updateShortAssembled(short.id, filePath, duration, seo);
       assembled++;
-      this.log(`[SHORTS] Assembled ${assembled}/${planned.length}: short #${short.short_number} (${duration.toFixed(1)}s)`);
+
+      // Compute ETA
+      const elapsed = (Date.now() - startTime) / 1000;
+      const perShort = elapsed / (assembled + skipped);
+      const remaining = Math.round(perShort * (total - assembled - skipped));
+
+      this.log(`[SHORTS] Assembled ${assembled}/${total}: short #${short.short_number} (${duration.toFixed(1)}s) — ETA ${remaining}s`);
+      this._emitProgress({ phase: 'assembly', current: assembled + skipped, total, shortNumber: short.short_number, status: 'done', elapsed: Math.round(elapsed), eta: remaining });
     }
 
     return {
@@ -120,113 +139,32 @@ class ShortsController {
   }
 
   /**
-   * Start a Playwright upload session.
-   * Launches browser — user must be logged into Facebook.
+   * Upload all seo_done shorts for a project to Facebook.
+   * Launches browser, loops through every pending short, closes browser when done.
+   * Resumable — only processes status='seo_done', skips already-scheduled.
+   *
+   * @param {string} projectId
+   * @param {function} onProgress - optional callback({ current, total, shortNumber, scheduledDate, success, error })
+   * @returns {object} { uploaded, failed, total }
    */
-  async startUploadSession() {
+  async uploadAll(projectId, onProgress) {
+    // Launch browser
     if (this.uploader) {
       await this.uploader.close();
     }
     this.uploader = new FacebookUploader(this.uploaderOptions);
     await this.uploader.launch();
-    this.log('[SHORTS] Upload session started — ensure you are logged into Facebook');
-    return { status: 'ready' };
-  }
+    this.log('[SHORTS] Upload session started — uploading all shorts');
 
-  /**
-   * Upload the next pending short for a project.
-   * One at a time — caller confirms before moving to next.
-   *
-   * @param {string} projectId
-   * @returns {object} { shortId, success, error?, remaining }
-   */
-  async uploadNext(projectId) {
-    if (!this.uploader) {
-      throw new Error('Upload session not started. Call startUploadSession() first.');
-    }
+    let uploaded = 0;
+    let failed = 0;
+    let current = 0;
 
-    const nextShort = this.scheduler.getNextPendingUpload(projectId);
-    if (!nextShort) {
-      // All done — mark project as repurposed
-      this.scheduler.markProjectRepurposed(projectId);
-      return { shortId: null, success: true, remaining: 0, message: 'All shorts scheduled. Project marked as repurposed.' };
-    }
+    try {
+      while (true) {
+        const nextShort = this.scheduler.getNextPendingUpload(projectId);
+        if (!nextShort) break;
 
-    // Build the full description with hashtags
-    const description = this._buildFullDescription(nextShort);
-
-    // Schedule via Playwright
-    const result = await this.uploader.scheduleReel({
-      filePath: nextShort.file_path,
-      description,
-      scheduledDate: nextShort.scheduled_date,
-      scheduledTime: nextShort.scheduled_time,
-    });
-
-    if (result.success) {
-      this.scheduler.markUploaded(nextShort.id, result.facebookPostId || null);
-    } else {
-      this.scheduler.markFailed(nextShort.id, result.error);
-    }
-
-    // Count remaining
-    const remaining = db.queryOne(
-      `SELECT COUNT(*) as cnt FROM shorts WHERE project_id = ? AND status = 'seo_done'`,
-      [projectId]
-    );
-
-    return {
-      shortId: nextShort.id,
-      shortNumber: nextShort.short_number,
-      scheduledDate: nextShort.scheduled_date,
-      success: result.success,
-      error: result.error || null,
-      remaining: remaining?.cnt || 0,
-    };
-  }
-
-  /**
-   * Get status of all shorts for a project.
-   */
-  getStatus(projectId) {
-    const shorts = this.scheduler.getShortsForProject(projectId);
-    const summary = {
-      total: shorts.length,
-      planned: shorts.filter(s => s.status === 'planned').length,
-      pending: shorts.filter(s => s.status === 'pending').length,
-      assembled: shorts.filter(s => s.status === 'assembled').length,
-      seo_done: shorts.filter(s => s.status === 'seo_done').length,
-      scheduled: shorts.filter(s => s.status === 'scheduled').length,
-      failed: shorts.filter(s => s.status === 'failed').length,
-    };
-    return { shorts, summary };
-  }
-
-  /**
-   * Close Playwright session.
-   */
-  async closeUploadSession() {
-    if (this.uploader) {
-      await this.uploader.close();
-      this.uploader = null;
-    }
-  }
-
-  // ── Private ──
-
-  _buildFullDescription(short) {
-    let desc = short.description || '';
-    // Append hashtags if not already in description
-    if (short.hashtags) {
-      try {
-        const tags = JSON.parse(short.hashtags);
-        if (tags.length > 0 && !desc.includes(tags[0])) {
-          desc += '\n\n' + tags.join(' ');
-        }
-      } catch (_) {}
-    }
-    return desc;
-  }
-}
-
-module.exports = { ShortsController, ShortsScheduler, FacebookUploader };
+        current++;
+        const total = current + db.queryOne(
+          `SELECT COUNT(*) as cnt 

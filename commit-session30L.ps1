@@ -16,10 +16,34 @@ Shorts tab — 3-phase persistent flow:
 - Plan Calendar: probes durations, fills table, saves to DB (status=planned)
   Plan survives app restarts — no more lost work on close.
 - Assemble + SEO: reads planned shorts from DB, FFmpeg + Claude API batch
-  Updates each row to assembled/seo_done. Resumable.
-- Upload: Playwright schedules seo_done shorts on Facebook one at a time.
+  Updates each row to assembled/seo_done. Resumable — skips done rows.
+- Upload All: single button launches Playwright, loops all seo_done shorts,
+  schedules on Facebook, closes browser when done. Replaces 3-button flow.
 - savePlan(), updateShortAssembled(), getPlannedShorts() DB methods
-- IPC: shorts:planCalendar (plan-only), shorts:assemble (FFmpeg+SEO)
+- IPC: shorts:planCalendar, shorts:assemble, shorts:uploadAll
+
+Upload consolidation:
+- Replaced Launch Browser / Upload Next / Close Session with single
+  "Upload All to Facebook" button. Auto-loops all pending shorts.
+- uploadAll() in ShortsController: launch → loop → close in finally block
+- Button disabled until all shorts are assembled (seo_done)
+
+Full persistence:
+- All plan/assembly/upload state persisted in shorts table
+- Status lifecycle: planned → assembled → seo_done → scheduled/failed
+- getStatus() reconstructs stats from DB (survives app restart)
+- No in-memory state — everything from DB on tab open
+
+Assembly progress with ETA:
+- ShortsController emits progress events via onProgress callback
+- main.js sends shorts-progress IPC events to renderer
+- Preload exposes onShortsProgress listener
+- Renderer shows "Assembling X/Y — ETA Xm Xs" during assembly
+- Upload phase also emits progress per short
+
+N+1 query optimization:
+- assembleShorts() loads all clip assets once into Map
+  (was: db.getAssets() per short in loop)
 
 Shorts eligibility fix:
 - getEligibleProjects() now clip-based, not completed_at-based

@@ -825,9 +825,7 @@
             <div id="shorts-upload-section" style="border-top:1px solid var(--border);padding-top:16px;">
               <h3 style="font-size:13px;margin-bottom:10px;">Upload to Facebook</h3>
               <div style="display:flex;gap:8px;align-items:center;">
-                <button class="btn btn-ghost" onclick="startUploadSession()" id="btn-start-upload" style="font-size:12px;">Launch Browser</button>
-                <button class="btn btn-primary" onclick="uploadNextShort()" id="btn-upload-next" style="font-size:12px;" disabled>Upload Next</button>
-                <button class="btn btn-ghost" onclick="closeUploadSession()" id="btn-close-upload" style="font-size:11px;" disabled>Close Browser</button>
+                <button class="btn btn-primary" onclick="uploadAllShorts()" id="btn-upload-all" style="font-size:12px;" disabled>Upload All to Facebook</button>
               </div>
               <div id="shorts-upload-status" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
             </div>
@@ -2853,17 +2851,24 @@
         const data = await window.api.getShortsStatus(shortsProjectId);
         renderShortsCalendar(data.shorts || []);
         const statusEl = document.getElementById('shorts-project-status');
-        if (data.summary) {
+        if (data.summary && data.summary.total > 0) {
           const s = data.summary;
           const planned = s.planned || 0;
           statusEl.textContent = `${s.total} shorts — ${planned} planned, ${s.scheduled} scheduled, ${s.seo_done} ready, ${s.failed} failed`;
           // Enable assemble if there are planned shorts
           document.getElementById('btn-assemble-shorts').disabled = planned === 0;
+          // Enable upload only when all shorts are assembled (none left planned) and some ready
+          const allAssembled = planned === 0 && s.seo_done > 0;
+          document.getElementById('btn-upload-all').disabled = !allAssembled;
+          // Render stats from DB (survives restart)
+          if (data.stats) renderShortsStats(data.stats);
+        } else {
+          statusEl.textContent = 'No shorts planned yet. Click "Plan Calendar" to start.';
+          document.getElementById('btn-assemble-shorts').disabled = true;
+          document.getElementById('btn-upload-all').disabled = true;
+          document.getElementById('shorts-stats').style.display = 'none';
         }
-        // Enable upload button if there are shorts ready
-        document.getElementById('btn-upload-next').disabled = !(data.summary && data.summary.seo_done > 0);
       } catch (e) {
-        // No shorts planned yet — that's fine
         document.getElementById('shorts-project-status').textContent = 'No shorts planned yet. Click "Plan Calendar" to start.';
       }
     }
@@ -2890,8 +2895,6 @@
       });
     }
 
-    let currentShortsPlan = null; // holds { calendar, stats } from last plan
-
     async function planShortsCalendar() {
       if (!shortsProjectId) return;
       const btn = document.getElementById('btn-plan-shorts');
@@ -2904,7 +2907,6 @@
         const mode = document.getElementById('shorts-mode').value;
         const calendarDays = parseInt(document.getElementById('shorts-calendar-days').value) || 30;
         const result = await window.api.planShortsCalendar(shortsProjectId, { mode, calendarDays });
-        currentShortsPlan = result;
         renderShortsStats(result.stats);
         renderPlannedCalendar(result.calendar);
         progressEl.innerHTML = `<span style="color:var(--green);">Planned ${result.stats.totalShorts} shorts. Review the calendar, then click Assemble + SEO.</span>`;
@@ -2937,6 +2939,28 @@
       });
     }
 
+    // Listen for assembly/upload progress from main process
+    if (window.api.onShortsProgress) {
+      window.api.onShortsProgress((data) => {
+        const progressEl = document.getElementById('shorts-plan-progress');
+        if (!progressEl) return;
+
+        if (data.phase === 'assembly' && data.status === 'assembling') {
+          progressEl.textContent = `Assembling short #${data.shortNumber} (${data.current}/${data.total})...`;
+        } else if (data.phase === 'seo') {
+          progressEl.textContent = `Generating SEO for short #${data.shortNumber} (${data.current}/${data.total})...`;
+        } else if (data.phase === 'assembly' && data.status === 'done') {
+          const etaMin = Math.floor(data.eta / 60);
+          const etaSec = data.eta % 60;
+          const etaStr = etaMin > 0 ? `${etaMin}m ${etaSec}s` : `${etaSec}s`;
+          progressEl.textContent = `Assembled ${data.current}/${data.total} — ETA ${etaStr}`;
+        } else if (data.phase === 'upload') {
+          const statusEl = document.getElementById('shorts-upload-status');
+          if (statusEl) statusEl.textContent = `Uploading short #${data.shortNumber} → ${data.scheduledDate} (${data.current}/${data.total})...`;
+        }
+      });
+    }
+
     async function assembleShortsAndSEO() {
       if (!shortsProjectId) return;
       const btn = document.getElementById('btn-assemble-shorts');
@@ -2945,10 +2969,9 @@
       const progressEl = document.getElementById('shorts-plan-progress');
 
       try {
-        progressEl.textContent = 'Assembling shorts with FFmpeg + generating SEO descriptions...';
+        progressEl.textContent = 'Starting assembly...';
         const result = await window.api.assembleShorts(shortsProjectId);
         progressEl.innerHTML = `<span style="color:var(--green);">Done! ${result.assembled}/${result.total} shorts assembled.</span>`;
-        currentShortsPlan = null;
         await refreshShortsCalendar();
       } catch (e) {
         progressEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
@@ -2974,58 +2997,27 @@
       `;
     }
 
-    async function startUploadSession() {
-      const btn = document.getElementById('btn-start-upload');
-      btn.disabled = true;
-      btn.textContent = 'Launching...';
-      const statusEl = document.getElementById('shorts-upload-status');
-
-      try {
-        await window.api.startShortsUpload();
-        statusEl.innerHTML = '<span style="color:var(--green);">Browser ready. Log into Facebook if needed, then click "Upload Next".</span>';
-        document.getElementById('btn-upload-next').disabled = false;
-        document.getElementById('btn-close-upload').disabled = false;
-      } catch (e) {
-        statusEl.innerHTML = `<span style="color:var(--red);">Launch failed: ${e.message}</span>`;
-      }
-      btn.disabled = false;
-      btn.textContent = 'Launch Browser';
-    }
-
-    async function uploadNextShort() {
+    async function uploadAllShorts() {
       if (!shortsProjectId) return;
-      const btn = document.getElementById('btn-upload-next');
+      const btn = document.getElementById('btn-upload-all');
       btn.disabled = true;
       btn.textContent = 'Uploading...';
       const statusEl = document.getElementById('shorts-upload-status');
+      statusEl.textContent = 'Launching browser and uploading all shorts to Facebook...';
 
       try {
-        const result = await window.api.uploadNextShort(shortsProjectId);
-        if (result.shortId === null) {
-          statusEl.innerHTML = '<span style="color:var(--green);">All shorts uploaded! Project marked as repurposed.</span>';
-          btn.disabled = true;
-        } else if (result.success) {
-          statusEl.innerHTML = `<span style="color:var(--green);">Short #${result.shortNumber} scheduled for ${result.scheduledDate}. ${result.remaining} remaining.</span>`;
-          btn.disabled = false;
+        const result = await window.api.uploadAllShorts(shortsProjectId);
+        if (result.failed === 0) {
+          statusEl.innerHTML = `<span style="color:var(--green);">All ${result.uploaded} shorts scheduled on Facebook! Project marked as repurposed.</span>`;
         } else {
-          statusEl.innerHTML = `<span style="color:var(--red);">Short #${result.shortNumber} failed: ${result.error}. ${result.remaining} remaining.</span>`;
-          btn.disabled = false;
+          statusEl.innerHTML = `<span style="color:var(--yellow);">${result.uploaded} uploaded, ${result.failed} failed. Re-run to retry failed shorts.</span>`;
         }
         await refreshShortsCalendar();
       } catch (e) {
         statusEl.innerHTML = `<span style="color:var(--red);">Upload error: ${e.message}</span>`;
-        btn.disabled = false;
       }
-      btn.textContent = 'Upload Next';
-    }
-
-    async function closeUploadSession() {
-      try {
-        await window.api.closeShortsUpload();
-        document.getElementById('shorts-upload-status').textContent = 'Browser closed.';
-        document.getElementById('btn-upload-next').disabled = true;
-        document.getElementById('btn-close-upload').disabled = true;
-      } catch (_) {}
+      btn.disabled = false;
+      btn.textContent = 'Upload All to Facebook';
     }
 
     // ── Project Logs Viewer ──
@@ -3237,450 +3229,4 @@
           card.style.cssText = `padding:16px;border:1px solid ${idx === 0 ? 'var(--green)' : 'var(--border)'};background:var(--surface);`;
           const labelHtml = escapeHtml(p.label || ('Pool ' + p.poolId));
           card.innerHTML =
-            '<div style="display:flex;gap:14px;align-items:flex-start;">' +
-              '<div style="flex:1;min-width:0;">' +
-                '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">' +
-                  '<span style="font-size:13px;font-weight:600;color:var(--text);">' +
-                    (idx === 0 ? '&#127918; ' : '') + labelHtml +
-                  '</span>' +
-                  (idx === 0 ? '<span style="font-size:9px;color:var(--green);background:rgba(34,197,94,0.15);padding:2px 6px;border-radius:4px;letter-spacing:0.04em;">NEWEST</span>' : '') +
-                '</div>' +
-                '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">' +
-                  p.totalVideos + ' videos · ' + p.storiesProduced + ' ' + (p.storiesProduced === 1 ? 'story' : 'stories') + ' produced · Fetched ' + fetchDate + ' ' + fetchTime +
-                '</div>' +
-                '<div style="display:flex;align-items:center;gap:8px;">' +
-                  '<div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;">' +
-                    '<div style="width:' + remainPct + '%;height:100%;background:' + remainColor + ';"></div>' +
-                  '</div>' +
-                  '<span style="font-size:10px;color:var(--muted);white-space:nowrap;">' + p.expiresInHours + 'h left</span>' +
-                '</div>' +
-              '</div>' +
-              '<div style="display:flex;flex-direction:column;gap:6px;">' +
-                '<button class="btn btn-primary" onclick="proceedWithPool(' + p.poolId + ')" style="font-size:11px;padding:8px 14px;">Use this pool</button>' +
-                '<button class="btn btn-ghost" onclick="removePool(' + p.poolId + ')" style="font-size:10px;padding:4px 10px;color:var(--muted);" title="Delete this pool">Delete</button>' +
-              '</div>' +
-            '</div>';
-          list.appendChild(card);
-        });
-
-      } catch (e) {
-        // Status not available, ignore
-        console.warn('loadCacheStatus error:', e);
-      }
-    }
-
-    // ── Event Handlers from Main Process ──
-    window.api.onPipelineEvent((event) => {
-      console.log('Pipeline event:', event);
-
-      // Refresh project log selector when a new project starts
-      if (event.type === 'stage' && event.stage === 'research') {
-        setTimeout(() => populateProjectLogSelector(), 1000);
-      }
-
-      switch (event.type) {
-        case 'stage':
-          updateStepper(event.stage, 'running');
-          updateStatusBadge('running');
-          if (event.stage === 'research') {
-            showView('view-research');
-            if (event.substage === 'youtube') {
-              document.getElementById('research-searching').style.display = 'block';
-              document.getElementById('research-analyzing').style.display = 'none';
-            } else if (event.substage === 'gemini') {
-              document.getElementById('research-searching').style.display = 'none';
-              document.getElementById('research-analyzing').style.display = 'block';
-            }
-          }
-          if (event.stage === 'script') {
-            showView('view-script');
-            document.getElementById('script-progress').style.display = 'block';
-            document.getElementById('script-approve-btns').style.display = 'none';
-          }
-          if (event.stage === 'portraits') showGenerationView('Generating Character Portraits...', 'portraits');
-          if (event.stage === 'elements-setup') {
-            // Elements + locations happen under elements-setup stage.
-            // Map to locations stepper tab so it's visible.
-            updateStepper('locations', 'running');
-          }
-          if (event.stage === 'scenes') showGenerationView('Generating Scene Images...', 'scenes');
-          if (event.stage === 'video') showGenerationView('Generating Video Clips (Veo 3.1 Lite)...', 'clips');
-          if (event.stage === 'verify') showVerifyRunning();
-          if (event.stage === 'assembly') showView('view-assembly');
-          if (event.stage === 'publish') showView('view-publish');
-          break;
-
-        case 'research-videos':
-          renderResearchVideos(event.aiOriginals || [], event.remakeCandidates || [], event.fromCache || false);
-          if (event.fromCache) {
-            addLog(`Loaded ${(event.all||[]).length} videos from cache (expires in ${event.cacheStatus?.expiresInHours || '?'}h)`);
-          } else {
-            addLog(`Found ${(event.aiOriginals||[]).length} AI originals + ${(event.remakeCandidates||[]).length} remake candidates`);
-          }
-          break;
-
-        case 'research-complete':
-          document.getElementById('research-searching').style.display = 'none';
-          document.getElementById('research-analyzing').style.display = 'none';
-          document.getElementById('research-results').style.display = 'block';
-          if (event.data?.patterns) {
-            renderResearchPatterns(event.data.patterns);
-          }
-          addLog('Research analysis complete');
-          break;
-
-        case 'titles-ready':
-          showView('view-titles');
-          renderTitles(event.titles);
-          updateStepper('script', 'waiting_approval');
-          updateStatusBadge('waiting_approval');
-          break;
-
-        case 'waiting':
-          const gateStageMap = { title: 'script', script: 'script', research: 'research', 'elements-ready': 'portraits', 'locations-ready': 'locations' };
-          updateStepper(gateStageMap[event.gate] || event.gate, 'waiting_approval');
-          updateStatusBadge('waiting_approval');
-          if (event.gate === 'research') {
-            document.getElementById('research-searching').style.display = 'none';
-            document.getElementById('research-analyzing').style.display = 'none';
-            document.getElementById('research-results').style.display = 'block';
-          }
-          if (event.gate === 'dialogue-triage') {
-            // Show the Dialogue Triage tab before video generation
-            updateStepper('video', 'waiting_approval');
-            showDialogueTriagePanel();
-          } else if (event.gate === 'scenes' && window._sceneVerifyData && window._sceneVerifyData.length > 0) {
-            // Cinematic mode: show the Scene Verification tab instead of generic gen view
-            updateStepper('scenes', 'waiting_approval');
-            showSceneVerifyPanel();
-          } else if (event.gate === 'portraits' || event.gate === 'scenes' || event.gate === 'clips') {
-            // Ensure currentGenGate is set correctly — on resume, showGenerationView()
-            // may not have been called (no progress event), so set the gate here too
-            currentGenGate = event.gate;
-            // Show the generation view if not already visible (resume from approval gate)
-            const genTitles = {
-              portraits: 'Generating Character Portraits...',
-              scenes: 'Generating Scene Images...',
-              clips: 'Generating Video Clips (Veo 3.1 Lite)...',
-            };
-            showGenerationView(genTitles[event.gate], event.gate);
-            document.getElementById('gen-approve-btns').style.display = 'flex';
-          }
-          if (event.gate === 'prompt-preview') {
-            // TEMPORARY — remove when full production starts.
-            // Pre-gen prompt preview: show the final prompt + start frame before Kling generation.
-            // Ensure the generation view is visible (may be coming from dialogue triage or another view)
-            showGenerationView('Generating Video Clips (Kling 3.0)...', 'clips');
-            // Update progress counter from the clip event data (showGenerationView resets to 0/0)
-            if (typeof event.clipIndex === 'number' && typeof event.clipTotal === 'number') {
-              updateGenProgress(event.clipIndex, event.clipTotal);
-            }
-            updateStepper('video', 'running');
-            const panel = document.getElementById('prompt-preview-panel');
-            const label = document.getElementById('prompt-preview-label');
-            const promptText = document.getElementById('prompt-preview-text');
-            const startFrame = document.getElementById('prompt-preview-startframe');
-            label.textContent = `${event.clipLabel || event.clipId} (${event.clipIndex + 1}/${event.clipTotal}) — ${event.durationSeconds || '?'}s`;
-            promptText.textContent = event.prompt || '(no prompt)';
-            if (event.startFramePath) {
-              startFrame.src = 'file://' + event.startFramePath;
-              startFrame.style.display = 'block';
-            } else {
-              startFrame.style.display = 'none';
-            }
-            // Hide clip-review if visible from previous iteration
-            document.getElementById('clip-review-panel').style.display = 'none';
-            panel.style.display = 'block';
-            panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-          if (event.gate === 'clip-review') {
-            // TEMPORARY — remove when full production starts.
-            // Per-clip approval gate — show video player + approve/stop buttons.
-            // Hide prompt-preview if still visible
-            document.getElementById('prompt-preview-panel').style.display = 'none';
-            const panel = document.getElementById('clip-review-panel');
-            const label = document.getElementById('clip-review-label');
-            const video = document.getElementById('clip-review-video');
-            label.textContent = `${event.clipLabel || event.clipId} (${event.clipIndex + 1}/${event.clipTotal})`;
-            if (event.clipPath) {
-              video.src = 'file://' + event.clipPath;
-              video.load();
-            }
-            panel.style.display = 'block';
-            // Scroll into view
-            panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-          if (event.gate === 'script' && event.review) {
-            // Review results arrived with the script approval gate — render panel
-            // and gate the approve buttons accordingly.
-            renderStructuralReview(event.review);
-            document.getElementById('script-approve-btns').style.display = 'flex';
-          }
-          if (event.gate === 'elements-ready') {
-            // Cinematic mode only — element automation completed (or partially
-            // succeeded). User must confirm elements exist in Higgsfield before
-            // proceeding to location generation.
-            showCinematicElementsPanel();
-          }
-          if (event.gate === 'locations-ready') {
-            // Cinematic mode — location images generated. Show thumbnail grid
-            // with orientation badges so user can verify before scene gen.
-            updateStepper('locations', 'waiting_approval');
-            showCinematicLocationsPanel();
-          }
-          if (event.gate === 'scene-images-ready') {
-            // Cinematic mode only — Cinema Studio scene image generation
-            // failed for some scenes; user needs to generate them manually.
-            showCinematicScenesPanel();
-          }
-          if (event.gate === 'verify') {
-            updateStepper('verify', 'waiting_approval');
-            showVerifyTable();
-          }
-          break;
-
-        case 'cinematic-manual-element-checklist':
-          // Pipeline emits this BEFORE the elements-ready gate. Populate the
-          // checklist panel with the names of elements the user needs to create.
-          renderCinematicElementChecklist(event.pending || []);
-          break;
-
-        case 'cinematic-locations-ready':
-          // Pipeline emits this BEFORE the locations-ready gate with image data.
-          // Also switch to the Locations view so the user can see thumbnails
-          // immediately — even if the pipeline errors before the gate fires.
-          renderCinematicLocationsGrid(event.locations || [], event.expectedAspect || '16:9');
-          updateStepper('locations', 'active');
-          showCinematicLocationsPanel();
-          break;
-
-        case 'cinematic-manual-scene-images':
-          // Pipeline emits this BEFORE the scene-images-ready gate. Populate
-          // the checklist with scenes that need manual Cinema Studio gens.
-          renderCinematicScenesChecklist(event.pending || []);
-          break;
-
-        case 'cinematic-scene-verification-data':
-          // Pipeline emits this BEFORE the scenes gate with location-grouped
-          // scene data for the Scene Verification tab.
-          renderSceneVerificationGrid(event.locationGroups || [], event.totalScenes || 0, event.doneScenes || 0);
-          break;
-
-        case 'dialogue-triage-data':
-          // Pipeline emits this BEFORE the dialogue-triage gate with clip
-          // dialogue/silent categorization for the Dialogue Triage tab.
-          window._dialogueTriageData = event;
-          renderDialogueTriage(event.triageItems || [], event.totalClips || 0, event.withDialogue || 0, event.silent || 0);
-          break;
-
-        case 'script-review-ready':
-          // Review lands BEFORE the waiting event in most flows — render panel
-          // pre-emptively so the user sees the result as soon as it's ready.
-          showView('view-script');
-          renderStructuralReview(event.review);
-          break;
-
-        case 'script-progress':
-          showView('view-script');
-          document.getElementById('script-progress').style.display = 'block';
-          // Animate progress bar
-          const len = event.partial?.length || 0;
-          const pct = Math.min(95, Math.round(len / 80)); // rough estimate
-          document.getElementById('script-progress-bar').style.width = pct + '%';
-          break;
-
-        case 'script-ready':
-          showView('view-script');
-          updateStepper('script', 'waiting_approval');
-          document.getElementById('script-progress').style.display = 'none';
-          document.getElementById('script-approve-btns').style.display = 'flex';
-          renderScript(event.script);
-          break;
-
-        case 'progress':
-          if (event.stage === 'verify') {
-            updateVerifyProgress(event.current, event.total);
-          } else {
-            updateGenProgress(event.current, event.total);
-          }
-          break;
-
-        case 'portrait-complete':
-        case 'scene-complete':
-          addAssetThumb(event.index, event.path, 'image');
-          break;
-
-        case 'clip-complete':
-          addAssetThumb(event.index, null, 'video');
-          break;
-
-        case 'assembly-progress':
-          if (event.progress) {
-            const aText = event.progress.step === 'complete' ? 'Complete!' :
-              `${event.progress.step}: ${event.progress.current || 0}/${event.progress.total || '...'}`;
-            document.getElementById('assembly-progress-text').textContent = aText;
-            if (event.progress.step === 'processing') {
-              const pct = Math.round((event.progress.current / event.progress.total) * 80);
-              document.getElementById('assembly-progress-bar').style.width = pct + '%';
-            } else if (event.progress.step === 'complete') {
-              document.getElementById('assembly-progress-bar').style.width = '100%';
-            }
-          }
-          break;
-
-        case 'assembly-complete':
-          // Assembly done but pipeline continues to record story
-          break;
-
-        case 'publish-ready':
-          showPublishView(event);
-          updateStepper('publish', 'running');
-          updateStatusBadge('waiting');
-          break;
-
-        case 'thumbnail-generated':
-        case 'seo-generated':
-          // UI updates handled in the generate functions
-          break;
-
-        case 'publish-status':
-          addLog(event.message || '', 'info');
-          // Update the generate button text if launching browser
-          const genBtn = document.querySelector('[onclick="generatePublishThumbnail()"]');
-          if (genBtn && genBtn.disabled) {
-            genBtn.textContent = event.message || 'Generating...';
-          }
-          break;
-
-        case 'pipeline-complete':
-          showView('view-complete');
-          updateStepper('export', 'complete');
-          updateStatusBadge('complete');
-          if (event.project?.dir) document.getElementById('output-path').textContent = event.project.dir;
-
-          // Mode/aspect/duration badge — mirror values from the research-view
-          // badge (which loadCacheStatus + setResearchProjectBadge populate).
-          try {
-            const m = document.getElementById('research-badge-mode')?.textContent || 'staged';
-            const a = document.getElementById('research-badge-aspect')?.textContent || '16:9';
-            const d = document.getElementById('research-badge-duration')?.textContent || '10 min';
-            const cmBadge = document.getElementById('complete-mode-badge');
-            if (cmBadge) {
-              document.getElementById('complete-badge-mode').textContent = m;
-              document.getElementById('complete-badge-aspect').textContent = a;
-              document.getElementById('complete-badge-duration').textContent = d;
-              cmBadge.style.display = 'inline-block';
-            }
-          } catch (_) {}
-
-          // Show pool status + Next Story button
-          const cs = event.cacheStatus;
-          const cacheDiv = document.getElementById('complete-cache-status');
-          const nextBtn = document.getElementById('btn-next-story');
-          if (cs && cs.hasCache) {
-            const stories = cs.storiesProduced || 0;
-            cacheDiv.innerHTML = `<div class="cache-status active" style="display:inline-block;"><div class="cache-label" style="color:var(--green);">Research Pool Active</div><div class="cache-detail">${cs.totalVideos} videos · ${stories} stories produced · Expires in ${cs.expiresInHours}h</div></div>`;
-            nextBtn.style.display = 'inline-block';
-            nextBtn.textContent = 'Next Story';
-          } else {
-            cacheDiv.innerHTML = '';
-            nextBtn.style.display = 'inline-block';
-            nextBtn.textContent = 'New Story (Fresh Research)';
-          }
-          break;
-
-        case 'error':
-          updateStatusBadge('error');
-          addLog(event.message, 'error');
-          alert(`Pipeline Error: ${event.message}`);
-          break;
-
-        case 'session-expired':
-          updateStatusBadge('paused');
-          addLog('Session expired — log into Higgsfield in the browser, then click Resume.', 'warn');
-          break;
-
-        case 'cost-inflation-pause':
-          updateStatusBadge('paused');
-          addLog(`⚠ CREDIT COST INFLATED: ${event.message || 'Resolution is likely 4K instead of 720p.'}. Fix resolution in Kling UI, then click Resume.`, 'error');
-          break;
-
-        case 'paused':
-          updateStatusBadge('paused');
-          break;
-
-        case 'resumed':
-          updateStatusBadge('running');
-          break;
-
-        case 'resume-context': {
-          const ctx = event.context;
-          if (ctx?.interruptedAsset) {
-            addLog(`[RESUME] Previous session interrupted during: ${ctx.interruptedAsset.label}`, 'warn');
-          }
-          if (ctx?.sessionStats) {
-            const s = ctx.sessionStats;
-            if (s.completed > 0 || s.failed > 0) {
-              addLog(`[RESUME] Previous session: ${s.completed} completed, ${s.failed} failed, ${s.deduped} deduped`);
-            }
-          }
-          if (ctx?.lastEvent) {
-            addLog(`[RESUME] Last action: ${ctx.lastEvent.type} — ${ctx.lastEvent.label || ctx.lastEvent.stage || ''}`);
-          }
-          break;
-        }
-
-        case 'cancelled':
-          updateStatusBadge('idle');
-          showView('view-launcher');
-          updateStepper('research', 'idle');
-          break;
-
-        case 'dedup-data':
-          renderDedupHistory(event.stories);
-          break;
-      }
-    });
-
-    window.api.onLogMessage((msg) => {
-      addLog(msg.message, msg.level);
-    });
-
-    // ── Dedup History ──
-    function renderDedupHistory(stories) {
-      const container = document.getElementById('dedup-history-list');
-      const wrapper = document.getElementById('dedup-history');
-      if (!stories || stories.length === 0) {
-        wrapper.style.display = 'none';
-        return;
-      }
-      wrapper.style.display = 'block';
-      container.innerHTML = '';
-      stories.slice(-10).reverse().forEach(s => {
-        const div = document.createElement('div');
-        div.className = 'dedup-item';
-        div.innerHTML = `<span class="dedup-title">${s.title}</span><span class="dedup-date">${(s.date || '').slice(0, 10)}</span>`;
-        container.appendChild(div);
-      });
-    }
-
-    async function loadDedupHistory() {
-      try {
-        const stories = await window.api.getProducedStories();
-        renderDedupHistory(stories);
-      } catch (e) {
-        // dedup not available yet, ignore
-      }
-    }
-
-    // ── Init ──
-    loadSettings();
-    loadDedupHistory();
-    loadCacheStatus();
-    populateProjectLogSelector();
-    showView('view-launcher');
-    updateStepper('research', 'idle');
-    updateDurationInfo();  // Populate the duration+aspect summary text on first render
-  </script>
-</body>
-</html>
+            '<div style=

@@ -1693,8 +1693,4 @@ module.exports = {
   getProjectCreditUsage,
   // Migration
   migrateFromStore,
-  // Low-level query helpers (for modules that need custom SQL)
-  queryAll,
-  queryOne,
-  runSql,
-};
+  /
