@@ -422,4 +422,342 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
     }
   }
 
- 
+  async _scoreImageForThumbnail(imagePath) {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const base64Image = imageBuffer.toString('base64');
+
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.geminiApiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: base64Image } },
+              { text: `Rate this image as a YouTube thumbnail candidate on a scale of 1-10. Consider: face visibility, emotional intensity, composition, color vibrancy, visual clarity, and whether it would grab attention in a YouTube feed. Reply strictly JSON: { "score": N, "reason": "one sentence explanation" }` },
+            ],
+          }],
+          generationConfig: { maxOutputTokens: 100 },
+        }),
+      }
+    );
+
+    if (!resp.ok) return { score: 5, reason: 'scoring unavailable' };
+    const data = await resp.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      return { score: result.score || 5, reason: result.reason || '' };
+    }
+    return { score: 5, reason: 'could not parse score' };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CUSTOM THUMBNAIL — Close-up portrait + title card composite
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Full custom thumbnail pipeline: close-up portrait + title card + composite.
+   *
+   * @param {object} params
+   * @param {string} params.title - Movie title
+   * @param {string} params.tagline - Optional tagline
+   * @param {string} params.genre - Genre key (drama, thriller, etc.)
+   * @param {string} params.characterElementName - Suffixed element name (e.g. "mama_adaeze_towwf_0421")
+   * @param {string} params.expression - Emotional expression (e.g. "intense determined")
+   * @param {string} params.outputDir - Directory for outputs
+   * @param {string} params.placement - 'lower-third' | 'upper-third' | 'auto'
+   * @returns {object} { thumbnailPath, keyArtPath, titleCardPath }
+   */
+  async generateCustomThumbnail(params) {
+    const {
+      title, tagline, genre = 'drama',
+      characterElementName, expression = 'intense determined',
+      outputDir, placement = 'lower-third', aspectRatio = '16:9',
+    } = params;
+
+    fs.mkdirSync(outputDir, { recursive: true });
+    const preset = this.presets[genre] || this.presets.drama;
+
+    // Stage 1: Custom close-up key art
+    const keyArtPath = path.join(outputDir, 'key-art-custom.png');
+    await this.generateCustomKeyArt({
+      characterElementName,
+      expression,
+      outputPath: keyArtPath,
+      aspectRatio,
+    });
+
+    // Stage 2: Title card (same as scene-based flow)
+    const titleCardPath = path.join(outputDir, 'title-card.png');
+    await this.generateTitleCard({
+      title, tagline, preset, outputPath: titleCardPath, aspectRatio,
+    });
+
+    // Stage 3: Composite (same as scene-based flow)
+    const thumbnailPath = path.join(outputDir, 'thumbnail-custom.png');
+    await this.compositeThumbnail({
+      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath,
+    });
+
+    return { thumbnailPath, keyArtPath, titleCardPath };
+  }
+
+  /**
+   * Stage 1 (Custom): Generate close-up portrait of main character.
+   * Uses @element reference for face consistency via Nano Banana Pro.
+   *
+   * @param {object} params
+   * @param {string} params.characterElementName - Suffixed element name
+   * @param {string} params.expression - Emotional expression descriptor
+   * @param {string} params.outputPath - Output file path
+   */
+  async generateCustomKeyArt({ characterElementName, expression, outputPath, aspectRatio = '16:9' }) {
+    const orientationHint = aspectRatio === '9:16' ? '9:16 vertical' : '16:9';
+    const spaceHint = aspectRatio === '9:16'
+      ? 'clear space in the lower portion for title text overlay'
+      : 'clear space on one side for title text overlay';
+    const prompt = `Cinematic close-up portrait of @${characterElementName}, ${expression} expression.
+
+Requirements:
+- Tight close-up framing: face fills 60-70% of the frame
+- Cinematic lighting with strong contrast and dramatic shadows
+- Shallow depth of field — background softly blurred
+- ${orientationHint} composition with ${spaceHint}
+- Film-quality color grading, prestige production value
+- Character looking slightly off-camera for dramatic tension
+- NO text, NO title, NO watermarks — portrait only`;
+
+    console.log(`[THUMBNAIL] Custom Stage 1: Generating close-up of @${characterElementName} (${expression}, ${aspectRatio})...`);
+    try {
+      await this._ensureLoggedIn();
+      await this.automation.generateImage({
+        prompt,
+        outputPath,
+        aspectRatio,
+        useUnlimited: true,
+      });
+    } catch (genErr) {
+      if (genErr.message.includes('SESSION_EXPIRED')) {
+        console.log('[THUMBNAIL] Session expired — waiting for login...');
+        await this._waitForLogin();
+        await this.automation.generateImage({
+          prompt,
+          outputPath,
+          aspectRatio,
+          useUnlimited: true,
+        });
+      } else {
+        console.warn(`[THUMBNAIL] Custom Stage 1 failed: ${genErr.message} — attempting Asset library recovery`);
+        const recovered = await this._tryAssetRecovery(prompt, outputPath, 'custom key art');
+        if (!recovered) throw genErr;
+      }
+    }
+    console.log(`[THUMBNAIL] Custom Stage 1 complete: ${outputPath}`);
+  }
+
+  /**
+   * Auto-suggest an emotional expression for the thumbnail based on the script.
+   * Analyzes the script's emotional arcs and dominant tones to pick
+   * the most impactful single expression for a thumbnail close-up.
+   *
+   * @param {object} script - Parsed script JSON (from projects.script_json)
+   * @returns {string} Suggested expression (e.g. "intense determined")
+   */
+  suggestExpression(script) {
+    if (!script || !script.chapters) return 'intense determined';
+
+    // Collect all tone markers from dialogue lines
+    const tones = [];
+    for (const ch of script.chapters) {
+      for (const sc of ch.scenes || []) {
+        for (const line of sc.lines || []) {
+          if (line.tone) tones.push(line.tone.toLowerCase());
+        }
+      }
+    }
+
+    if (tones.length === 0) return 'intense determined';
+
+    // Count frequency of tone markers
+    const freq = {};
+    for (const t of tones) {
+      freq[t] = (freq[t] || 0) + 1;
+    }
+
+    // Map script tones to thumbnail-friendly expressions
+    const toneToExpression = {
+      // Dramatic / intense
+      'angry': 'fierce defiant',
+      'furious': 'fierce defiant',
+      'confrontational': 'steely confrontational',
+      'determined': 'intense determined',
+      'firm': 'intense determined',
+      'commanding': 'powerful commanding',
+      'stern': 'steely resolved',
+      // Emotional / vulnerable
+      'tearful': 'vulnerable tear-streaked',
+      'heartbroken': 'devastated heartbroken',
+      'desperate': 'desperate anguished',
+      'pleading': 'desperate pleading',
+      'grieving': 'grief-stricken devastated',
+      'sad': 'melancholy pensive',
+      // Suspense / mystery
+      'suspicious': 'suspiciously narrowed eyes',
+      'shocked': 'stunned wide-eyed',
+      'fearful': 'fearful wide-eyed',
+      'nervous': 'anxiously tense',
+      'whispering': 'secretive intense',
+      // Strength / resolve
+      'defiant': 'fierce defiant',
+      'cold': 'ice-cold unreadable',
+      'controlled': 'dangerously calm',
+      'strained': 'tightly controlled strain',
+      'resigned': 'wearily resigned',
+      // Warmth
+      'warm': 'warmly knowing',
+      'gentle': 'gentle compassionate',
+      'loving': 'tender loving',
+      'hopeful': 'cautiously hopeful',
+    };
+
+    // Find the most dramatic (not warm) tone — thumbnails need tension
+    const dramaticTones = ['angry', 'furious', 'confrontational', 'determined', 'defiant',
+      'tearful', 'heartbroken', 'desperate', 'shocked', 'cold', 'strained'];
+
+    // Sort by frequency, prefer dramatic tones
+    const ranked = Object.entries(freq).sort((a, b) => {
+      const aDramatic = dramaticTones.some(d => a[0].includes(d)) ? 10 : 0;
+      const bDramatic = dramaticTones.some(d => b[0].includes(d)) ? 10 : 0;
+      return (bDramatic + b[1]) - (aDramatic + a[1]);
+    });
+
+    const topTone = ranked[0]?.[0] || 'determined';
+
+    // Find best match in expression map
+    for (const [key, expr] of Object.entries(toneToExpression)) {
+      if (topTone.includes(key)) return expr;
+    }
+
+    return 'intense determined'; // Fallback — always works for drama thumbnails
+  }
+
+  /**
+   * Get characters available for custom thumbnail from a project.
+   * Returns character names with their element names for dropdown.
+   *
+   * @param {object} script - Parsed script JSON
+   * @param {string} elementSuffix - Element name suffix (e.g. "towwf_0421")
+   * @returns {Array<{name, elementName, dialogueCount}>}
+   */
+  getCharactersForThumbnail(script, elementSuffix) {
+    if (!script || !script.character_bible) return [];
+
+    const bible = script.character_bible;
+
+    // Count dialogue lines per character
+    const dialogueCounts = {};
+    for (const ch of script.chapters || []) {
+      for (const sc of ch.scenes || []) {
+        for (const line of sc.lines || []) {
+          const speaker = (line.speaker_id || '').replace(/^@/, '').toLowerCase();
+          dialogueCounts[speaker] = (dialogueCounts[speaker] || 0) + 1;
+        }
+      }
+    }
+
+    return bible.map(char => {
+      const hint = (char.element_name_hint || '').replace(/^@/, '').toLowerCase();
+      const suffixedName = elementSuffix ? `${hint}_${elementSuffix}` : hint;
+      const count = dialogueCounts[hint] || 0;
+
+      return {
+        name: char.name || hint,
+        elementNameHint: hint,
+        elementName: suffixedName,
+        dialogueCount: count,
+      };
+    }).sort((a, b) => b.dialogueCount - a.dialogueCount); // Most dialogue first
+  }
+
+  /**
+   * Check if user is logged in before attempting generation.
+   * If not logged in, triggers _waitForLogin automatically.
+   * Mirrors the orchestrator's SESSION_EXPIRED → pause → resume pattern.
+   */
+  async _ensureLoggedIn() {
+    if (!this.automation || typeof this.automation.isLoggedIn !== 'function') return;
+    try {
+      // Navigate to image gen page so isLoggedIn can check for Login/Sign up buttons
+      if (this.automation.page) {
+        const url = this.automation.page.url();
+        if (!url.includes('higgsfield.ai')) {
+          await this.automation.page.goto('https://higgsfield.ai/ai/image?model=nano-banana-pro', {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000,
+          }).catch(() => {});
+        }
+      }
+      const loggedIn = await this.automation.isLoggedIn();
+      if (!loggedIn) {
+        console.log('[THUMBNAIL] Not logged in — waiting for login before generation...');
+        await this._waitForLogin();
+      }
+    } catch (e) {
+      // If check fails, proceed anyway — generateImage will throw SESSION_EXPIRED if needed
+      console.warn(`[THUMBNAIL] Login check failed: ${e.message} — proceeding`);
+    }
+  }
+
+  /**
+   * Wait for the user to log in to Higgsfield AI.
+   * Relaunches the browser to higgsfield.ai login page, then polls
+   * isLoggedIn() every 10s until the user completes login.
+   * Same pattern as orchestrator SESSION_EXPIRED recovery.
+   */
+  async _waitForLogin() {
+    if (!this.automation) throw new Error('No automation instance for login wait');
+
+    // Relaunch browser to give user a clean login page
+    try {
+      await this.automation.close();
+    } catch (_) {}
+    await this.automation.ensureBrowser();
+
+    // Navigate to Higgsfield so user sees the login prompt
+    try {
+      await this.automation.page.goto('https://higgsfield.ai', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+    } catch (_) {}
+
+    console.log('[THUMBNAIL] Browser opened to higgsfield.ai — please log in to continue...');
+
+    // Poll isLoggedIn() every 10 seconds, up to 10 minutes
+    const maxWaitMs = 10 * 60 * 1000;
+    const pollIntervalMs = 10000;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitMs) {
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+      try {
+        const loggedIn = await this.automation.isLoggedIn();
+        if (loggedIn) {
+          console.log('[THUMBNAIL] ✓ Login detected — resuming thumbnail generation');
+          return;
+        }
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[THUMBNAIL] Still waiting for login... (${elapsed}s elapsed)`);
+      } catch (_) {
+        // Page might be navigating during login — keep polling
+      }
+    }
+
+    throw new Error('Login wait timed out after 10 minutes — please restart the pipeline');
+  }
+}
+
+module.exports = { ThumbnailGenerator };

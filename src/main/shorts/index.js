@@ -167,4 +167,140 @@ class ShortsController {
 
         current++;
         const total = current + db.queryOne(
-          `SELECT COUNT(*) as cnt 
+          `SELECT COUNT(*) as cnt FROM shorts WHERE project_id = ? AND status = 'seo_done'`,
+          [projectId]
+        )?.cnt || 0;
+
+        this.log(`[SHORTS] Uploading short #${nextShort.short_number} (${current} of batch) → ${nextShort.scheduled_date}`);
+        this._emitProgress({ phase: 'upload', current, total, shortNumber: nextShort.short_number, scheduledDate: nextShort.scheduled_date, status: 'uploading' });
+
+        const description = this._buildFullDescription(nextShort);
+
+        const result = await this.uploader.scheduleReel({
+          filePath: nextShort.file_path,
+          description,
+          scheduledDate: nextShort.scheduled_date,
+          scheduledTime: nextShort.scheduled_time,
+        });
+
+        if (result.success) {
+          this.scheduler.markUploaded(nextShort.id, result.facebookPostId || null);
+          uploaded++;
+          this.log(`[SHORTS] Short #${nextShort.short_number} scheduled for ${nextShort.scheduled_date}`);
+        } else {
+          this.scheduler.markFailed(nextShort.id, result.error);
+          failed++;
+          this.log(`[SHORTS] Short #${nextShort.short_number} failed: ${result.error}`);
+        }
+
+        if (onProgress) {
+          onProgress({
+            current, total,
+            shortNumber: nextShort.short_number,
+            scheduledDate: nextShort.scheduled_date,
+            success: result.success,
+            error: result.error || null,
+          });
+        }
+      }
+
+      // All done — mark project as repurposed if everything uploaded
+      if (failed === 0 && uploaded > 0) {
+        this.scheduler.markProjectRepurposed(projectId);
+        this.log(`[SHORTS] All ${uploaded} shorts scheduled. Project marked as repurposed.`);
+      }
+    } finally {
+      // Always close browser when done
+      await this.closeUploadSession();
+    }
+
+    return { uploaded, failed, total: uploaded + failed };
+  }
+
+  /**
+   * Get status of all shorts for a project.
+   */
+  getStatus(projectId) {
+    const shorts = this.scheduler.getShortsForProject(projectId);
+    const summary = {
+      total: shorts.length,
+      planned: shorts.filter(s => s.status === 'planned').length,
+      pending: shorts.filter(s => s.status === 'pending').length,
+      assembled: shorts.filter(s => s.status === 'assembled').length,
+      seo_done: shorts.filter(s => s.status === 'seo_done').length,
+      scheduled: shorts.filter(s => s.status === 'scheduled').length,
+      failed: shorts.filter(s => s.status === 'failed').length,
+    };
+
+    // Reconstruct stats from persisted shorts (survives restart)
+    let stats = null;
+    if (shorts.length > 0) {
+      const totalDuration = shorts.reduce((sum, s) => sum + (s.duration_seconds || 0), 0);
+      const dates = shorts.map(s => s.scheduled_date).filter(Boolean).sort();
+      const startDate = dates[0] || null;
+      const endDate = dates[dates.length - 1] || null;
+      const calendarDays = (startDate && endDate)
+        ? Math.round((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1
+        : 0;
+
+      // Count unique source clips across all shorts
+      let totalClips = 0;
+      const allClipIds = new Set();
+      for (const s of shorts) {
+        try {
+          const ids = JSON.parse(s.source_clips || '[]');
+          ids.forEach(id => allClipIds.add(id));
+        } catch (_) {}
+      }
+      totalClips = allClipIds.size;
+
+      const avgDuration = shorts.length > 0 ? Math.round(totalDuration / shorts.length) : 0;
+      const postsPerDay = calendarDays > 0 ? Math.max(1, Math.ceil(shorts.length / calendarDays)) : 1;
+
+      stats = {
+        totalClips,
+        totalDuration: Math.round(totalDuration),
+        totalShorts: shorts.length,
+        targetPerShort: avgDuration,
+        postsPerDay,
+        startDate,
+        endDate,
+        calendarDays,
+      };
+    }
+
+    return { shorts, summary, stats };
+  }
+
+  /**
+   * Close Playwright session.
+   */
+  async closeUploadSession() {
+    if (this.uploader) {
+      await this.uploader.close();
+      this.uploader = null;
+    }
+  }
+
+  // ── Private ──
+
+  _emitProgress(data) {
+    if (this.onProgress) this.onProgress(data);
+  }
+
+  _buildFullDescription(short) {
+    let desc = short.description || '';
+    // Append hashtags if not already in description
+    if (short.hashtags) {
+      try {
+        const tags = JSON.parse(short.hashtags);
+        if (tags.length > 0 && !desc.includes(tags[0])) {
+          desc += '\n\n' + tags.join(' ');
+        }
+      } catch (_) {}
+    }
+    return desc;
+  }
+}
+
+module.exports = { ShortsController, ShortsScheduler, FacebookUploader };

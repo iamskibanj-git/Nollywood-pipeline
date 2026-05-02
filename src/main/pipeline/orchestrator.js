@@ -1303,6 +1303,9 @@ class PipelineOrchestrator {
             this.log(`Resuming portraits: ${doneCount}/${characters.length} already done`);
           }
 
+          const portraitStartTime = Date.now();
+          let portraitGenCount = 0;
+
           for (const asset of incompletePortraits) {
             if (this.cancelled) return;
             await this.checkPause();
@@ -1311,9 +1314,18 @@ class PipelineOrchestrator {
             if (!char) continue;
 
             const idx = characters.indexOf(char);
+            const currentNum = doneCount + incompletePortraits.indexOf(asset) + 1;
             const assetLabel = `portrait ${idx + 1}/${characters.length}: ${char.description_label}`;
             this.log(`Generating ${assetLabel}`);
-            this.emit({ type: 'progress', stage: 'portraits', current: doneCount + incompletePortraits.indexOf(asset) + 1, total: characters.length });
+            const pElapsed = Math.round((Date.now() - portraitStartTime) / 1000);
+            const pPerItem = portraitGenCount > 0 ? pElapsed / portraitGenCount : 0;
+            const pRemaining = portraitGenCount > 0 ? Math.round(pPerItem * (incompletePortraits.length - incompletePortraits.indexOf(asset))) : null;
+            this.emit({
+              type: 'progress', stage: 'portraits',
+              current: currentNum, total: characters.length,
+              generated: doneCount + portraitGenCount, label: char.description_label,
+              elapsed: pElapsed, eta: pRemaining,
+            });
 
             const portraitPath = path.join(portraitDir, `portrait_${char.id}.png`);
             // HARD RULE: No aspect ratio or orientation in prompt text.
@@ -1584,6 +1596,7 @@ class PipelineOrchestrator {
               this.log(`Portrait failed for ${char.description_label}: ${err.message}`, 'error');
               throw err; // Bubble up — user can resume later
             }
+            portraitGenCount++;
           }
 
           // Verify ALL portraits are done before advancing.
@@ -1890,6 +1903,9 @@ class PipelineOrchestrator {
           }
 
           let currentLine = 0;
+          const sceneStartTime = Date.now();
+          let sceneGenCount = 0;
+          let sceneSkipCount = doneCount;
 
           for (const chapter of this.state.script.chapters) {
             for (const scene of chapter.scenes) {
@@ -1914,7 +1930,15 @@ class PipelineOrchestrator {
 
                 const sceneLabel = `scene Ch${chapter.chapter_number} L${line.line_number} (${currentLine}/${totalLines})`;
                 this.log(`Scene image ${currentLine}/${totalLines}: Ch${chapter.chapter_number} Line ${line.line_number}`);
-                this.emit({ type: 'progress', stage: 'scenes', current: currentLine, total: totalLines });
+                const sElapsed = Math.round((Date.now() - sceneStartTime) / 1000);
+                const sPerItem = sceneGenCount > 0 ? sElapsed / sceneGenCount : 0;
+                const sRemaining = sceneGenCount > 0 ? Math.round(sPerItem * (incompleteScenes.length - sceneGenCount)) : null;
+                this.emit({
+                  type: 'progress', stage: 'scenes',
+                  current: currentLine, total: totalLines,
+                  generated: doneCount + sceneGenCount, skipped: sceneSkipCount,
+                  elapsed: sElapsed, eta: sRemaining,
+                });
 
                 // Sanitize continuity tag — fix garbled/interleaved tags from LLM output
                 const sanitizedPrompt = this.sanitizeContinuityTag(line.image_prompt, line.line_number);
@@ -1951,6 +1975,7 @@ class PipelineOrchestrator {
                     status: 'complete',
                   });
                   this.emit({ type: 'scene-complete', index: currentLine - 1, path: outputPath });
+                  sceneGenCount++;
                   continue;
                 }
 
@@ -1979,6 +2004,7 @@ class PipelineOrchestrator {
                     status: 'complete',
                   });
                   this.emit({ type: 'scene-complete', index: currentLine - 1, path: outputPath });
+                  sceneGenCount++;
                 } catch (err) {
                   // Clean-abort path: cancelled OR user closed browser → reset asset, exit
                   if (this.cancelled || (err.message && err.message.includes('Target') && err.message.includes('closed'))) {
@@ -2169,6 +2195,8 @@ class PipelineOrchestrator {
           // Initial counts
           const allClipAssets = db.getAssets(projectId, { type: 'video_clip' });
           const totalClips = allClipAssets.length;
+          const videoStartTime = Date.now();
+          let videoGenCount = 0;
 
           // Build lookup of scene images by chapter+line (shared across retry rounds)
           const sceneImageMap = {};
@@ -2251,6 +2279,7 @@ class PipelineOrchestrator {
                   this.log(`[RECOVERY] Successfully re-downloaded clip Ch${asset.chapter} L${asset.line} (${videoData.length} bytes)`);
                   this.state.videoClips.push({ chapter: asset.chapter, line: asset.line, path: clipPath, status: 'complete' });
                   this.emit({ type: 'clip-complete', index: clipIndex - 1, path: clipPath });
+                  videoGenCount++;
                   continue; // Skip to next clip — no need to re-generate
                 } else {
                   this.log(`[RECOVERY] Downloaded file too small (${fs.statSync(clipPath).size} bytes) — will re-generate`, 'warn');
@@ -2267,7 +2296,17 @@ class PipelineOrchestrator {
 
             const clipLabel = `clip Ch${asset.chapter} L${asset.line} (${clipIndex}/${totalClips})`;
             this.log(`Video clip ${clipIndex}/${totalClips}: ${clipFilename}`);
-            this.emit({ type: 'progress', stage: 'video', current: clipIndex, total: totalClips });
+            {
+              const vElapsed = Math.round((Date.now() - videoStartTime) / 1000);
+              const vPerItem = videoGenCount > 0 ? vElapsed / videoGenCount : 0;
+              const vRemaining = videoGenCount > 0 ? Math.round(vPerItem * (totalClips - clipIndex)) : null;
+              this.emit({
+                type: 'progress', stage: 'video',
+                current: clipIndex, total: totalClips,
+                generated: videoGenCount, clipLabel,
+                elapsed: vElapsed, eta: vRemaining,
+              });
+            }
 
             // Build prompt with explicit speaker/non-speaker lip-sync instructions
             const videoPrompt = this.buildVideoPrompt(line, scene, this.state.project.brief.accent);
@@ -2290,6 +2329,7 @@ class PipelineOrchestrator {
                 status: 'complete',
               });
               this.emit({ type: 'clip-complete', index: clipIndex - 1, path: clipPath });
+              videoGenCount++;
               continue;
             }
 
@@ -2311,6 +2351,7 @@ class PipelineOrchestrator {
                 status: 'complete',
               });
               this.emit({ type: 'clip-complete', index: clipIndex - 1, path: clipPath });
+              videoGenCount++;
             } catch (err) {
               // Clean-abort path: cancelled OR user closed browser → reset + exit
               if (this.cancelled || (err.message && err.message.includes('Target') && err.message.includes('closed'))) {
@@ -2373,6 +2414,7 @@ class PipelineOrchestrator {
                       status: 'complete',
                     });
                     this.emit({ type: 'clip-complete', index: clipIndex - 1, path: clipPath });
+                    videoGenCount++;
                     continue; // skip failure path — asset is now done
                   }
 
@@ -4354,9 +4396,19 @@ class PipelineOrchestrator {
     const locImagePaths = {}; // hint → file_path
 
     let idx = 0;
+    const locStartTime = Date.now();
+    let locGenCount = 0;
     for (const [hint, loc] of locationMap.entries()) {
       idx++;
-      this.emit({ type: 'progress', stage: 'cinematic-locations', current: idx, total: locationMap.size });
+      const lElapsed = Math.round((Date.now() - locStartTime) / 1000);
+      const lPerItem = locGenCount > 0 ? lElapsed / locGenCount : 0;
+      const lRemaining = locGenCount > 0 ? Math.round(lPerItem * (locationMap.size - idx)) : null;
+      this.emit({
+        type: 'progress', stage: 'cinematic-locations',
+        current: idx, total: locationMap.size,
+        generated: locGenCount, label: loc.name,
+        elapsed: lElapsed, eta: lRemaining,
+      });
 
       // Reuse existing if file present + on disk
       // Check by element_name first, then fall back to file path on disk
@@ -4369,6 +4421,7 @@ class PipelineOrchestrator {
           const rotated = await this._fixLocationOrientation(existing.file_path, this.state.aspectRatio || '16:9');
           if (rotated) this.log(`[CINEMATIC] ↻ Existing location @${loc.name} auto-rotated`);
         } catch (_) {}
+        locGenCount++;
         continue;
       }
       // Fallback: check if file exists on disk even if DB element_name was cleared
@@ -4386,6 +4439,7 @@ class PipelineOrchestrator {
           try { db.setAssetElementName(existing.id, loc.name); } catch (_) {}
           if (existing.status !== 'done') db.markAssetDone(existing.id, expectedLocPath, { recovered: true });
         }
+        locGenCount++;
         continue;
       }
 
@@ -4524,6 +4578,7 @@ class PipelineOrchestrator {
           }
         }
       }
+      locGenCount++;
     }
 
     // NOTE: Locations are NOT created as Higgsfield elements. Cinema Studio 3.5
@@ -6513,6 +6568,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     let idx = 0;
     let browserDead = false; // Cascade protection: stop retrying if browser died
+    const cSceneStartTime = Date.now();
+    let cSceneGenCount = 0;
 
     // ── CONTINUITY TRACKING: remember the last generated/existing scene image per location ──
     // When consecutive scenes share the same location, the previous scene's output
@@ -6523,12 +6580,23 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       idx++;
       const key = `${chapter}_${scene.scene_number}`;
       const sceneLocHint = (scene.location_element_hint || '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
-      this.emit({ type: 'progress', stage: 'cinematic-scenes', current: idx, total: allScenes.length });
+      {
+        const csElapsed = Math.round((Date.now() - cSceneStartTime) / 1000);
+        const csPerItem = cSceneGenCount > 0 ? csElapsed / cSceneGenCount : 0;
+        const csRemaining = cSceneGenCount > 0 ? Math.round(csPerItem * (allScenes.length - idx)) : null;
+        this.emit({
+          type: 'progress', stage: 'cinematic-scenes',
+          current: idx, total: allScenes.length,
+          generated: cSceneGenCount,
+          elapsed: csElapsed, eta: csRemaining,
+        });
+      }
 
       if (existingByKey[key]) {
         this.log(`[CINEMATIC] Scene Ch${chapter} Sc${scene.scene_number} already generated — skipping`);
         // Track this existing scene for continuity even though we're skipping generation
         if (sceneLocHint) lastSceneImageByLocation[sceneLocHint] = existingByKey[key];
+        cSceneGenCount++;
         continue;
       }
 
@@ -6846,6 +6914,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       if (sceneSuccess && sceneLocHint) {
         lastSceneImageByLocation[sceneLocHint] = outputPath;
       }
+      cSceneGenCount++;
 
       if (browserDead) {
         this.log(`[CINEMATIC] Browser dead — skipping remaining ${allScenes.length - 1 - idx} scene(s)`, 'warn');
@@ -7143,6 +7212,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     let skipped = 0;
     let failed = 0;
     let dialogueSkipped = 0;
+    const clipGenStartTime = Date.now();
 
     // ── LAZY VISION VERIFICATION CACHE ──
     // Blocking verification against the rendered scene image is expensive (~1 Sonnet
@@ -7158,7 +7228,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       const clipId = clipDef.clip_id || `ch${chapter}_sc${scene}_c${i + 1}`;
       const label = `${clipId} (Ch${chapter} Sc${scene}, ${clipDef.duration_seconds || 10}s, ${(clipDef.line_refs || []).length} line(s))`;
 
-      this.emit({ type: 'progress', stage: 'cinematic-video', current: i + 1, total: allKlingClips.length });
+      // Emit rich progress with ETA
+      {
+        const processed = generated + skipped + failed + dialogueSkipped;
+        const elapsed = (Date.now() - clipGenStartTime) / 1000;
+        const activeGenerated = generated; // clips that actually went through Kling (not skipped)
+        const perClip = activeGenerated > 0 ? elapsed / activeGenerated : 0;
+        const remaining = activeGenerated > 0 ? Math.round(perClip * (allKlingClips.length - processed - skipped)) : null;
+        this.emit({
+          type: 'progress', stage: 'cinematic-video',
+          current: i + 1, total: allKlingClips.length,
+          generated, skipped: skipped + dialogueSkipped, failed,
+          clipId, clipLabel: label,
+          elapsed: Math.round(elapsed), eta: remaining,
+        });
+      }
 
       // Skip clips marked as 'skipped' during dialogue triage
       if (skippedByClipId[clipId]) {
@@ -8304,6 +8388,16 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
     }
 
+    // Emit final progress summary
+    {
+      const totalElapsed = Math.round((Date.now() - clipGenStartTime) / 1000);
+      this.emit({
+        type: 'progress', stage: 'cinematic-video',
+        current: allKlingClips.length, total: allKlingClips.length,
+        generated, skipped: skipped + dialogueSkipped, failed,
+        elapsed: totalElapsed, eta: 0, done: true,
+      });
+    }
     this.log(`[CINEMATIC] Video stage complete — ${generated} generated, ${skipped} resumed, ${dialogueSkipped} dialogue-skipped, ${failed} failed`);
 
     // ── BACKFILL PASS: retry any clips that failed during the main loop ──
@@ -10531,4 +10625,157 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           // ensureBrowser() on next fn() call will relaunch a fresh browser
           // where the user can log in. Navigate to Higgsfield login page.
           await this.automation.ensureBrowser();
-          await this.automation.page.goto('https:/
+          await this.automation.page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          this.log('Fresh browser opened — please log into Higgsfield, then click Resume.');
+        }
+
+        // Wait for user to log in and click Resume
+        await new Promise((resolve) => { this._pauseResolver = resolve; });
+
+        // If we were woken by cancel/shutdown, don't retry — just bail
+        if (this.cancelled) {
+          throw new Error('Pipeline cancelled during session recovery');
+        }
+
+        // Save the fresh session cookies from the Playwright browser
+        if (this.automation) {
+          try { await this.automation.saveSession(); } catch (_) { /* ignore */ }
+        }
+
+        // Retry once after re-auth
+        this.state.status = 'running';
+        this.emit({ type: 'resumed' });
+        this.log(`Retrying ${label} after re-authentication...`);
+        return await fn();
+      }
+      throw err; // Non-session error — bubble up normally
+    }
+  }
+
+  /**
+   * Rewrite a character's full_prompt_description to avoid NSFW/restricted content
+   * rejection on Higgsfield. Called when Higgsfield flags a portrait as "Restricted
+   * content detected" — typically because the description resembles a real person.
+   *
+   * Uses Claude to rephrase the description with more fictional/stylized traits
+   * while preserving the character's role and visual identity for the story.
+   *
+   * @param {Object} char - Character object from character_bible (mutated in place by caller)
+   * @returns {string|null} New description, or null if rewrite failed
+   */
+  async _rewriteCharacterDescription(char) {
+    const apiKey = this.store.get('claudeApiKey');
+    if (!apiKey) {
+      this.log('[NSFW] No Claude API key — cannot rewrite description', 'error');
+      return null;
+    }
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({ apiKey });
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: `An AI image generator rejected this character description as "restricted content" (it likely resembles a real person too closely). Rewrite the physical description to be more fictional and stylized while keeping the character believable for a Nollywood drama.
+
+RULES:
+- Change distinctive facial features enough that they don't match any real person
+- Keep the same ethnicity, approximate age, gender, and body type
+- Keep the same wardrobe/clothing description (this is important for visual continuity)
+- Make features more distinctive/unique/fictional (e.g., unusual eye color, specific scar patterns, distinctive hairstyle)
+- Do NOT use any celebrity names or references to real people
+- Output ONLY the rewritten description text, nothing else — no explanation, no preamble
+- Match the same format: "A [age]-year-old [nationality] [gender] with [skin], [hair], [eyes], [features], [build] at [height], wearing [wardrobe]"
+
+ORIGINAL DESCRIPTION:
+${char.full_prompt_description}
+
+CHARACTER NAME: ${char.name || char.description_label}
+
+REWRITTEN DESCRIPTION:`,
+      }],
+    });
+
+    const newDesc = (response.content[0]?.text || '').trim();
+    if (!newDesc || newDesc.length < 50) {
+      this.log(`[NSFW] Claude returned unusable description (${newDesc.length} chars)`, 'warn');
+      return null;
+    }
+
+    return newDesc;
+  }
+
+  /**
+   * Persist the current script state (including character_bible changes) to disk.
+   * Called after modifying character descriptions (e.g., NSFW rewrite).
+   */
+  _saveScriptState(projectId) {
+    try {
+      const projectDir = this.state?.project?.dir;
+      if (!projectDir || !this.state.script) return;
+      const scriptPath = path.join(projectDir, 'script.json');
+      fs.writeFileSync(scriptPath, JSON.stringify(this.state.script, null, 2));
+      this.log(`[SCRIPT] Saved updated script to ${scriptPath}`);
+
+      // Also update in DB if the method exists
+      if (db.updateProjectScript) {
+        db.updateProjectScript(projectId, this.state.script);
+      }
+    } catch (e) {
+      this.log(`[SCRIPT] Failed to save script state: ${e.message}`, 'warn');
+    }
+  }
+
+  // ── Pause/Resume/Cancel ──
+  pause() {
+    this.paused = true;
+    this.state.status = 'paused';
+    const pid = this.state.project?.id;
+    if (pid) db.logEvent(pid, 'pause', { stage: this.state.currentStage, detail: `Paused during ${this.state.currentStage}` });
+    this.emit({ type: 'paused' });
+    this.log('Pipeline paused');
+  }
+
+  resume() {
+    this.paused = false;
+    this.state.status = 'running';
+    const pid = this.state.project?.id;
+    if (pid) db.logEvent(pid, 'resume', { stage: this.state.currentStage, detail: `Resumed in ${this.state.currentStage}` });
+    if (this._pauseResolver) {
+      this._pauseResolver();
+      this._pauseResolver = null;
+    }
+    this.emit({ type: 'resumed' });
+    this.log('Pipeline resumed');
+  }
+
+  cancel() {
+    this.cancelled = true;
+    this.paused = false;
+    this.state.status = 'idle';
+    const pid = this.state.project?.id;
+    if (pid) db.logEvent(pid, 'cancel', { stage: this.state.currentStage, detail: `Cancelled during ${this.state.currentStage}` });
+    if (this._pauseResolver) {
+      this._pauseResolver();
+      this._pauseResolver = null;
+    }
+    // Resolve any waiting approval gates
+    for (const key of Object.keys(this._approvalResolvers)) {
+      this._approvalResolvers[key]();
+      delete this._approvalResolvers[key];
+    }
+    if (this.automation) this.automation.cancel();
+    this.emit({ type: 'cancelled' });
+    this.log('Pipeline cancelled');
+  }
+
+  _pauseResolver = null;
+  checkPause() {
+    if (!this.paused) return Promise.resolve();
+    return new Promise((resolve) => { this._pauseResolver = resolve; });
+  }
+}
+
+module.exports = { PipelineOrchestrator };

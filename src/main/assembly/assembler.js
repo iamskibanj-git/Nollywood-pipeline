@@ -151,12 +151,18 @@ class VideoAssembler {
     const processedClips = [];
     let brandingClipIndex = 0;
     const trim = this.trimStartSeconds;
+    const assemblyStartTime = Date.now();
 
     for (let i = 0; i < sortedClips.length; i++) {
       const clip = sortedClips[i];
       const tempPath = path.join(tempDir, `processed_${String(i).padStart(4, '0')}.mp4`);
 
-      if (onProgress) onProgress({ step: 'processing', current: i + 1, total: sortedClips.length });
+      if (onProgress) {
+        const aElapsed = Math.round((Date.now() - assemblyStartTime) / 1000);
+        const aPerClip = i > 0 ? aElapsed / i : 0;
+        const aRemaining = i > 0 ? Math.round(aPerClip * (sortedClips.length - i)) : null;
+        onProgress({ step: 'processing', current: i + 1, total: sortedClips.length, elapsed: aElapsed, eta: aRemaining });
+      }
 
       const ffmpegArgs = ['-i', clip.path];
 
@@ -213,7 +219,7 @@ class VideoAssembler {
     // and can still produce drift when timestamps don't align perfectly.
     // Re-encoding during concat forces a single continuous timeline and lets
     // ffmpeg resync audio to video (aresample=async=1).
-    if (onProgress) onProgress({ step: 'concatenating', current: 0, total: 1 });
+    if (onProgress) onProgress({ step: 'concatenating', current: 0, total: 1, elapsed: Math.round((Date.now() - assemblyStartTime) / 1000) });
 
     const concatTempPath = path.join(tempDir, 'concatenated.mp4');
     await this.runFFmpeg([
@@ -231,7 +237,7 @@ class VideoAssembler {
     ]);
 
     // Step 4: Upscale to 4K + fade in/out + branding overlay
-    if (onProgress) onProgress({ step: 'upscaling', current: 0, total: 1 });
+    if (onProgress) onProgress({ step: 'upscaling', current: 0, total: 1, elapsed: Math.round((Date.now() - assemblyStartTime) / 1000) });
 
     // Probe concatenated video duration for fade-out timing
     let totalDuration = 0;
@@ -325,7 +331,7 @@ class VideoAssembler {
       console.warn('Could not clean up temp assembly files');
     }
 
-    if (onProgress) onProgress({ step: 'complete', outputPath });
+    if (onProgress) onProgress({ step: 'complete', outputPath, elapsed: Math.round((Date.now() - assemblyStartTime) / 1000) });
     return outputPath;
   }
 

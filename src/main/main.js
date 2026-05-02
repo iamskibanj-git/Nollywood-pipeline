@@ -321,4 +321,44 @@ ipcMain.handle('test-api-keys', async () => {
   } else {
     try {
       const resp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Reply with just the word OK' }] }],
+            generationConfig: { maxOutputTokens: 10 },
+          }),
+        }
+      );
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        results.gemini = { ok: false, error: `HTTP ${resp.status}: ${errBody.substring(0, 150)}` };
+      } else {
+        const data = await resp.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        results.gemini = { ok: true, response: text.substring(0, 50) };
+      }
+    } catch (e) {
+      results.gemini = { ok: false, error: e.message?.substring(0, 200) || 'Network error' };
+    }
+  }
+
+  return results;
+});
+
+// Higgsfield selectors config
+ipcMain.handle('get-selectors', () => {
+  const selectorsPath = path.join(__dirname, '..', '..', 'config', 'higgsfield-selectors.json');
+  try {
+    return require(selectorsPath);
+  } catch {
+    return null;
+  }
+});
+ipcMain.handle('save-selectors', (_, selectors) => {
+  const fs = require('fs');
+  const selectorsPath = path.join(__dirname, '..', '..', 'config', 'higgsfield-selectors.json');
+  fs.writeFileSync(selectorsPath, JSON.stringify(selectors, null, 2));
+  return true;
+});
