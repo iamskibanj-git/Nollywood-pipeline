@@ -1039,7 +1039,7 @@
           const hfDollars = hfCredits * 0.10;
           const totalDollars = claudeCost + hfDollars;
 
-          const tierLabel = c.tier === 'test' ? 'test' : c.tier === 'long-form' ? 'long-form — 3-act + B-plot' : 'standard — 3-act';
+          const tierLabel = c.tier === 'test' ? 'test' : c.tier === 'prestige' ? 'prestige — 5-act + dual B-plots' : c.tier === 'long-form' ? 'long-form — 3-act + B-plot' : 'standard — 3-act';
           const line1 = `${c.chapters} chapters · ~${c.targetClips} clips · unlimited scenes/lines · ~${estMinutes} min (${tierLabel})`;
           const line2 = `Script: ~${(scriptTokens / 1000).toFixed(0)}K tokens in ${numBatches} batches · $${claudeCost.toFixed(2)} API` +
             ` | Gen: ~${hfCredits.toLocaleString()} credits · ~$${hfDollars.toFixed(0)}` +
@@ -1073,7 +1073,7 @@
         const hfDollars = hfCredits * 0.10;
         const totalDollars = claudeCost + hfDollars;
 
-        const tierLabel = s.tier === 'test' ? 'test' : s.tier === 'long-form' ? 'long-form — 3-act + B-plot' : 'standard — 3-act';
+        const tierLabel = s.tier === 'test' ? 'test' : s.tier === 'prestige' ? 'prestige — 5-act + dual B-plots' : s.tier === 'long-form' ? 'long-form — 3-act + B-plot' : 'standard — 3-act';
         const line1 = `${s.chapters} chapters × ${s.scenesPerChapter} scenes × ${s.linesPerScene} lines = ${totalLines} clips · ~${estMinutes} min (${tierLabel})`;
         const line2 = `Script: ~${(scriptTokens / 1000).toFixed(0)}K tokens` +
           (needsBatches ? ` in ${numBatches} batches` : '') +
@@ -1360,7 +1360,8 @@
       const pass = !!review.pass;
       const score = review.score || 0;
       const threshold = review.threshold || 0;
-      const tierLabel = review.tier === 'long-form' ? 'Long-form (20-30 min)'
+      const tierLabel = review.tier === 'prestige' ? 'Prestige (45 min)'
+        : review.tier === 'long-form' ? 'Long-form (20-30 min)'
         : review.tier === 'standard' ? 'Standard (10 min)'
         : 'Test (1-5 min)';
 

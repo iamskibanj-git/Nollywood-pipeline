@@ -816,7 +816,10 @@ Generate the arc skeleton now. JSON only.`;
       arc_summary: c.arc_summary,
       speech_style: c.speech_style,
       speech_notes: c.speech_notes,
-      outfit_count: (c.outfits || []).length,
+      outfits: (c.outfits || []).map(o => ({
+        outfit_id: o.outfit_id || o.id,
+        context: o.context || o.description || o.label || '',
+      })),
     }));
 
     for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
@@ -940,6 +943,30 @@ Generate chapter outlines ${batchStart}-${batchEnd} now. JSON only.`;
       allChapterOutlines.push(...batchOutlines);
       console.log(`[SCRIPT] ${batchLabel} complete: ${batchOutlines.length} chapter outlines (total: ${allChapterOutlines.length}/${totalChapters})`);
     }
+
+    // ── Validate outline coverage: every chapter 1..totalChapters exactly once ──
+    const seen = new Set();
+    const duplicates = [];
+    for (const ol of allChapterOutlines) {
+      const cn = ol.chapter_number;
+      if (seen.has(cn)) duplicates.push(cn);
+      seen.add(cn);
+    }
+    const missing = [];
+    for (let i = 1; i <= totalChapters; i++) {
+      if (!seen.has(i)) missing.push(i);
+    }
+    if (duplicates.length || missing.length) {
+      const parts = [];
+      if (missing.length) parts.push(`missing chapters: ${missing.join(', ')}`);
+      if (duplicates.length) parts.push(`duplicate chapters: ${duplicates.join(', ')}`);
+      throw new Error(
+        `Prestige outline validation failed — expected exactly chapters 1-${totalChapters} but got ${allChapterOutlines.length} outlines (${parts.join('; ')}). ` +
+        `Re-run to retry.`
+      );
+    }
+    // Sort by chapter number in case batches returned out of order
+    allChapterOutlines.sort((a, b) => a.chapter_number - b.chapter_number);
 
     // ── Merge A1 + A2 into the standard outline shape ──
     const mergedOutline = {

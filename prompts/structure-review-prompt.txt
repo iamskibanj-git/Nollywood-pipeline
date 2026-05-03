@@ -6,6 +6,7 @@ TIER DEFINITIONS:
 - test (1-5 min, 1-4 chapters): Lightweight — just opening hook + minimal escalation + punch ending. Structural bar is LOW.
 - standard (10 min, 5-8 chapters): Classic 3-act with midpoint reversal. Structural bar is MEDIUM.
 - long-form (20-30 min, 7-11 chapters): Full 3-act + midpoint reversal + B-plot + ensemble characters + setup/payoff pairs. Structural bar is HIGH.
+- prestige (45 min, 12-15 chapters): Five-act structure with dual B-plots, ensemble cast, setup/payoff pairs, thematic thesis, and sustained power dynamics across acts. Structural bar is VERY HIGH.
 
 === GRADING RUBRIC ===
 
