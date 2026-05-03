@@ -318,39 +318,31 @@ Files changed:
 - `src/renderer/index.html` — missing elements passed to checklist renderer
 - `CLAUDE.md` — this section
 
-**Session 30R — Batch Prompt-Preview Mode (M4):**
+**Session 30S — Catch Block Hardening (Resume-Critical DB Writes):**
 
-M4 — Batch prompt-preview gate:
-- Replaces the per-clip prompt-preview gate with a single batch review.
-- **Two-phase clip processing**: Phase 1 runs all prompt transforms (vision blocking, posture correction, rules engine, grounding prefix) and collects final prompts into `batchPreviewData[]` and `cachedFinalPrompts{}`. Phase 2 generates only approved clips using cached prompts.
-- After Phase 1, emits a single `'prompt-preview-batch'` gate with all clip data (clipId, label, prompt, startFramePath, duration).
-- Operator reviews all prompts at once in a paginated grid (20 per page).
-- **Approve All** (default): generates every pending clip.
-- **Selective approval**: toggle individual clips off, only approved clips generate.
-- **Stop**: cancels the entire generation run (no credits burned).
-- Phase 2 generation loop: uses `cachedClipGenData{}` for all generation parameters, includes session-expired recovery, retry logic, and per-clip review gate.
-- Rejected clips counted as `batchRejected` in final progress summary.
+Four swallowed `catch (_) {}` blocks that silently discard errors on resume-critical DB writes. All fixes are non-breaking — they add logging and retry logic without changing control flow.
 
-UI:
-- `index.html` — new `batch-preview-panel` with purple (#8b5cf6) theme:
-  - Paginated card grid: start frame thumbnail, clip label, duration, truncated prompt (click to expand).
-  - Toggle selection per card (checkbox visual).
-  - Select All / Deselect All buttons.
-  - Approve Selected (count) / Stop buttons.
-  - Page navigation (Prev/Next with page label).
-- New IPC: `approvePromptPreviewBatch(decision)` — accepts 'stop', 'approve', or `{ approved: [clipId, ...] }`.
+Fix #1 — `kling_clip_id` metadata persistence (~line 7977):
+- Was: `catch (_) {}` around `db._setKlingClipMeta()`. Silent failure → clip invisible to resume/verify/export → duplicate re-generation on restart (~18 credits wasted per clip).
+- Now: logs error, retries once after 500ms (handles SQLite WAL locks), logs retry result. In-memory tag always set so current run is unaffected.
 
-Design decisions:
-- Two-phase approach avoids duplicating 750 lines of transform code. Phase 1 reuses the existing loop with a `continue` after collection; Phase 2 is a dedicated generation-only loop.
-- `cachedClipGenData` stores all per-clip references (clipAsset, outputPath, etc.) to avoid re-querying in Phase 2.
-- Phase 2 has its own simplified error handling (session-expired recovery + single retry). Timeout recovery sweeps are omitted to keep batch generation moving fast.
-- All clips selected by default — operator deselects the ones that look wrong.
+Fix #2 — `element_name` persistence on portrait assets (~line 4358):
+- Was: `catch (_) {}` around `db.setAssetElementName()`. Silent failure → `cinematicElementNames` map empty on resume → every `@character` ref in prompts fails to resolve → entire video gen phase broken on restart.
+- Now: logs error, retries once after 500ms, counts failures. If any persist, emits CRITICAL-level log warning that resume will break. Current run continues (in-memory state valid).
+- Also hardened two location `setAssetElementName` calls (~lines 4560, 4579) with warn-level logging.
+
+Fix #3 — `pending_approval_gate` clearing on resume (~line 942):
+- Was: `catch (_) {}` around `db.updateProject()`. Silent failure → gate persists in DB → next restart re-enters same approval loop indefinitely.
+- Now: logs error, conditionally advances `_resumedGateOrder` only on success. If DB write fails, gate order is NOT advanced — pipeline re-enters the gate properly on next restart instead of silently skipping it.
+
+Fix #4 — Element existence panel scraper fallback (~line 4202):
+- Was: `catch (_) {}` around `elements.elementExists()` fallback. Silent failure → `existsAnyway` stays false → element counted as failed even if it exists → manual gate fires unnecessarily.
+- Now: logs warn with actual error message. No control flow change (still falls through to manual gate).
+
+Design: All fixes use the same pattern — log error, optional retry for DB writes, never hard-fail. Current run always continues. Retry delay is 500ms (sufficient for WAL checkpoint locks, the most common SQLite transient).
 
 Files changed:
-- `src/main/pipeline/orchestrator.js` — batch collection in Phase 1, batch gate, Phase 2 generation loop, `approvePromptPreviewBatch()` method
-- `src/renderer/index.html` — batch preview panel HTML, JS functions, gate handler
-- `src/main/main.js` — IPC handle for `approve-prompt-preview-batch`
-- `src/preload/preload.js` — preload binding for `approvePromptPreviewBatch`
+- `src/main/pipeline/orchestrator.js` — all 4 catch blocks hardened
 - `CLAUDE.md` — this section
 
 ### Cinematic (Kling) — story-driven model
