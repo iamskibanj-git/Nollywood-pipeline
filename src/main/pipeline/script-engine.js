@@ -1720,6 +1720,31 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
 
     for (const ch of script.chapters) {
       for (const sc of (ch.scenes || [])) {
+        // ── 0. Normalize character_outfits keys ──
+        // The LLM may key character_outfits by character_N, @name, or bare name.
+        // The orchestrator's outfit resolution looks up by bare lowercase
+        // element_name_hint (extracted from blocking @refs). Normalize here so
+        // the keys always match what the orchestrator expects.
+        if (sc.character_outfits && typeof sc.character_outfits === 'object') {
+          const normalized = {};
+          let outfitKeyFixes = 0;
+          for (const [key, outfitId] of Object.entries(sc.character_outfits)) {
+            let resolvedKey = key.toLowerCase().replace(/^@/, '');
+            // Resolve character_N → element_name_hint
+            if (charIndexMap[resolvedKey]) {
+              const before = resolvedKey;
+              resolvedKey = charIndexMap[resolvedKey];
+              outfitKeyFixes++;
+              console.log(`[PROMPT-SANITIZE] Ch${ch.chapter_number} Sc${sc.scene_number}: character_outfits key "${before}" → "${resolvedKey}"`);
+            }
+            // If it's already a valid character name, use it; otherwise keep as-is
+            // (the orchestrator will just miss it, which is the existing fallback behavior)
+            normalized[resolvedKey] = outfitId;
+          }
+          sc.character_outfits = normalized;
+          if (outfitKeyFixes > 0) totalFixes += outfitKeyFixes;
+        }
+
         for (const clip of (sc.kling_clips || [])) {
           if (!clip.multi_shot_prompt) continue;
           let prompt = clip.multi_shot_prompt;
