@@ -367,7 +367,185 @@ Standard cinematic widescreen composition. Wide establishing shots, two-shots, a
     const targetClips = storyBrief.targetClips || 50;
     const clipsPerChapter = Math.ceil(targetClips / totalChapters);
 
-    // ── PASS 1: Story outline + character bible ──
+    // ── PRESTIGE TWO-PHASE PATH (R1 mitigation) ──
+    // For prestige tier (15 chapters), the single-pass outline would exceed
+    // max_tokens and get truncated. Split Pass A into:
+    //   Phase A1: Arc skeleton (character bible + five-act beats, ~5K tokens)
+    //   Phase A2: Detailed chapter outlines in batches of 5 (3 calls, ~5K each)
+    // Non-prestige continues with the original single-outline Pass 1 below.
+    let outline;
+    if (tier === 'prestige') {
+      outline = await this._generatePrestigeOutline({
+        prompt, systemPrompt, storyBrief, totalChapters, targetClips,
+        clipsPerChapter, onProgress,
+      });
+    } else {
+      outline = await this._generateStandardOutline({
+        prompt, systemPrompt, storyBrief, totalChapters, targetClips,
+        clipsPerChapter, onProgress,
+      });
+    }
+
+    const characterBible = outline.character_bible;
+    const title = outline.title || storyBrief.title;
+
+    // ── Extract voice anchors for chapter generation (all story-driven tiers) ──
+    const voiceAnchors = this._extractVoiceAnchors(outline, storyBrief);
+
+    // ── PASS 2 / PHASE B: Generate each chapter independently ──
+    console.log(`[SCRIPT] Phase B — generating ${totalChapters} chapters independently`);
+    const allChapters = [];
+
+    for (let chNum = 1; chNum <= totalChapters; chNum++) {
+      const chOutline = outline.chapter_outlines.find(c => c.chapter_number === chNum)
+        || outline.chapter_outlines[chNum - 1]; // fallback to index if numbering is off
+      const chLabel = `Chapter ${chNum}/${totalChapters}`;
+
+      if (onProgress) onProgress(`\n[Phase B] ${chLabel}: "${chOutline?.chapter_title || '...'}"...`);
+
+      // Narrative context: what happened BEFORE and AFTER this chapter (from outline only)
+      const prevChapters = outline.chapter_outlines.filter(c => c.chapter_number < chNum);
+      const nextChapters = outline.chapter_outlines.filter(c => c.chapter_number > chNum);
+      const prevSummary = prevChapters.length
+        ? prevChapters.map(c => `Ch ${c.chapter_number} "${c.chapter_title}": ${c.narrative_beat}`).join('\n')
+        : '(This is the first chapter)';
+      const nextSummary = nextChapters.length
+        ? nextChapters.map(c => `Ch ${c.chapter_number} "${c.chapter_title}": ${c.narrative_beat}`).join('\n')
+        : '(This is the final chapter)';
+
+      // Beat guidance based on position
+      let beatGuidance = '';
+      if (chNum === totalChapters) {
+        beatGuidance = 'This is the FINAL chapter — bring the story to a decisive climax and resolution. All plot threads must be resolved.';
+      } else if (chNum > totalChapters * 0.5) {
+        beatGuidance = 'This is in the second half — stakes should be at their highest. Every scene should escalate toward the climax.';
+      }
+
+      const chapterPrompt = `You are The Master Script & Image Engine for Nollywood AI drama production. You are generating ONE chapter of a ${totalChapters}-chapter cinematic script.
+
+=== STORY CONTEXT ===
+Title: "${title}"
+Total chapters: ${totalChapters} (UNLIMITED scenes each, UNLIMITED lines per scene, target ~${targetClips} clips total, max 3 characters per scene)
+Nationality: ${storyBrief.nationality}
+Accent: ${storyBrief.accent}
+Aspect Ratio: ${aspect}
+
+${aspectFramingGuidance}
+
+=== CHARACTER BIBLE (maintain these identities exactly) ===
+${JSON.stringify(characterBible, null, 2)}
+
+${voiceAnchors}
+
+=== FULL STORY OUTLINE ===
+B-Plot: ${outline.bplot_summary || 'N/A'}
+${outline.bplot2_summary ? `B-Plot 2: ${outline.bplot2_summary}` : ''}
+Setup/Payoff pairs: ${JSON.stringify(outline.setup_payoff_pairs || [])}
+Relationship Arcs: ${JSON.stringify(outline.relationship_arcs || [], null, 2)}
+
+Previous chapters (summary):
+${prevSummary}
+
+>>> THIS CHAPTER (${chNum}): "${chOutline?.chapter_title || ''}" <<<
+Act: ${chOutline?.act || 'N/A'}
+Narrative beat: ${chOutline?.narrative_beat || 'N/A'}
+Power dynamic: ${chOutline?.power_holder_start || '?'} holds power at start → ${chOutline?.power_holder_end || '?'} holds power at end
+Emotional temperature: ${chOutline?.emotional_temperature || 'building'}
+Target clips: ~${chOutline?.target_clips || clipsPerChapter}
+Chapter-end hook: ${chOutline?.chapter_end_hook || '(final chapter — resolve)'}
+
+Scene beats to expand (each has scene_purpose and power_shift — honour them):
+${JSON.stringify(chOutline?.scene_beats || [], null, 2)}
+
+Upcoming chapters (summary):
+${nextSummary}
+
+=== NARRATIVE ARCHITECTURE RULES ===
+${scaffolding}
+
+${cinematicScaffolding}
+
+${researchContext ? `=== MARKET RESEARCH CONTEXT ===\n${researchContext}` : ''}
+
+=== YOUR TASK ===
+Generate Chapter ${chNum} as a fully realized cinematic chapter with all scenes, dialogue, blocking, kling_clips, image_prompts, and animation_prompts.
+${beatGuidance}
+
+CRITICAL RULES:
+1. Follow the scene beats from the outline but EXPAND them into full cinematic scenes with rich dialogue, blocking, and kling_clips.
+2. Each scene has as many lines as the story needs — group into clips of exactly 3 lines each. Target ~${chOutline?.target_clips || clipsPerChapter} clips for this chapter.
+3. Max 3 characters per scene.
+4. Maintain character voices and physical descriptions EXACTLY as in the character bible. Respect each character's speech_style — a proverbial elder speaks in longer rhythmic cadences; a sharp young professional uses clipped sentences; a spiritual character invokes God/destiny. Voice is identity.
+5. Use @element_name_hint references (e.g. @${characterBible[0]?.element_name_hint || 'character_name'}).
+6. ${chNum < totalChapters ? `End on: "${chOutline?.chapter_end_hook || 'a cliffhanger or reveal'}"` : 'Bring the story to a decisive resolution.'}
+7. Use consistent location_element_hint values matching the outline.
+8. Each scene MUST include emotional_state: { "start": "...", "turn": "...", "end": "..." } — these are brief emotional descriptors (2-4 words) that track how the scene FEELS, not what happens. Examples: start: "uneasy calm", turn: "accusation lands", end: "cold fury". This helps continuity between scenes and prevents emotional whiplash.
+9. Each kling_clip MUST include "visual_beat": a single concrete visual action tied to story meaning. NOT complex choreography — one AI-safe action that the camera can reveal. Examples: "clutches the envelope tighter", "slowly removes her ring", "steps back from the table", "hides phone behind her back", "turns the framed photo face-down". This gives Kling something visual to render beyond talking heads. The visual_beat goes into the shot direction of the most dramatically appropriate shot (usually Shot 2 or 3).
+10. Honour the scene_purpose from the outline. A "reveal" scene must actually reveal something the audience didn't know. A "confrontation" must have characters in active opposition. A "setup" scene plants something for later. If the purpose doesn't match the content, the scene is mislabeled or broken.
+11. Each scene MUST include "character_outfits": a mapping of character_id → outfit_id from the character_bible. This tells the visual pipeline which element (portrait/outfit) to use. Copy it directly from the outline's scene_beats. If a character changes outfit within a scene, SPLIT into two scenes — a single scene cannot have one character in two outfits.
+
+=== STRICT RULES ===
+- Dialogue Only: Only character speech. No narration, SFX, or descriptions.
+- The 9-Word Rule: Every single sentence must be 9 words or less. EXCEPTION: Characters with speech_style "proverbial" or "spiritual" may use up to 12 words per sentence to preserve cultural cadence (proverbs, blessings, accusations with rhetorical weight). This does NOT mean all their lines can be 12 words — it is a ceiling for lines that genuinely need the rhythmic space.
+- The Camera Jump: If a character says more than 9 words (or 12 for proverbial/spiritual), break it with [NEW CAMERA ANGLE] + the next short sentence.
+
+=== RESPONSE FORMAT ===
+Respond in JSON:
+{
+  "chapters": [
+    {
+      "chapter_number": ${chNum},
+      "chapter_title": "${chOutline?.chapter_title || '...'}",
+      "scenes": [...]
+    }
+  ]
+}
+
+Generate Chapter ${chNum} now. JSON only.`;
+
+      const chText = await this._streamWithRetry({
+        model: this.model,
+        max_tokens: MAX_TOKENS_PER_CALL,
+        temperature: 0.7,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: chapterPrompt }],
+        onProgress,
+        label: chLabel,
+      });
+
+      console.log(`[SCRIPT] ${chLabel} raw response length: ${chText.length} chars`);
+      const chParsed = this._safeParseScriptJson(chText);
+      if (!chParsed) {
+        console.error(`[SCRIPT] ${chLabel} produced no valid JSON. Raw length: ${chText.length}`);
+        throw new Error(`${chLabel} produced no valid JSON. Generated ${allChapters.length}/${totalChapters} chapters before failure.`);
+      }
+
+      const chChapters = chParsed.chapters || (Array.isArray(chParsed) ? chParsed : [chParsed]);
+      if (!chChapters.length) {
+        throw new Error(`${chLabel} returned 0 chapters. Generated ${allChapters.length}/${totalChapters} before failure.`);
+      }
+
+      allChapters.push(...chChapters);
+      const lastCh = chChapters[chChapters.length - 1];
+      const sceneCount = (lastCh.scenes || []).length;
+      const clipCount = (lastCh.scenes || []).reduce((sum, s) => sum + (s.kling_clips || []).length, 0);
+      console.log(`[SCRIPT] ${chLabel} complete: ${sceneCount} scenes, ${clipCount} clips (total: ${allChapters.length}/${totalChapters})`);
+    }
+
+    return {
+      title,
+      character_bible: characterBible,
+      chapters: allChapters,
+    };
+  }
+
+  /**
+   * Standard (non-prestige) outline generation — single Pass 1.
+   * Returns the full outline object with character_bible, chapter_outlines, etc.
+   */
+  async _generateStandardOutline({ prompt, systemPrompt, storyBrief, totalChapters,
+    targetClips, clipsPerChapter, onProgress }) {
+
     console.log(`[SCRIPT] Two-pass generation: Pass 1 — outline + character bible`);
     if (onProgress) onProgress(`[Pass 1/2] Generating story outline + character bible...`);
 
@@ -487,152 +665,392 @@ Generate the outline now. JSON only.`;
       throw new Error('Pass 1 outline has no character_bible');
     }
 
-    const characterBible = outline.character_bible;
-    const title = outline.title || storyBrief.title;
-    console.log(`[SCRIPT] Pass 1 complete: ${characterBible.length} characters, ${outline.chapter_outlines.length} chapter outlines`);
+    console.log(`[SCRIPT] Pass 1 complete: ${outline.character_bible.length} characters, ${outline.chapter_outlines.length} chapter outlines`);
+    return outline;
+  }
 
-    // ── PASS 2: Generate each chapter independently ──
-    console.log(`[SCRIPT] Pass 2 — generating ${totalChapters} chapters independently`);
-    const allChapters = [];
+  /**
+   * Prestige two-phase outline generation (R1 mitigation).
+   * Phase A1: Arc skeleton — character bible, five-act beat structure, relationship
+   *   arcs, setup/payoff pairs, B-plot summaries, thematic thesis. ~5K tokens.
+   * Phase A2: Detailed chapter outlines in batches of 5 (3 calls for 15 chapters),
+   *   each using A1 skeleton as fixed context. ~5K tokens per batch.
+   * Returns the same outline shape as _generateStandardOutline.
+   */
+  async _generatePrestigeOutline({ prompt, systemPrompt, storyBrief, totalChapters,
+    targetClips, clipsPerChapter, onProgress }) {
 
-    for (let chNum = 1; chNum <= totalChapters; chNum++) {
-      const chOutline = outline.chapter_outlines.find(c => c.chapter_number === chNum)
-        || outline.chapter_outlines[chNum - 1]; // fallback to index if numbering is off
-      const chLabel = `Chapter ${chNum}/${totalChapters}`;
+    const actBreaks = {
+      act1End: Math.max(3, Math.floor(totalChapters / 5)),
+      act2End: Math.max(6, Math.floor(totalChapters * 2 / 5)),
+      act3End: Math.max(9, Math.floor(totalChapters * 3 / 5)),
+      act4End: Math.max(12, Math.floor(totalChapters * 4 / 5)),
+    };
 
-      if (onProgress) onProgress(`\n[Pass 2/2] ${chLabel}: "${chOutline?.chapter_title || '...'}"...`);
+    // ── PHASE A1: Arc skeleton (story bible) ──
+    console.log(`[SCRIPT] Prestige two-phase outline: Phase A1 — arc skeleton`);
+    if (onProgress) onProgress(`[Phase A1/A2] Generating arc skeleton (story bible)...`);
 
-      // Narrative context: what happened BEFORE and AFTER this chapter (from outline only)
-      const prevChapters = outline.chapter_outlines.filter(c => c.chapter_number < chNum);
-      const nextChapters = outline.chapter_outlines.filter(c => c.chapter_number > chNum);
-      const prevSummary = prevChapters.length
-        ? prevChapters.map(c => `Ch ${c.chapter_number} "${c.chapter_title}": ${c.narrative_beat}`).join('\n')
-        : '(This is the first chapter)';
-      const nextSummary = nextChapters.length
-        ? nextChapters.map(c => `Ch ${c.chapter_number} "${c.chapter_title}": ${c.narrative_beat}`).join('\n')
-        : '(This is the final chapter)';
+    const a1Prompt = prompt + `\n\n` +
+`=== GENERATION MODE: ARC SKELETON ONLY (Phase A1 of 2) ===
+You are generating a STORY BIBLE / ARC SKELETON for a ${totalChapters}-chapter prestige Nollywood drama. This is NOT the detailed chapter outline — that comes in Phase A2. This phase establishes the foundational elements that all chapters will reference.
 
-      // Beat guidance based on position
-      let beatGuidance = '';
-      if (chNum === totalChapters) {
-        beatGuidance = 'This is the FINAL chapter — bring the story to a decisive climax and resolution. All plot threads must be resolved.';
-      } else if (chNum > totalChapters * 0.5) {
-        beatGuidance = 'This is in the second half — stakes should be at their highest. Every scene should escalate toward the climax.';
+Return JSON with this EXACT structure:
+{
+  "title": "${storyBrief.title}",
+  "thematic_thesis": "One sentence: the central thematic argument this story makes (e.g. 'Power corrupts even those who seek it for righteous reasons')",
+  "character_bible": [
+    {
+      "id": "character_id",
+      "description_label": "Human-readable name",
+      "element_name_hint": "snake_case_name",
+      "physical_description": "PERMANENT physical features ONLY: face shape, skin tone, build, height, hair texture, distinguishing marks, age appearance. NO clothing.",
+      "outfits": [
+        {
+          "outfit_id": "o1",
+          "description": "Full clothing/styling description",
+          "context": "When this outfit is worn"
+        }
+      ],
+      "role": "protagonist|antagonist|confidant|supporting|bplot",
+      "arc_summary": "One sentence: what this character wants and how they change",
+      "speech_style": "formal|proverbial|sharp|pleading|sarcastic|spiritual|street-smart|class-conscious|warm-maternal|cold-authoritative",
+      "speech_notes": "1-2 sentences describing HOW this character talks"
+    }
+  ],
+  "relationship_arcs": [
+    {
+      "characters": ["char_id_1", "char_id_2"],
+      "type": "mother-daughter|husband-wife|rivals|employer-servant|elder-younger|lovers|siblings|mentor-protégé|friends-turned-enemies",
+      "arc": "How this relationship transforms across all five acts",
+      "tension_source": "What drives conflict between them"
+    }
+  ],
+  "five_act_beats": {
+    "act1_setup": {
+      "chapters": [1, ${actBreaks.act1End}],
+      "beat": "2-3 sentences: what happens in Act I — world, ensemble, dual story engines launched",
+      "inciting_incident": "The specific event that disrupts the protagonist's world",
+      "bplot1_seed": "How B-plot 1 is introduced",
+      "bplot2_seed": "How B-plot 2 is seeded (not fully launched)"
+    },
+    "act2_complications": {
+      "chapters": [${actBreaks.act1End + 1}, ${actBreaks.act2End}],
+      "beat": "2-3 sentences: A-plot escalation, both B-plots active",
+      "new_complications": "What NEW complications arise (not just continuation)",
+      "bplot1_intersection": "How B-plot 1 collides with A-plot by end of Act II"
+    },
+    "act3_midpoint_crisis": {
+      "chapters": [${actBreaks.act2End + 1}, ${actBreaks.act3End}],
+      "beat": "2-3 sentences: the major reversal that reframes everything",
+      "midpoint_reversal": "The specific reframe — what the audience believed was true is wrong",
+      "bplot2_collision": "How B-plot 2 collides with A-plot during/after midpoint"
+    },
+    "act4_unraveling": {
+      "chapters": [${actBreaks.act3End + 1}, ${actBreaks.act4End}],
+      "beat": "2-3 sentences: consequences cascade, alliances shift, highest tension",
+      "bplot_crises": "How both B-plots reach their own mini-climaxes",
+      "setup_payoffs_firing": "Which setup/payoff pairs fire in Act IV"
+    },
+    "act5_climax": {
+      "chapters": [${actBreaks.act4End + 1}, ${totalChapters}],
+      "beat": "2-3 sentences: all threads converge, decisive resolution",
+      "resolution_order": "Order of resolution: B-plots first, then A-plot climax"
+    }
+  },
+  "setup_payoff_pairs": [
+    { "setup_act": "I", "payoff_act": "IV", "detail": "The specific planted detail and how it pays off" }
+  ],
+  "bplot_summary": "One paragraph: B-plot 1 arc — setup, complication, intersection with A-plot, resolution",
+  "bplot2_summary": "One paragraph: B-plot 2 arc — setup, complication, intersection with A-plot, resolution"
+}
+
+RULES FOR ARC SKELETON:
+- Character bible uses the same format as standard outlines (physical_description, outfits, speech_style, speech_notes).
+- Prestige requires 6-10 characters with mandatory roles: protagonist, antagonist, 2 confidants, 2+ B-plot leads, 2+ supporting.
+- 3+ setup/payoff pairs — these must be SPECIFIC objects/phrases/details, not abstract concepts.
+- Dual B-plots required, each with own mini-arc that COLLIDES with A-plot.
+- Five-act beats use the 20/40/60/80% chapter splits: Act I (ch 1-${actBreaks.act1End}), Act II (ch ${actBreaks.act1End + 1}-${actBreaks.act2End}), Act III (ch ${actBreaks.act2End + 1}-${actBreaks.act3End}), Act IV (ch ${actBreaks.act3End + 1}-${actBreaks.act4End}), Act V (ch ${actBreaks.act4End + 1}-${totalChapters}).
+- This skeleton is the FOUNDATION. Phase A2 will generate detailed per-chapter outlines using this as fixed context.
+- Do NOT include chapter_outlines here — those come in Phase A2.
+
+Generate the arc skeleton now. JSON only.`;
+
+    const a1Text = await this._streamWithRetry({
+      model: this.model,
+      max_tokens: 8192,
+      temperature: 0.7,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: a1Prompt }],
+      onProgress,
+      label: 'Phase A1 (arc skeleton)',
+    });
+
+    console.log(`[SCRIPT] Phase A1 raw response length: ${a1Text.length} chars`);
+    const arcSkeleton = this._safeParseScriptJson(a1Text);
+    if (!arcSkeleton) {
+      console.error(`[SCRIPT] Phase A1 raw start: ${a1Text.substring(0, 500)}`);
+      throw new Error('Phase A1 (arc skeleton) produced no valid JSON');
+    }
+    if (!arcSkeleton.character_bible?.length) {
+      throw new Error('Phase A1 arc skeleton has no character_bible');
+    }
+    if (!arcSkeleton.five_act_beats) {
+      throw new Error('Phase A1 arc skeleton has no five_act_beats');
+    }
+    console.log(`[SCRIPT] Phase A1 complete: ${arcSkeleton.character_bible.length} characters, five-act beats defined`);
+
+    // ── PHASE A2: Detailed chapter outlines in batches of 5 ──
+    const BATCH_SIZE = 5;
+    const numBatches = Math.ceil(totalChapters / BATCH_SIZE);
+    console.log(`[SCRIPT] Phase A2 — detailed chapter outlines in ${numBatches} batches of ${BATCH_SIZE}`);
+
+    const allChapterOutlines = [];
+
+    // Compact arc skeleton context for A2 calls (strip outfits to save tokens)
+    const compactBible = arcSkeleton.character_bible.map(c => ({
+      id: c.id,
+      description_label: c.description_label,
+      element_name_hint: c.element_name_hint,
+      role: c.role,
+      arc_summary: c.arc_summary,
+      speech_style: c.speech_style,
+      speech_notes: c.speech_notes,
+      outfit_count: (c.outfits || []).length,
+    }));
+
+    for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
+      const batchStart = batchIdx * BATCH_SIZE + 1;
+      const batchEnd = Math.min((batchIdx + 1) * BATCH_SIZE, totalChapters);
+      const batchLabel = `Phase A2 batch ${batchIdx + 1}/${numBatches} (Ch ${batchStart}-${batchEnd})`;
+
+      if (onProgress) onProgress(`\n[Phase A2] Generating chapter outlines ${batchStart}-${batchEnd}...`);
+
+      // Determine which act(s) this batch covers
+      const batchActContext = [];
+      for (let ch = batchStart; ch <= batchEnd; ch++) {
+        let actName;
+        if (ch <= actBreaks.act1End) actName = 'act1_setup';
+        else if (ch <= actBreaks.act2End) actName = 'act2_complications';
+        else if (ch <= actBreaks.act3End) actName = 'act3_midpoint_crisis';
+        else if (ch <= actBreaks.act4End) actName = 'act4_unraveling';
+        else actName = 'act5_climax';
+        if (!batchActContext.includes(actName)) batchActContext.push(actName);
       }
+      const actBeats = batchActContext.map(a => `${a}: ${JSON.stringify(arcSkeleton.five_act_beats[a])}`).join('\n');
 
-      const chapterPrompt = `You are The Master Script & Image Engine for Nollywood AI drama production. You are generating ONE chapter of a ${totalChapters}-chapter cinematic script.
+      // Include previous batch outlines as summary context
+      const prevOutlineSummary = allChapterOutlines.length
+        ? allChapterOutlines.map(c => `Ch ${c.chapter_number} "${c.chapter_title}": ${c.narrative_beat}`).join('\n')
+        : '(No previous chapters — this is the first batch)';
 
-=== STORY CONTEXT ===
-Title: "${title}"
-Total chapters: ${totalChapters} (UNLIMITED scenes each, UNLIMITED lines per scene, target ~${targetClips} clips total, max 3 characters per scene)
-Nationality: ${storyBrief.nationality}
-Accent: ${storyBrief.accent}
-Aspect Ratio: ${aspect}
+      const a2Prompt = `You are generating DETAILED CHAPTER OUTLINES for chapters ${batchStart}-${batchEnd} of a ${totalChapters}-chapter prestige Nollywood drama.
 
-${aspectFramingGuidance}
+=== ARC SKELETON (fixed — do not modify) ===
+Title: "${arcSkeleton.title}"
+Thematic thesis: ${arcSkeleton.thematic_thesis || 'N/A'}
 
-=== CHARACTER BIBLE (maintain these identities exactly) ===
-${JSON.stringify(characterBible, null, 2)}
+Characters (compact):
+${JSON.stringify(compactBible, null, 2)}
 
-=== FULL STORY OUTLINE ===
-B-Plot: ${outline.bplot_summary || 'N/A'}
-Setup/Payoff pairs: ${JSON.stringify(outline.setup_payoff_pairs || [])}
-Relationship Arcs: ${JSON.stringify(outline.relationship_arcs || [], null, 2)}
+Relationship Arcs:
+${JSON.stringify(arcSkeleton.relationship_arcs || [], null, 2)}
 
-Previous chapters (summary):
-${prevSummary}
+Five-Act Beats (relevant to this batch):
+${actBeats}
 
->>> THIS CHAPTER (${chNum}): "${chOutline?.chapter_title || ''}" <<<
-Act: ${chOutline?.act || 'N/A'}
-Narrative beat: ${chOutline?.narrative_beat || 'N/A'}
-Power dynamic: ${chOutline?.power_holder_start || '?'} holds power at start → ${chOutline?.power_holder_end || '?'} holds power at end
-Emotional temperature: ${chOutline?.emotional_temperature || 'building'}
-Target clips: ~${chOutline?.target_clips || clipsPerChapter}
-Chapter-end hook: ${chOutline?.chapter_end_hook || '(final chapter — resolve)'}
+Setup/Payoff Pairs:
+${JSON.stringify(arcSkeleton.setup_payoff_pairs || [])}
 
-Scene beats to expand (each has scene_purpose and power_shift — honour them):
-${JSON.stringify(chOutline?.scene_beats || [], null, 2)}
+B-Plot 1: ${arcSkeleton.bplot_summary || 'N/A'}
+B-Plot 2: ${arcSkeleton.bplot2_summary || 'N/A'}
 
-Upcoming chapters (summary):
-${nextSummary}
-
-=== NARRATIVE ARCHITECTURE RULES ===
-${scaffolding}
-
-${cinematicScaffolding}
-
-${researchContext ? `=== MARKET RESEARCH CONTEXT ===\n${researchContext}` : ''}
+Previous chapter outlines (summary):
+${prevOutlineSummary}
 
 === YOUR TASK ===
-Generate Chapter ${chNum} as a fully realized cinematic chapter with all scenes, dialogue, blocking, kling_clips, image_prompts, and animation_prompts.
-${beatGuidance}
+Generate detailed chapter outlines for chapters ${batchStart} through ${batchEnd}.
 
-CRITICAL RULES:
-1. Follow the scene beats from the outline but EXPAND them into full cinematic scenes with rich dialogue, blocking, and kling_clips.
-2. Each scene has as many lines as the story needs — group into clips of exactly 3 lines each. Target ~${chOutline?.target_clips || clipsPerChapter} clips for this chapter.
-3. Max 3 characters per scene.
-4. Maintain character voices and physical descriptions EXACTLY as in the character bible. Respect each character's speech_style — a proverbial elder speaks in longer rhythmic cadences; a sharp young professional uses clipped sentences; a spiritual character invokes God/destiny. Voice is identity.
-5. Use @element_name_hint references (e.g. @${characterBible[0]?.element_name_hint || 'character_name'}).
-6. ${chNum < totalChapters ? `End on: "${chOutline?.chapter_end_hook || 'a cliffhanger or reveal'}"` : 'Bring the story to a decisive resolution.'}
-7. Use consistent location_element_hint values matching the outline.
-8. Each scene MUST include emotional_state: { "start": "...", "turn": "...", "end": "..." } — these are brief emotional descriptors (2-4 words) that track how the scene FEELS, not what happens. Examples: start: "uneasy calm", turn: "accusation lands", end: "cold fury". This helps continuity between scenes and prevents emotional whiplash.
-9. Each kling_clip MUST include "visual_beat": a single concrete visual action tied to story meaning. NOT complex choreography — one AI-safe action that the camera can reveal. Examples: "clutches the envelope tighter", "slowly removes her ring", "steps back from the table", "hides phone behind her back", "turns the framed photo face-down". This gives Kling something visual to render beyond talking heads. The visual_beat goes into the shot direction of the most dramatically appropriate shot (usually Shot 2 or 3).
-10. Honour the scene_purpose from the outline. A "reveal" scene must actually reveal something the audience didn't know. A "confrontation" must have characters in active opposition. A "setup" scene plants something for later. If the purpose doesn't match the content, the scene is mislabeled or broken.
-11. Each scene MUST include "character_outfits": a mapping of character_id → outfit_id from the character_bible. This tells the visual pipeline which element (portrait/outfit) to use. Copy it directly from the outline's scene_beats. If a character changes outfit within a scene, SPLIT into two scenes — a single scene cannot have one character in two outfits.
-
-=== STRICT RULES ===
-- Dialogue Only: Only character speech. No narration, SFX, or descriptions.
-- The 9-Word Rule: Every single sentence must be 9 words or less. EXCEPTION: Characters with speech_style "proverbial" or "spiritual" may use up to 12 words per sentence to preserve cultural cadence (proverbs, blessings, accusations with rhetorical weight). This does NOT mean all their lines can be 12 words — it is a ceiling for lines that genuinely need the rhythmic space.
-- The Camera Jump: If a character says more than 9 words (or 12 for proverbial/spiritual), break it with [NEW CAMERA ANGLE] + the next short sentence.
-
-=== RESPONSE FORMAT ===
-Respond in JSON:
+Return JSON:
 {
-  "chapters": [
+  "chapter_outlines": [
     {
-      "chapter_number": ${chNum},
-      "chapter_title": "${chOutline?.chapter_title || '...'}",
-      "scenes": [...]
+      "chapter_number": N,
+      "chapter_title": "...",
+      "act": "setup|rising|midpoint|climax|resolution",
+      "narrative_beat": "What happens — 2-3 sentences",
+      "power_holder_start": "char_id",
+      "power_holder_end": "char_id",
+      "emotional_temperature": "low-simmer|building|boiling|aftermath",
+      "scene_beats": [
+        {
+          "scene_number": 1,
+          "location": "Description of location",
+          "location_element_hint": "snake_case_location",
+          "characters_present": ["char_id_1", "char_id_2"],
+          "character_outfits": {"char_id_1": "o1", "char_id_2": "o2"},
+          "beat": "What happens — 1-2 sentences",
+          "scene_purpose": "reveal|confrontation|reversal|temptation|public-shame|private-confession|decision|trap|payoff|setup|alliance",
+          "power_shift": "char_id_1 → char_id_2 (or 'none')",
+          "emotional_arc": "tension rises|power shifts|reveal|confrontation|resolution",
+          "target_lines": 6,
+          "target_clips": 2
+        }
+      ],
+      "chapter_end_hook": "What cliffhanger/question ends this chapter",
+      "target_clips": ${clipsPerChapter}
     }
   ]
 }
 
-Generate Chapter ${chNum} now. JSON only.`;
+RULES:
+- Follow the five-act beat structure from the arc skeleton — each chapter must serve its act's dramatic function.
+- Maintain continuity with previous chapter outlines (if any).
+- Each scene_beat MUST include character_outfits, scene_purpose, and power_shift.
+- Max 3 characters per scene_beat (Kling constraint).
+- Total target_clips across ALL ${totalChapters} chapters should be ~${targetClips}. Distribute ~${clipsPerChapter} per chapter, weighted by dramatic importance.
+- Use consistent location_element_hint values.
+- Include chapter_end_hook for every chapter except the last (chapter ${totalChapters}).
+- These outlines must be rich enough that an independent writer could generate the full chapter from them alone.
 
-      const chText = await this._streamWithRetry({
+Generate chapter outlines ${batchStart}-${batchEnd} now. JSON only.`;
+
+      const a2Text = await this._streamWithRetry({
         model: this.model,
-        max_tokens: MAX_TOKENS_PER_CALL,
+        max_tokens: 8192,
         temperature: 0.7,
         system: systemPrompt,
-        messages: [{ role: 'user', content: chapterPrompt }],
+        messages: [{ role: 'user', content: a2Prompt }],
         onProgress,
-        label: chLabel,
+        label: batchLabel,
       });
 
-      console.log(`[SCRIPT] ${chLabel} raw response length: ${chText.length} chars`);
-      const chParsed = this._safeParseScriptJson(chText);
-      if (!chParsed) {
-        console.error(`[SCRIPT] ${chLabel} produced no valid JSON. Raw length: ${chText.length}`);
-        throw new Error(`${chLabel} produced no valid JSON. Generated ${allChapters.length}/${totalChapters} chapters before failure.`);
+      console.log(`[SCRIPT] ${batchLabel} raw response length: ${a2Text.length} chars`);
+      const a2Parsed = this._safeParseScriptJson(a2Text);
+      if (!a2Parsed) {
+        console.error(`[SCRIPT] ${batchLabel} raw start: ${a2Text.substring(0, 500)}`);
+        throw new Error(`${batchLabel} produced no valid JSON`);
       }
 
-      const chChapters = chParsed.chapters || (Array.isArray(chParsed) ? chParsed : [chParsed]);
-      if (!chChapters.length) {
-        throw new Error(`${chLabel} returned 0 chapters. Generated ${allChapters.length}/${totalChapters} before failure.`);
+      const batchOutlines = a2Parsed.chapter_outlines || [];
+      if (!batchOutlines.length) {
+        throw new Error(`${batchLabel} returned 0 chapter outlines`);
       }
 
-      allChapters.push(...chChapters);
-      const lastCh = chChapters[chChapters.length - 1];
-      const sceneCount = (lastCh.scenes || []).length;
-      const clipCount = (lastCh.scenes || []).reduce((sum, s) => sum + (s.kling_clips || []).length, 0);
-      console.log(`[SCRIPT] ${chLabel} complete: ${sceneCount} scenes, ${clipCount} clips (total: ${allChapters.length}/${totalChapters})`);
+      allChapterOutlines.push(...batchOutlines);
+      console.log(`[SCRIPT] ${batchLabel} complete: ${batchOutlines.length} chapter outlines (total: ${allChapterOutlines.length}/${totalChapters})`);
     }
 
-    return {
-      title,
-      character_bible: characterBible,
-      chapters: allChapters,
+    // ── Merge A1 + A2 into the standard outline shape ──
+    const mergedOutline = {
+      title: arcSkeleton.title,
+      character_bible: arcSkeleton.character_bible,
+      relationship_arcs: arcSkeleton.relationship_arcs,
+      chapter_outlines: allChapterOutlines,
+      setup_payoff_pairs: arcSkeleton.setup_payoff_pairs,
+      bplot_summary: arcSkeleton.bplot_summary,
+      bplot2_summary: arcSkeleton.bplot2_summary,
+      thematic_thesis: arcSkeleton.thematic_thesis,
+      five_act_beats: arcSkeleton.five_act_beats,
     };
+
+    console.log(`[SCRIPT] Prestige outline complete: ${mergedOutline.character_bible.length} characters, ${mergedOutline.chapter_outlines.length} chapter outlines`);
+    return mergedOutline;
+  }
+
+  /**
+   * Extract voice anchors from outline for injection into chapter prompts.
+   * Prevents voice drift across independent chapter generation calls by giving
+   * each call a compact reference of each character's speech patterns.
+   *
+   * Applies to ALL story-driven scripts (not just prestige) — voice consistency
+   * matters at any chapter count, but especially at 12-15 chapters.
+   *
+   * Returns a formatted string block (~200-400 tokens) for injection into
+   * chapter prompts between CHARACTER BIBLE and FULL STORY OUTLINE sections.
+   */
+  _extractVoiceAnchors(outline, storyBrief) {
+    const characterBible = outline.character_bible || [];
+    if (!characterBible.length) return '';
+
+    // Extract 2-3 signature phrases per major character from speech_notes + speech_style
+    const characterAnchors = characterBible
+      .filter(c => c.speech_style || c.speech_notes)
+      .map(c => {
+        const phrases = [];
+
+        // Derive signature phrase patterns from speech_notes
+        if (c.speech_notes) {
+          // Extract quoted phrases if present in speech_notes
+          const quotedPhrases = c.speech_notes.match(/'[^']+'/g) || c.speech_notes.match(/"[^"]+"/g) || [];
+          phrases.push(...quotedPhrases.slice(0, 2));
+        }
+
+        // Add speech style descriptor as a phrase anchor
+        if (c.speech_style) {
+          const styleDescriptors = {
+            'proverbial': 'speaks in proverbs and indirect wisdom — longer rhythmic cadences',
+            'spiritual': 'invokes God, destiny, ancestors — blessings and curses as punctuation',
+            'sharp': 'clipped, direct sentences — wastes no words, cuts with precision',
+            'formal': 'measured, proper English — distances with vocabulary',
+            'pleading': 'repetitive, emotional appeals — rises in pitch and urgency',
+            'sarcastic': 'dry wit, loaded pauses — says the opposite of what they mean',
+            'street-smart': 'pidgin-inflected, quick retorts — streetwise rhythm',
+            'class-conscious': 'code-switches between registers — polished in public, raw in private',
+            'warm-maternal': 'gentle authority — endearments mixed with firm directives',
+            'cold-authoritative': 'commands, not requests — minimal emotion, maximum control',
+          };
+          const descriptor = styleDescriptors[c.speech_style] || c.speech_style;
+          phrases.push(descriptor);
+        }
+
+        return {
+          id: c.element_name_hint || c.id,
+          label: c.description_label || c.id,
+          role: c.role || 'supporting',
+          style: c.speech_style || 'neutral',
+          anchors: phrases.slice(0, 3),
+          speech_notes: c.speech_notes || '',
+        };
+      });
+
+    if (!characterAnchors.length) return '';
+
+    // Derive TONE_BASELINE from emotional temperatures + concept
+    const emotionalTemps = (outline.chapter_outlines || [])
+      .map(c => c.emotional_temperature)
+      .filter(Boolean);
+    const tempDistribution = {};
+    emotionalTemps.forEach(t => { tempDistribution[t] = (tempDistribution[t] || 0) + 1; });
+    const dominantTemp = Object.entries(tempDistribution)
+      .sort((a, b) => b[1] - a[1])
+      .map(e => e[0])
+      .slice(0, 2)
+      .join(' → ');
+
+    const concept = storyBrief.concept || '';
+    const toneBaseline = `This is a Nigerian drama with emotional register moving ${dominantTemp || 'building → boiling'}. ${
+      concept.length > 100 ? concept.substring(0, 100) + '...' : concept
+    } — maintain cultural authenticity in speech patterns throughout.`;
+
+    // Format as injectable block
+    const anchorLines = characterAnchors.map(a => {
+      const anchorStr = a.anchors.length
+        ? `\n    Anchors: ${a.anchors.join(' | ')}`
+        : '';
+      return `  @${a.id} (${a.label}, ${a.role}): ${a.style}${anchorStr}${
+        a.speech_notes ? `\n    Notes: ${a.speech_notes}` : ''
+      }`;
+    }).join('\n');
+
+    return `=== VOICE_ANCHORS (maintain these speech patterns in EVERY chapter) ===
+TONE_BASELINE: ${toneBaseline}
+
+CHARACTER VOICE SIGNATURES:
+${anchorLines}
+
+VOICE DRIFT PREVENTION: Each character's speech pattern above is their identity. A proverbial character NEVER speaks in clipped sentences. A sharp character NEVER uses proverbs. If you find a character's dialogue sounding generic or interchangeable with another character, rewrite it to match their voice signature above. Voice consistency across chapters is as important as plot consistency.
+===`;
   }
 
   /**
@@ -1820,6 +2238,14 @@ CINEMATIC MODE STRUCTURAL BAR IS HIGHER:
 - The structural review grader applies stricter rules to cinematic scripts because each weak Kling clip burns ~18 credits.
 - Blocking completeness is mandatory: every scene must have non-null frame positions for all present characters.
 - Dialogue function rule is doubly enforced: every line in a kling_clip's multi_shot_prompt must either advance plot, reveal character, raise stakes, or create conflict.
+
+${tier === 'prestige' ? `
+PRESTIGE CINEMATIC — ADDITIONAL CONSTRAINTS (45 min, ~245 clips):
+- CLIP BUDGET DISCIPLINE: At ~245 clips, every clip must earn its runtime. If a scene's dialogue can be covered in 2 clips instead of 3, use 2. Do not pad scenes to fill a target — let the story's natural pace dictate clip count per chapter.
+- THREE-LINE MAXIMUM PER CLIP IS ABSOLUTE: With 245 clips, auto-split from oversized clips cascades across the entire project. Strictly enforce exactly 3 lines per clip (except the final clip in a scene which may have 1-2).
+- FIVE-ACT PACING IN CINEMATIC: Distribute clips across acts roughly: Act I ~15%, Act II ~20%, Act III ~25% (midpoint crisis gets the most visual density), Act IV ~25%, Act V ~15%. The midpoint crisis and unraveling should be the most visually rich — more close-ups, more rapid cuts, more emotional visual_beats.
+- VOICE CONSISTENCY ACROSS 12-15 CHAPTERS: Each character has a defined speech pattern. Characters with proverbial speech_style maintain it in every chapter. Characters with clipped speech stay clipped. Do not let characters drift into generic dialogue register in later chapters.
+` : ''}
 `;
   }
 
@@ -1884,6 +2310,85 @@ HOOK-RESOLUTION CYCLE (the retention engine):
 `;
     }
 
+    // prestige tier (45 min) — MUST be checked before long-form (R5 mitigation)
+    if (tier === 'prestige') {
+      const actBreaks = {
+        act1End: Math.max(3, Math.floor(chapters / 5)),          // ~20% of chapters
+        act2End: Math.max(6, Math.floor(chapters * 2 / 5)),      // ~40%
+        act3End: Math.max(9, Math.floor(chapters * 3 / 5)),      // ~60%
+        act4End: Math.max(12, Math.floor(chapters * 4 / 5)),     // ~80%
+      };
+      return `
+=== TIER: PRESTIGE (${chapters} chapters, five-act ensemble drama) ===
+
+This is a 45-minute YouTube Nollywood prestige drama. The structural bar is the HIGHEST in the system. At 45 minutes, every single chapter must earn its runtime or viewers leave. A bad script at this tier wastes ~3000 credits.
+
+CHARACTER COUNT: ${isCinematicStoryDriven ? 'UNLIMITED — every speaking character gets a portrait and element. Max 3 characters per scene (Kling constraint). Create as many characters as the story needs — prestige dramas thrive on ensemble casts.' : '6-10 characters total.'} Mandatory roles:
+- PROTAGONIST (the wanter — drives the A-plot)
+- ANTAGONIST (the obstacle — active, intelligent opposition with their own logic)
+- 2 CONFIDANTS (one per side of the conflict — reveal inner thoughts through dialogue)
+- 2+ B-PLOT LEADS (each drives a secondary storyline — more on dual B-plots below)
+- 2+ SUPPORTING (family figures, authority figures, community voices, rivals)
+
+Every character appears in ≥6 lines and has at least 2 scenes where they drive the action (not just reacting). No passive characters — everyone pushes or pulls the plot.
+
+FIVE-ACT STRUCTURE:
+
+ACT I — SETUP (Chapters 1-${actBreaks.act1End}):
+- Establish the world, the ensemble, and TWO story engines (A-plot + first B-plot).
+- Chapter 1 opens mid-conflict. The inciting incident lands BY END OF CHAPTER 1.
+- The second B-plot is seeded (not fully launched) by end of Act I.
+- Plant at least 2 of your 3+ setup/payoff details in Act I.
+
+ACT II — COMPLICATIONS (Chapters ${actBreaks.act1End + 1}-${actBreaks.act2End}):
+- A-plot escalates. Both B-plots are now active and running in parallel.
+- Each chapter introduces a NEW complication, not just a continuation of existing tension.
+- Characters' alliances begin to show cracks.
+- The first B-plot intersects with the A-plot by end of Act II (collision, not just adjacency).
+
+ACT III — MIDPOINT CRISIS (Chapters ${actBreaks.act2End + 1}-${actBreaks.act3End}):
+- MAJOR REVERSAL at the midpoint that reframes EVERYTHING. This is not a plot twist — it's a reframe: what the audience believed was true was wrong (hidden identity, secret relationship, past betrayal, pregnancy, death, double life). The reversal must change the meaning of scenes the audience has already watched.
+- The second B-plot collides with the A-plot during or immediately after the midpoint.
+- Highest emotional volatility — alliances shatter, secrets surface, consequences begin.
+
+ACT IV — UNRAVELING (Chapters ${actBreaks.act3End + 1}-${actBreaks.act4End}):
+- Consequences cascade from the midpoint crisis.
+- Alliances shift or reform under pressure.
+- Tension is at its HIGHEST — the protagonist faces the worst possible version of their situation.
+- Both B-plots reach their own crisis points (mini-climaxes before the main climax).
+- At least 1 setup/payoff pair fires in Act IV.
+
+ACT V — CLIMAX + RESOLUTION (Chapters ${actBreaks.act4End + 1}-${chapters}):
+- ALL threads converge. Both B-plots resolve BEFORE or DURING the main climax (not after).
+- The A-plot climax is decisive — the protagonist's want is granted or denied permanently.
+- Remaining setup/payoff pairs fire.
+- Final chapter ties off ALL loose threads. No sequel bait, no ambiguity — the story is complete.
+
+DUAL B-PLOT REQUIREMENT: You MUST have TWO secondary storylines running parallel to the A-plot.
+- B-Plot 1: shares a character with the A-plot, intersects with A-plot by end of Act II, has its own mini-arc (setup → complication → resolution)
+- B-Plot 2: may share a character with A-plot or B-plot 1, intersects with A-plot during Act III-IV, has its own mini-arc
+- Both B-plots must COLLIDE with the A-plot — their resolutions directly affect the main climax.
+
+EVERY CHAPTER EXCEPT CHAPTER ${chapters} ENDS ON A CLIFFHANGER, QUESTION, OR REVEAL. For ${chapters} chapters that means ${chapters - 1} distinct hooks. Vary hook types — alternate between reveals, questions, emotional beats, and act-break reversals. Never repeat the same hook type twice consecutively.
+
+STAKES ESCALATION: Stakes must rise monotonically. Map out the "worst outcome" at each act break — it must grow: reputation → relationships → livelihood → identity → life.
+
+SETUP & PAYOFF: Plant at least 3 specific details in Acts I-II that pay off in Acts IV-V. These must be SPECIFIC (a necklace, a phrase, a letter, a scar) not abstract (trust, loyalty).
+
+NO EXPOSITION DUMPS: Backstory revealed through conflict only. If a character needs to know X, they discover it or are forced to confront it — never told it.
+
+THEMATIC COHERENCE: A 45-minute drama needs a unifying theme (power vs love, tradition vs ambition, truth vs loyalty). The theme should be tested from multiple angles through the A-plot and both B-plots. By the end, the story has made an argument about this theme — even if the argument is ambiguous.
+
+HOOK-RESOLUTION CYCLE (the retention engine — CRITICAL at 45 minutes):
+- OPENING HOOK: The first 2 lines of Chapter 1 Scene 1 MUST plant an unanswered question, unresolved tension, or mid-action moment. At 45 minutes, viewers are maximally skeptical — earn their commitment in the first 10 seconds.
+- THE LADDER: Structure each chapter as 3-4 "rungs." Each rung: tension planted → resolved → IMMEDIATELY opens next. Never leave the viewer in a resolved state. For ${chapters} chapters, aim for 3-4 rungs per chapter (45-60 total tension cycles across the full story).
+- INTRA-SCENE TENSION: Every 2-3 lines of dialogue shift power, raise a question, or reveal something that reframes the scene. Zero flat exchanges. At this length, even one dead scene costs viewers.
+- SCENE-TO-SCENE HANDOFF: Every scene transition hands off tension. With ${chapters} chapters and multiple scenes each, there could be 40-60 scene transitions — every one must push forward.
+- ESCALATING HOOKS: Hooks escalate across the five acts. Act I hooks create curiosity. Act II hooks create concern. Act III hooks create dread. Act IV hooks create desperation. The Chapter ${chapters - 1} hook (right before the climax) should be the strongest in the entire story.
+- CONTINUOUS VALUE: Each chapter adds NEW dramatic value. If a chapter only bridges between two important chapters, it doesn't earn its runtime at 45 minutes — merge it or give it its own dramatic function.
+`;
+    }
+
     // long-form tier (20-30 min)
     return `
 === TIER: LONG-FORM (${chapters} chapters, prestige drama architecture) ===
@@ -1935,8 +2440,9 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
    * Pass thresholds:
    *   test       — score ≥ 50 (low bar, test runs don't need prestige arc)
    *   standard   — score ≥ 60
-   *   long-form  — score ≥ 70 (HIGH bar — long-form burns 2000-3000 credits;
-   *                            weak scripts must be regenerated before video gen)
+   *   long-form  — score ≥ 70
+   *   prestige   — score ≥ 80 (HIGHEST bar — prestige burns ~3000 credits)
+   *   +5 cinematic bump across all tiers
    *
    * Caller (orchestrator) uses `pass` to hard-block the approval gate on fail.
    */
@@ -1971,13 +2477,20 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
           const base = {
             scene_number: sc.scene_number,
             location: sc.location,
+            ...(tier !== 'prestige' && sc.location_details ? { location_details: sc.location_details } : {}),  // R2: strip location_details for prestige
             characters_present: sc.characters_present || [],
-            lines: (sc.lines || []).map(ln => ({
-              line_number: ln.line_number,
-              speaker: ln.speaker_id,
-              dialogue: ln.dialogue,
-              tone: ln.tone,
-            })),
+            lines: (sc.lines || []).map(ln => {
+              const base = {
+                line_number: ln.line_number,
+                speaker: ln.speaker_id,
+                dialogue: tier === 'prestige'
+                  ? (ln.dialogue || '').split(/\s+/).slice(0, 6).join(' ')  // R2: truncate to 6 words for prestige skeleton compression
+                  : ln.dialogue,
+              };
+              // R2: strip tone and animation_prompt for prestige to reduce skeleton size
+              if (tier !== 'prestige') base.tone = ln.tone;
+              return base;
+            }),
           };
           if (generatorMode === 'cinematic') {
             base.location_element_hint = sc.location_element_hint || null;
@@ -2029,9 +2542,13 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
 
     const userMessage = `TIER: ${tier}\nGENERATOR_MODE: ${generatorMode}\nEXPECTED CHAPTERS: ${storyBrief.chapters}\n\nSCRIPT SKELETON:\n${JSON.stringify(skeleton, null, 2)}\n\nGrade this script per the rubric. Return JSON only.`;
 
+    // Prestige tier: 15 chapters × 5 scenes each produces many more issues to report;
+    // 8K was already tight for long-form, 16K gives headroom for the five-act rubric
+    const graderMaxTokens = (tier === 'prestige') ? 16384 : 8192;
+
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: 8192, // Story-driven scripts produce many issues across 60+ scenes; 4K still truncated
+      max_tokens: graderMaxTokens,
       temperature: 0.2, // Low temp — we want consistent, critical grading
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
@@ -2048,7 +2565,7 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
       // Cinematic mode raises the bar by 5 pts at every tier — weak Kling clips
       // cost more per unit than weak Veo clips, and coverage authoring errors
       // (missing blocking, incoherent shot groups) propagate worse.
-      const baseThresholds = { 'test': 50, 'standard': 60, 'long-form': 70 };
+      const baseThresholds = { 'test': 50, 'standard': 60, 'long-form': 70, 'prestige': 80 };
       const bump = (generatorMode === 'cinematic') ? 5 : 0;
       const threshold = (baseThresholds[tier] || 60) + bump;
       const pass = typeof parsed.score === 'number' && parsed.score >= threshold;

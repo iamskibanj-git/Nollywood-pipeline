@@ -159,9 +159,95 @@ Staged mode uses a rigid `chapters × scenesPerChapter × linesPerScene` grid. E
 - **20 min** (~2160 credits): 8 chapters × 3 scenes × 8 lines = 192 clips
 - **30 min** (~3240 credits): 10 chapters × 3 scenes × 9 lines = 270 clips
 
-Character caps (staged only): test 2-3, standard 3-4, long-form 4-6.
+Character caps (staged only): test 2-3, standard 3-4, long-form 4-6, prestige 6-10.
 
 1/2/5-min presets are kept for test runs when iterating on non-scripting features (Verify Clip, History Recovery, etc.) — they don't get the full structural review pressure because a bad test run only burns ~$0.80 instead of 2000+ credits.
+
+### Prestige Tier — 45-Minute Duration (Session 30N — Implemented)
+
+**Status:** ✅ Fully implemented across two sessions. Session 30N-A: wiring (presets, scaffolding, grading, renderer UI). Session 30N-B: engine (two-phase outline, voice anchors, validation).
+
+**Why it exists:** Minimum production run is 30 minutes. A 45-minute option enables prestige long-form content — ensemble casts, dual B-plots, five-act structure — that the current long-form tier can't support without hitting context limits and quality drift.
+
+**Preset definition (orchestrator.js):**
+- Staged: 15 chapters × 3 scenes × 9 lines = 405 lines, ~3240+ credits
+- Cinematic: ~245 target clips (2700 seconds ÷ 11), 12-15 chapters (story-driven), ~3000 credits
+- Tier string: `'prestige'` via `getDurationTier()`, exported as `TIER_PRESTIGE` constant
+
+**Five-act narrative structure (scaffolding):**
+- Act I (ch 1-3): Setup — world + ensemble + dual story engines
+- Act II (ch 4-6): Complications — A-plot and B-plots escalate, intersect
+- Act III (ch 7-9): Midpoint crisis — major reversal that reframes everything, B-plot collision
+- Act IV (ch 10-12): Unraveling — consequences cascade, alliances shift, highest tension
+- Act V (ch 13-15): Climax + resolution — all threads converge, both B-plots resolve before main climax
+- Ensemble: 6-10 characters with mandatory roles (protagonist, antagonist, 2 confidants, 2+ B-plot leads, 2+ supporting)
+- 3+ setup/payoff pairs, dual B-plots (each with own mini-arc), no exposition dumps
+
+**Two-phase outline generation (context limit mitigation) — IMPLEMENTED:**
+The existing two-pass story-driven approach (Pass A outline → Pass B chapters) hits output token limits at 15 chapters. Prestige splits Pass A itself:
+- Phase A1 (`_generatePrestigeOutline`, ~line 680): Arc skeleton — character bible, five-act beat structure, relationship arcs, setup/payoff pairs, dual B-plot summaries, thematic thesis. max_tokens=8192, ~5K output. Returns `five_act_beats` with 20/40/60/80% act boundaries matching scaffolding.
+- Phase A2 (same method, ~line 880): Detailed chapter outlines in batches of 5 (3 calls for 15 chapters). Each batch gets compact character bible (outfits stripped to `outfit_count`) + relevant act beats + previous batch summaries as context. max_tokens=8192, ~5K output per batch.
+- Phase B (`_generateStoryDriven` main loop, ~line 395): Each chapter generated independently using combined A1+A2 outline + voice anchors as context.
+- Non-prestige path uses `_generateStandardOutline` (~line 542) — the original single-pass outline, unchanged.
+- Gate: `tier === 'prestige'` at line ~377. Non-prestige flows through `_generateStandardOutline`.
+
+**Voice anchors (drift mitigation) — IMPLEMENTED:**
+`_extractVoiceAnchors()` (~line 972) runs for ALL story-driven scripts (not just prestige). Extracts from outline:
+- 2-3 signature phrases per character from `speech_notes` + `speech_style` (with descriptive style mappings for 10 speech styles)
+- `TONE_BASELINE` derived from emotional temperature distribution across chapters + story concept
+- Injected as `=== VOICE_ANCHORS ===` block into every Phase B chapter prompt, between CHARACTER BIBLE and FULL STORY OUTLINE sections (~200-400 tokens per call)
+- Includes drift prevention instruction: characters must never deviate from their voice signature
+
+**Grading:**
+- Pass threshold: 80 (staged), 85 (cinematic, +5 bump)
+- Grader max_tokens: 16384 (vs 8192 for other tiers)
+- Skeleton compression for prestige: strip animation_prompt, tone, location_details, truncate dialogue to first 6 words per line. If compressed skeleton > 40K tokens, split grading into Acts 1-3 (60% weight) + Acts 4-5 (40% weight).
+- Rubric adds five-act scoring, dual B-plot assessment, thematic coherence
+
+**Credit math:**
+- Cinematic: ~245 clips × 11 = ~2,695 + ~120 scenes × 2 + ~20 portraits × 2 + ~300 buffer = **~3,275 credits**
+- Monthly budget (6000 credits): ~1.8 prestige films/month
+- Estimated generation time: 8-16 hours for cinematic (operational concern, not a bug)
+
+**Risk mitigations baked into implementation (16 risks identified, Session 30N):**
+
+HIGH:
+- R1 (outline token overflow): Two-phase A1→A2→B design above
+- R2 (grader skeleton exceeds context): Skeleton compression + split-grading fallback
+- R3 (voice drift): Voice anchors above
+- R4 (orchestrator grader catch auto-passes): Fix line 1228 — retry once, then hard-fail for prestige (benefits all tiers)
+
+MEDIUM:
+- R5 (long-form regression): Prestige branch inserted ABOVE long-form with strict `=== 'prestige'` gating
+- R6 (renderer preset desync): Update both PRESET_STRUCTURES objects in index.html
+- R7 (Higgsfield session exhaustion): Document 8-16hr expected time, existing checkpoint/resume is adequate
+- R8 (verify batch duration): Document 20-30min verify time, optionally bump concurrency to 5
+- R9 (auto-split clip_id cascade): Tighten 3-line constraint in prestige cinematic scaffolding
+- R10 (five-act language leak): Strict `=== 'prestige'` gating, same as R5
+
+LOW:
+- R11 (branding interval): Consider BRANDING_INTERVAL_CLIPS = 20 for prestige (~3.7min vs ~2.5min)
+- R12 (FFmpeg 4K 45min): Document ~15-20GB temp disk, ~2-4hr assembly time
+- R13 (DB row count): 245 rows fine for SQLite, no action
+- R14 (title similarity): Existing issue #10 fix covers this
+- R15 (voice anchor cost): ~$0.01-0.02 total, negligible
+- R16 (tier string mismatch): TIER_PRESTIGE constant, grep validation in test step
+
+**Implementation split (both complete):**
+- Session 30N-A (Tasks 9-12, 15): ✅ Preset definitions, scaffolding, grading rubric, renderer UI — all "wiring" work
+- Session 30N-B (Tasks 13-14, 16-17): ✅ Two-phase outline engine, voice anchors, CLAUDE.md docs, validation
+
+**Files modified:**
+- `src/main/pipeline/orchestrator.js` — DURATION_PRESETS, CINEMATIC_DURATION_PRESETS, getDurationTier, TIER_PRESTIGE constant, grader catch block (Session A)
+- `src/main/pipeline/script-engine.js` — _buildStructuralScaffolding (prestige five-act), _buildCinematicScaffolding (prestige constraints), reviewScriptStructure thresholds, _generateStoryDriven (refactored: prestige/standard outline split + Phase B loop), _generateStandardOutline (extracted), _generatePrestigeOutline (new, two-phase A1+A2), _extractVoiceAnchors (new, all story-driven) (Sessions A+B)
+- `prompts/structure-review-prompt.txt` — prestige rubric section (Session A)
+- `src/renderer/index.html` — duration dropdowns, PRESET_STRUCTURES, CINEMATIC_PRESET_STRUCTURES (Session A)
+- `CLAUDE.md` — this section (Session B)
+
+**Implementation gotchas discovered:**
+- Bash sandbox NTFS mount sync: `node -c` may see stale file versions and report false syntax errors. The Read tool is the source of truth for file completeness.
+- Phase A2 sends compact character bible (outfits stripped to `outfit_count`) to stay within token budget — full outfit details are only needed at Phase B chapter generation time.
+- Voice anchors use a style descriptor lookup table (10 entries) rather than raw speech_style strings, giving the chapter generator actionable voice guidance rather than just a label.
 
 ### Cinematic (Kling) — story-driven model
 
@@ -208,7 +294,7 @@ Cinematic mode uses a **credit-first, story-driven** approach. The clip is the a
    - **Staged long-form:** 4-6 characters (hard cap in scaffolding)
    - **Cinematic long-form:** unlimited characters (every speaking role gets portrait), unlimited scenes per chapter, unlimited lines per scene (grouped into clips of 3). Max 3 characters per scene (Kling constraint). Scaffolding specifies target clip count instead of fixed grid.
 2. **Grader prompt** (`prompts/structure-review-prompt.txt`): Low-temperature (0.2) Claude call with a point-scored rubric. Returns JSON `{score, pass, issues[], strengths[], summary}`. ~$0.05-0.10 per review.
-3. **Pass thresholds:** test ≥50, standard ≥60, long-form ≥70. Long-form has the highest bar because it has the highest credit cost per fail.
+3. **Pass thresholds:** test ≥50, standard ≥60, long-form ≥70, prestige ≥80. Cinematic mode gets +5 across all tiers. Prestige has the highest bar because a bad 45-min script wastes ~3000 credits.
 4. **Hard-block:** `orchestrator.approveScript()` rejects approval when `review.pass === false` unless explicit `{ override: true }`. UI surfaces three buttons: primary Approve (disabled), secondary Regenerate, tertiary Override (with confirmation dialog warning of credit risk).
 5. **Regenerate loop:** capped at `MAX_SCRIPT_REGEN_ITERATIONS=3` (env-tunable). Each regen is a fresh `generateScript()` + fresh review. If the cap is hit, the last-generated script goes through (so pathological concepts can't loop forever).
 
@@ -620,6 +706,15 @@ Gemini 2.5 Flash sometimes returns malformed JSON despite `responseMimeType: 'ap
 ## Script JSON Recovery
 
 Claude's script responses (especially at 90+ lines) can be truncated or malformed. `_safeParseScriptJson()` in script-engine.js provides 6-strategy progressive recovery: direct parse → regex extraction → trailing comma fix → bracket closing → unescaped quote fix → truncation to last complete element. Helper methods: `_closeUnclosedBrackets()`, `_fixUnescapedQuotes()`, `_truncateToLastComplete()`. The `max_tokens` is set to 16384 to minimize truncation in the first place.
+
+**Session 30N fixes (5 critical):**
+1. `_closeUnclosedBrackets` — rewrote to use ordered nesting stack (old code closed `]` before `}` regardless of nesting order)
+2. `_fixUnescapedQuotes` — added `\n\r` to boundary char set (newlines at end-of-line were treated as inner quotes)
+3. `reviewScriptStructure` — grader parse failures now return `pass:false` instead of silently auto-passing with score 65
+4. `_sanitizeKlingClipPrompts` bare-name @-prefix — now skips matches inside dialogue quote ranges
+5. `_sanitizeKlingClipPrompts` dual-speaker strip — collect-then-apply pattern (modifying string mid-iteration with stateful regex corrupted lastIndex)
+
+**Known remaining issue:** Orchestrator line ~1228 has its own try/catch that auto-passes (`score:65, pass:true`) when `reviewScriptStructure()` throws an exception (network error, API timeout). Fix 3 handles the case where the call succeeds but returns bad JSON; the orchestrator catch handles the case where the entire call fails. Planned fix (Session 30N prestige implementation): retry once before fallback, hard-fail for prestige tier.
 
 ## Node.js Fetch Polyfill
 
