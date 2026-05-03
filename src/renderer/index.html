@@ -3533,6 +3533,10 @@
             // Cinematic mode only — element automation completed (or partially
             // succeeded). User must confirm elements exist in Higgsfield before
             // proceeding to location generation.
+            // M3: If auto-verification found missing elements, show them in the checklist
+            if (event.missing && event.missing.length > 0) {
+              renderCinematicElementChecklist(event.missing.map(name => ({ name, description: '' })));
+            }
             showCinematicElementsPanel();
           }
           if (event.gate === 'locations-ready') {

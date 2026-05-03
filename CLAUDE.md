@@ -293,6 +293,31 @@ Files changed:
 - `src/renderer/index.html` — gate UI handlers for preflight-failed, credits-exhausted
 - `CLAUDE.md` — this section
 
+**Session 30Q — Element Gate Auto-Verification (M3):**
+
+M3 — Element gate auto-verification:
+- Before the 'elements-ready' gate, the orchestrator now auto-verifies element existence in Higgsfield.
+- Creates a temporary `HiggsfieldElements` instance, calls `invalidateCache()` + `listExistingElements()`.
+- Deduplicates expected element names from `cinematicElementNames` values (the map is many-to-one).
+- Compares against scraped list using case-insensitive matching.
+- **All present → auto-approve**, logs "✓ All N elements verified — auto-approving", skips manual gate entirely.
+- **Any missing → manual gate** with `missing` array in the gate event. UI renders specific missing-element checklist via existing `renderCinematicElementChecklist()`.
+- **Verification failure → falls through** to manual gate (non-blocking on error).
+- Scope boundary: verifies existence only (name in list), not quality (correct image/settings). Quality verification is a separate project.
+
+UI:
+- `index.html` — elements-ready gate handler now passes `event.missing` to `renderCinematicElementChecklist()` so the operator sees exactly which elements need manual creation.
+
+Design decisions:
+- Case-insensitive comparison handles Higgsfield's occasional name normalization.
+- `invalidateCache()` called before listing to ensure fresh scrape (cache may be stale from element creation).
+- `_lastMissingElements` stored on orchestrator instance so gate emit can reference the list.
+
+Files changed:
+- `src/main/pipeline/orchestrator.js` — element auto-verification block before gate
+- `src/renderer/index.html` — missing elements passed to checklist renderer
+- `CLAUDE.md` — this section
+
 ### Cinematic (Kling) — story-driven model
 
 Cinematic mode uses a **credit-first, story-driven** approach. The clip is the atomic cost unit, not the line. Structure is flexible — scenes, lines, and characters are unlimited and driven by what the story needs.

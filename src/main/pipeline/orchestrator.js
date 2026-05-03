@@ -1868,13 +1868,53 @@ class PipelineOrchestrator {
           this.log('[CINEMATIC] Element setup stage starting — character grids + character elements + location images');
           await this._runCinematicElementSetup(projectId, projectDir);
 
-          // ── ELEMENT APPROVAL GATE ──
-          // Hard gate: user must confirm elements exist in Higgsfield before
-          // location generation burns credits. Never auto-approved, even on resume.
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'elements-ready' });
-          this.log('Waiting for element approval — confirm elements exist in Higgsfield before proceeding...');
-          await this.waitForApproval('elements-ready');
+          // ── ELEMENT APPROVAL GATE (with auto-verification) ──
+          // M3: Before asking the operator, check if all expected elements exist
+          // in Higgsfield. If they do, auto-approve and skip the manual gate.
+          // If any are missing, show the gate with a specific missing-element list.
+          let elementsAutoApproved = false;
+          try {
+            const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+            const { CinemaStudioAutomation } = require('../automation/cinema-studio-automation');
+            const cinemaStudio = new CinemaStudioAutomation({
+              automation: this.automation,
+              logger: (m) => this.log(`[CINEMATIC] ${m}`),
+              projectId: this.state.higgsfield_project_id || null,
+            });
+            const elemChecker = new HiggsfieldElements({
+              automation: this.automation,
+              logger: (m) => this.log(`[CINEMATIC] ${m}`),
+              cinemaStudio,
+            });
+
+            // Collect unique expected element names from cinematicElementNames
+            // (the map has many keys pointing to the same value — deduplicate values)
+            const expectedNames = [...new Set(Object.values(this.state.cinematicElementNames || {}))];
+            if (expectedNames.length > 0) {
+              elemChecker.invalidateCache();
+              const existing = await elemChecker.listExistingElements();
+              const existingLower = new Set(existing.map(e => e.name.toLowerCase()));
+              const missing = expectedNames.filter(name => !existingLower.has(name.toLowerCase()));
+
+              if (missing.length === 0) {
+                this.log(`[CINEMATIC] ✓ All ${expectedNames.length} elements verified in Higgsfield — auto-approving`);
+                elementsAutoApproved = true;
+              } else {
+                this.log(`[CINEMATIC] ${missing.length}/${expectedNames.length} elements missing: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '...' : ''}`, 'warn');
+                this._lastMissingElements = missing;
+              }
+            }
+          } catch (verifyErr) {
+            this.log(`[CINEMATIC] Element auto-verification failed (non-blocking): ${verifyErr.message}`, 'warn');
+            // Fall through to manual gate
+          }
+
+          if (!elementsAutoApproved) {
+            this.state.status = 'waiting_approval';
+            this.emit({ type: 'waiting', gate: 'elements-ready', missing: this._lastMissingElements || [] });
+            this.log('Waiting for element approval — confirm elements exist in Higgsfield before proceeding...');
+            await this.waitForApproval('elements-ready');
+          }
           if (this.cancelled) return;
 
           // Phase 3 location setup runs as part of the same elements-setup
