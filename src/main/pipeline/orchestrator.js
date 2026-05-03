@@ -2594,13 +2594,25 @@ class PipelineOrchestrator {
             throw new Error(`Video clips incomplete: ${stuckClips.length} assets stuck [${statuses}]`);
           }
 
-          // All clips done! Verify files on disk
-          this.log(`[VERIFY] All ${doneClips.length}/${totalClips} video clips done, files verified on disk`);
+          // All clips done! Verify files on disk.
+          // Must throw on missing files — same as cinematic path's verifyStageComplete().
+          // Without this, missing files are only caught at assembly (after Gemini verify
+          // has already burned credits) instead of here where the operator can fix them.
+          const missingClipFiles = [];
           for (const clip of doneClips) {
             if (!clip.file_path || !fs.existsSync(clip.file_path)) {
-              this.log(`[VERIFY] Missing file for clip id=${clip.id}: ${clip.file_path}`, 'warn');
+              missingClipFiles.push({ id: clip.id, path: clip.file_path || '(null)' });
+              this.log(`[VERIFY] Missing file for clip id=${clip.id}: ${clip.file_path || '(null)'}`, 'warn');
             }
           }
+          if (missingClipFiles.length > 0) {
+            const details = missingClipFiles.slice(0, 10).map(m => `id=${m.id}: ${m.path}`).join(', ');
+            throw new Error(
+              `Video clips file verification failed: ${missingClipFiles.length}/${doneClips.length} done clip(s) missing on disk. ` +
+              `[${details}${missingClipFiles.length > 10 ? '...' : ''}]`
+            );
+          }
+          this.log(`[VERIFY] All ${doneClips.length}/${totalClips} video clips done, all files verified on disk`);
 
           db.updateProjectStage(projectId, 'videos-done');
           // NOTE: approval gate moved out of this stage. The new 'verify' stage
@@ -2882,12 +2894,20 @@ class PipelineOrchestrator {
           }
 
           // ── CLIP COUNT + FILE INTEGRITY GATE ──
-          // Ensure every expected clip is done and its file exists on disk.
+          // Ensure every expected clip is done (or skipped) and done clips have files on disk.
+          // 'skipped' is a terminal status (dialogue triage marks silent clips as skipped).
+          // These clips have no video file and must be excluded from assembly — same as
+          // getIncompleteAssets() which treats 'done', 'skipped', 'archived' as terminal.
+          const TERMINAL_STATUSES = new Set(['done', 'skipped', 'archived']);
           const allClipsOfType = db.getAssets(projectId, { type: clipType });
           const expectedCount = allClipsOfType.length;
-          const pendingClips = allClipsOfType.filter(a => a.status !== 'done');
+          const skippedClips = allClipsOfType.filter(a => a.status === 'skipped');
+          const pendingClips = allClipsOfType.filter(a => !TERMINAL_STATUSES.has(a.status));
           const missingFiles = allDoneClips.filter(a => !a.file_path || !fs.existsSync(a.file_path));
 
+          if (skippedClips.length > 0) {
+            this.log(`[ASSEMBLY] ${skippedClips.length} clip(s) skipped (no dialogue) — excluded from assembly`);
+          }
           if (pendingClips.length > 0) {
             const names = pendingClips.slice(0, 10).map(a => a.kling_clip_id || `ch${a.chapter}_sc${a.scene}_L${a.line}`).join(', ');
             throw new Error(`Assembly blocked: ${pendingClips.length}/${expectedCount} clip(s) not done (${names}${pendingClips.length > 10 ? '...' : ''})`);
@@ -2896,7 +2916,7 @@ class PipelineOrchestrator {
             const names = missingFiles.slice(0, 10).map(a => a.kling_clip_id || `ch${a.chapter}_sc${a.scene}_L${a.line}`).join(', ');
             throw new Error(`Assembly blocked: ${missingFiles.length} clip(s) missing file on disk (${names}${missingFiles.length > 10 ? '...' : ''})`);
           }
-          this.log(`[ASSEMBLY] Integrity check passed: ${allDoneClips.length}/${expectedCount} clips done, all files present on disk`);
+          this.log(`[ASSEMBLY] Integrity check passed: ${allDoneClips.length} done, ${skippedClips.length} skipped, all done files present on disk`);
 
           // Build clipList with a sortKey that handles both modes:
           //   Staged:    chapter * 1e6 + scene * 1e3 + line

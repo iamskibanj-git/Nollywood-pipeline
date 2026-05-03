@@ -345,6 +345,22 @@ Files changed:
 - `src/main/pipeline/orchestrator.js` — all 4 catch blocks hardened
 - `CLAUDE.md` — this section
 
+**Session 30T — Status Consistency + Staged Verify Fix:**
+
+Two bugs found via code review of terminal status handling across the pipeline.
+
+P1 — Skipped cinematic clips block assembly (~line 2888):
+- **Root cause**: assembly integrity gate filtered `a.status !== 'done'`, catching skipped clips as blockers. But `getIncompleteAssets()` and `verifyStageComplete()` treat 'skipped' as terminal — so verify passes, then assembly fails.
+- **Fix**: use `TERMINAL_STATUSES = new Set(['done', 'skipped', 'archived'])` for the pending check. Skipped clips are logged and excluded from concatenation (they have no video file). Error message unchanged for truly pending/failed clips.
+
+P2 — Staged video file verification only logs missing files (~line 2598):
+- **Root cause**: staged path logged missing done-clip files but still advanced to `videos-done`. Cinematic path uses `verifyStageComplete()` which throws on missing files. Inconsistency means staged-mode missing files aren't caught until assembly (after Gemini verify burns credits).
+- **Fix**: collect missing files into array, throw with details before `updateProjectStage`. Matches cinematic path behavior.
+
+Files changed:
+- `src/main/pipeline/orchestrator.js` — both fixes
+- `CLAUDE.md` — this section
+
 ### Cinematic (Kling) — story-driven model
 
 Cinematic mode uses a **credit-first, story-driven** approach. The clip is the atomic cost unit, not the line. Structure is flexible — scenes, lines, and characters are unlimited and driven by what the story needs.
