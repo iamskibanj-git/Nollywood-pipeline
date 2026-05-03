@@ -76,6 +76,17 @@ FOR LONG-FORM TIER:
 12. SETUP/PAYOFF PAIRS (5 pts): At least 2 details planted early that pay off late. Half for 1. Zero for none.
 13. NO EXPOSITION DUMPS (5 pts): Backstory revealed through conflict, not told by one character to another. Deduct 1 pt per explicit exposition dump.
 
+FOR PRESTIGE TIER (45 min, five-act structure):
+8. INCITING INCIDENT (5 pts): Disruption by end of Chapter 1. This is table stakes at prestige level.
+9. FIRST REVERSAL (6 pts): By end of Act II, the A-plot's situation must flip. Full for a genuine complication that changes the character's approach, half for a minor setback, zero for linear progression.
+10. MIDPOINT CRISIS (8 pts): At the midpoint (Act III), a MAJOR REVERSAL that reframes everything the audience has seen. Full only for a genuine reframe (hidden identity, secret relationship, betrayal revealed, double life exposed). This must change the MEANING of earlier scenes, not just add new information. Zero for a plot twist that doesn't reframe.
+11. DUAL B-PLOTS (10 pts): TWO secondary storylines, each with its own mini-arc (setup → complication → resolution), each intersecting with the A-plot before the climax. Full for 2 clear B-plots with distinct arcs, 5 for 1 clear B-plot, zero for monoplot. Deduct 3 if either B-plot has no intersection with the A-plot.
+12. STAKES ESCALATION (5 pts): Monotonic rising stakes across all five acts. Map the "worst outcome" at each act break — it must grow.
+13. SETUP/PAYOFF PAIRS (6 pts): At least 3 specific details planted in Acts I-II that pay off in Acts IV-V. Full for 3+, 4 for 2, 2 for 1, zero for none. Details must be SPECIFIC (objects, phrases, scars) not abstract (trust, loyalty).
+14. NO EXPOSITION DUMPS (4 pts): Backstory revealed through conflict only. Deduct 1 pt per exposition dump. At 45 minutes, exposition dumps are more damaging because they break pacing over longer stretches.
+15. THEMATIC COHERENCE (3 pts): Does the script explore a unifying theme (power vs love, tradition vs ambition, truth vs loyalty) from multiple angles through the A-plot and both B-plots? Full if the theme is tested from 3+ perspectives, half for 2, zero for no discernible theme or inconsistent thematic exploration.
+16. ACT STRUCTURE COMPLIANCE (3 pts): Does the five-act structure hold? Full if act transitions are clear (setup→complications→crisis→unraveling→climax). Half if one act transition is weak. Zero if the story reads as a 3-act stretched to fill 15 chapters.
+
 === OUTPUT FORMAT (JSON ONLY — NO PROSE OUTSIDE THE JSON) ===
 
 {
@@ -84,7 +95,7 @@ FOR LONG-FORM TIER:
   "issues": [
     {
       "severity": "critical" | "warning" | "minor",
-      "category": "opening" | "dialogue" | "hooks" | "characters" | "hook_resolution_ladder" | "intra_scene_tension" | "hook_escalation" | "inciting" | "midpoint" | "bplot" | "stakes" | "setup_payoff" | "exposition" | "ending",
+      "category": "opening" | "dialogue" | "hooks" | "characters" | "hook_resolution_ladder" | "intra_scene_tension" | "hook_escalation" | "inciting" | "midpoint" | "first_reversal" | "bplot" | "dual_bplot" | "stakes" | "setup_payoff" | "exposition" | "ending" | "thematic_coherence" | "act_structure",
       "description": "<specific, actionable — include chapter/scene/line numbers>",
       "chapter": <int or null>,
       "scene": <int or null>,
@@ -97,9 +108,9 @@ FOR LONG-FORM TIER:
 }
 
 SEVERITY GUIDANCE:
-- "critical" — the script will fail to engage viewers without fixing this. Missing inciting incident, no midpoint reversal in standard+, no B-plot in long-form, filler-dominated dialogue, broken hook-resolution ladder (multiple dead zones), hooks that don't escalate.
-- "warning" — noticeably weakens the script but survivable. Weak chapter-end hook, underused character, one exposition dump, 1-2 flat scene stretches, one dead zone in the ladder.
-- "minor" — polish issues. One filler line, slightly late hook, thin supporting character, hooks escalate but unevenly.
+- "critical" — the script will fail to engage viewers without fixing this. Missing inciting incident, no midpoint reversal in standard+, no B-plot in long-form, no dual B-plots in prestige, filler-dominated dialogue, broken hook-resolution ladder (multiple dead zones), hooks that don't escalate, missing midpoint crisis in prestige, no thematic coherence in prestige.
+- "warning" — noticeably weakens the script but survivable. Weak chapter-end hook, underused character, one exposition dump, 1-2 flat scene stretches, one dead zone in the ladder, only one B-plot in prestige (instead of two), fewer than 3 setup/payoff pairs in prestige.
+- "minor" — polish issues. One filler line, slightly late hook, thin supporting character, hooks escalate but unevenly, act transitions slightly unclear in prestige.
 
 BE SPECIFIC. "Chapter 3 is weak" is useless. "Chapter 3 Scene 2 Line 4 'Hello how are you today my friend' is filler — cut or rewrite to reveal something about the relationship" is useful.
 

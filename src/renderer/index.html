@@ -221,6 +221,7 @@
                   <option value="10min" selected>10 min (~90 clips, ~1080 credits)</option>
                   <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
                   <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+                  <option value="45min">45 min (~405 clips, ~4860 credits) — prestige</option>
                 </select>
                 <select id="aspect-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Aspect ratio — locked once Research starts">
                   <option value="16:9" selected>16:9 (YouTube long)</option>
@@ -248,6 +249,7 @@
                 <option value="10min" selected>10 min (~90 clips, ~1080 credits)</option>
                 <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
                 <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+                <option value="45min">45 min (~405 clips, ~4860 credits) — prestige</option>
               </select>
               <select id="aspect-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Aspect ratio — locked once Research starts">
                 <option value="16:9" selected>16:9 (YouTube long)</option>
@@ -299,6 +301,7 @@
                 <option value="10min">10 min (~90 clips, ~1080 credits)</option>
                 <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
                 <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+                <option value="45min">45 min (~405 clips, ~4860 credits) — prestige</option>
               </select>
               <select id="research-edit-aspect" style="padding:8px 12px;font-size:13px;">
                 <option value="16:9">16:9 (YouTube long)</option>
@@ -995,6 +998,7 @@
       '10min': { chapters: 6, scenesPerChapter: 3, linesPerScene: 5, tier: 'standard' },
       '20min': { chapters: 8, scenesPerChapter: 3, linesPerScene: 8, tier: 'long-form' },
       '30min': { chapters: 10, scenesPerChapter: 3, linesPerScene: 9, tier: 'long-form' },
+      '45min': { chapters: 15, scenesPerChapter: 3, linesPerScene: 9, tier: 'prestige' },
     };
     // Cinematic (Kling): story-driven, clip-budget model
     const CINEMATIC_PRESET_STRUCTURES = {
@@ -1004,6 +1008,7 @@
       '10min': { chapters: 6, targetClips: 55, estimatedScenes: 20, estimatedChars: 5, tier: 'standard' },
       '20min': { chapters: 8, targetClips: 109, estimatedScenes: 30, estimatedChars: 6, tier: 'long-form' },
       '30min': { chapters: 10, targetClips: 164, estimatedScenes: 40, estimatedChars: 8, tier: 'long-form' },
+      '45min': { chapters: 15, targetClips: 245, estimatedScenes: 60, estimatedChars: 10, tier: 'prestige' },
     };
 
     function updateDurationInfo() {
@@ -1126,7 +1131,7 @@
 
     // ── Pipeline Actions ──
     function setResearchProjectBadge(duration, aspectRatio, generatorMode) {
-      const durMap = { '1min': '1 min', '2min': '2 min', '5min': '5 min', '10min': '10 min', '20min': '20 min', '30min': '30 min' };
+      const durMap = { '1min': '1 min', '2min': '2 min', '5min': '5 min', '10min': '10 min', '20min': '20 min', '30min': '30 min', '45min': '45 min' };
       const aspMap = { '16:9': '16:9 horizontal', '9:16': '9:16 vertical' };
       const modeMap = { 'staged': 'staged', 'cinematic': 'cinematic' };
       const durEl = document.getElementById('research-badge-duration');
@@ -1147,7 +1152,7 @@
         const aspText = document.getElementById('research-badge-aspect')?.textContent?.trim() || '16:9';
         const modeText = document.getElementById('research-badge-mode')?.textContent?.trim() || 'staged';
         // Reverse-map display text to value
-        const durRevMap = { '1 min': '1min', '2 min': '2min', '3 min': '3min', '5 min': '5min', '10 min': '10min', '15 min': '15min', '20 min': '20min', '30 min': '30min' };
+        const durRevMap = { '1 min': '1min', '2 min': '2min', '3 min': '3min', '5 min': '5min', '10 min': '10min', '15 min': '15min', '20 min': '20min', '30 min': '30min', '45 min': '45min' };
         const aspRevMap = { '16:9 horizontal': '16:9', '16:9': '16:9', '9:16 vertical': '9:16', '9:16': '9:16' };
         document.getElementById('research-edit-duration').value = durRevMap[durText] || '10min';
         document.getElementById('research-edit-aspect').value = aspRevMap[aspText] || '16:9';
@@ -3266,7 +3271,7 @@
           if (projectStatus.progress && projectStatus.progress.total > 0) {
             progressInfo.textContent = `${projectStatus.progress.done}/${projectStatus.progress.total} assets complete${aspectBadge}${modeBadge}`;
           } else {
-            const durMap = { '1min': '1 min', '2min': '2 min', '5min': '5 min', '10min': '10 min', '20min': '20 min', '30min': '30 min' };
+            const durMap = { '1min': '1 min', '2min': '2 min', '5min': '5 min', '10min': '10 min', '20min': '20 min', '30min': '30 min', '45min': '45 min' };
             const durLabel = (durMap[projectStatus.durationPreset] || '10 min') + ' movie';
             progressInfo.textContent = durLabel + aspectBadge + modeBadge;
           }

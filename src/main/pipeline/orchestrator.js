@@ -42,6 +42,9 @@ const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
 /**
  * Duration presets. Each defines the target and matching story structures.
  * Structures are tried in order — first one that meets or exceeds targetClips wins.
+ *
+ * SYNC WARNING: renderer/index.html has local copies (PRESET_STRUCTURES +
+ * CINEMATIC_PRESET_STRUCTURES). Update both when adding/changing presets.
  */
 const DURATION_PRESETS = {
   '1min': {
@@ -103,6 +106,15 @@ const DURATION_PRESETS = {
       { chapters: 11, scenesPerChapter: 3, linesPerScene: 8 }, // 264 lines → ~30.8 min
     ],
   },
+  '45min': {
+    label: '45 min (~4860 credits)',
+    targetSeconds: 2700,
+    structures: [
+      { chapters: 15, scenesPerChapter: 3, linesPerScene: 9 },  // 405 lines → ~47.25 min
+      { chapters: 14, scenesPerChapter: 3, linesPerScene: 10 }, // 420 lines → ~49 min
+      { chapters: 13, scenesPerChapter: 3, linesPerScene: 10 }, // 390 lines → ~45.5 min
+    ],
+  },
 };
 
 /**
@@ -162,7 +174,21 @@ const CINEMATIC_DURATION_PRESETS = {
     estimatedScenes: 40,
     estimatedCharacters: 8,
   },
+  '45min': {
+    label: '45 min (~3300 credits)',
+    targetSeconds: 2700,
+    targetClips: 245,           // 2700s ÷ 11s
+    chapters: 15,               // recommended; story-driven distributes freely
+    estimatedScenes: 60,        // for credit estimation only
+    estimatedCharacters: 10,    // for credit estimation only
+  },
 };
+
+// Tier constants — use these instead of string literals to prevent typo-based mismatches (R16)
+const TIER_TEST = 'test';
+const TIER_STANDARD = 'standard';
+const TIER_LONG_FORM = 'long-form';
+const TIER_PRESTIGE = 'prestige';
 
 /**
  * Classify a duration preset into a tier for structural scaffolding purposes.
@@ -170,12 +196,14 @@ const CINEMATIC_DURATION_PRESETS = {
  *   test       — 1-5 min: lightweight hook + escalation + punch
  *   standard   — 10 min: classic 3-act with midpoint
  *   long-form  — 20-30 min: 3-act + midpoint + B-plot + ensemble
+ *   prestige   — 45 min: five-act + dual B-plots + ensemble 6-10 chars + voice anchors
  */
 function getDurationTier(preset) {
-  if (preset === '1min' || preset === '2min' || preset === '5min') return 'test';
-  if (preset === '10min') return 'standard';
-  if (preset === '20min' || preset === '30min') return 'long-form';
-  return 'standard';
+  if (preset === '1min' || preset === '2min' || preset === '5min') return TIER_TEST;
+  if (preset === '10min') return TIER_STANDARD;
+  if (preset === '20min' || preset === '30min') return TIER_LONG_FORM;
+  if (preset === '45min') return TIER_PRESTIGE;
+  return TIER_STANDARD;
 }
 
 /**
@@ -1224,8 +1252,24 @@ class PipelineOrchestrator {
                   this.log(`[REVIEW] HARD-BLOCK: ${critical} critical + ${review.issues.length - critical} other issue(s). See script review panel.`, 'warn');
                 }
               } catch (e) {
-                this.log(`[REVIEW] Grader failed: ${e.message} — defaulting to neutral pass so approval isn't blocked by infra`, 'warn');
-                review = { score: 65, pass: true, tier: this.state.durationTier, issues: [], strengths: [], summary: `Grader errored: ${e.message}` };
+                // R4 mitigation: retry once before fallback; hard-fail for prestige tier
+                this.log(`[REVIEW] Grader failed: ${e.message} — retrying once...`, 'warn');
+                try {
+                  await new Promise(r => setTimeout(r, 5000));
+                  review = await this.scriptEngine.reviewScriptStructure(script, this.state.durationTier, brief);
+                  fs.writeFileSync(path.join(projectDir, 'script-review.json'), JSON.stringify(review, null, 2));
+                  this.log(`[REVIEW] Retry succeeded: score=${review.score}/100, ${review.pass ? 'PASS' : 'FAIL'}`);
+                } catch (retryErr) {
+                  this.log(`[REVIEW] Retry also failed: ${retryErr.message}`, 'warn');
+                  if (this.state.durationTier === TIER_PRESTIGE) {
+                    // Prestige tier: too expensive to auto-pass (~3000 credits at risk)
+                    this.log(`[REVIEW] Prestige tier — hard-failing instead of auto-pass`, 'warn');
+                    review = { score: 0, pass: false, tier: this.state.durationTier, threshold: 0, issues: [{ severity: 'critical', category: 'grader_error', description: `Structural grader failed twice: ${retryErr.message}. Cannot verify script quality for prestige tier — please retry or override manually.` }], strengths: [], summary: `Grader failed twice; prestige tier blocks until re-review or manual override.` };
+                  } else {
+                    // Non-prestige: preserve existing behavior — neutral pass to not block on infra issues
+                    review = { score: 65, pass: true, tier: this.state.durationTier, issues: [], strengths: [], summary: `Grader errored: ${retryErr.message}` };
+                  }
+                }
               }
               this.state.scriptReview = review;
               this.emit({ type: 'script-review-ready', review });
@@ -10800,4 +10844,4 @@ REWRITTEN DESCRIPTION:`,
   }
 }
 
-module.exports = { PipelineOrchestrator };
+module.exports = { PipelineOrchestrator, TIER_TEST, TIER_STANDARD, TIER_LONG_FORM, TIER_PRESTIGE, getDurationTier, DURATION_PRESETS, CINEMATIC_DURATION_PRESETS };
