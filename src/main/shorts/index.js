@@ -67,6 +67,9 @@ class ShortsController {
    * Updates each row in place as it completes. Resumable — skips already-assembled shorts.
    */
   async assembleShorts(projectId) {
+    // Backup DB before assembly — bulk status changes ahead
+    db.backup('pre-assembly');
+
     const project = db.queryOne('SELECT * FROM projects WHERE id = ?', [projectId]);
     if (!project) throw new Error(`Project not found: ${projectId}`);
 
@@ -148,6 +151,9 @@ class ShortsController {
    * @returns {object} { uploaded, failed, total }
    */
   async uploadAll(projectId, onProgress) {
+    // Backup DB before upload session — status changes are hard to undo
+    db.backup('pre-upload');
+
     // Launch browser
     if (this.uploader) {
       await this.uploader.close();
@@ -168,7 +174,7 @@ class ShortsController {
 
         current++;
         const total = current + db.queryOne(
-          `SELECT COUNT(*) as cnt FROM shorts WHERE project_id = ? AND status = 'seo_done'`,
+          `SELECT COUNT(*) as cnt FROM shorts WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')`,
           [projectId]
         )?.cnt || 0;
 
@@ -230,7 +236,7 @@ class ShortsController {
       assembled: shorts.filter(s => s.status === 'assembled').length,
       seo_done: shorts.filter(s => s.status === 'seo_done').length,
       scheduled: shorts.filter(s => s.status === 'scheduled').length,
-      failed: shorts.filter(s => s.status === 'failed').length,
+      upload_failed: shorts.filter(s => s.status === 'upload_failed').length,
     };
 
     // Reconstruct stats from persisted shorts (survives restart)

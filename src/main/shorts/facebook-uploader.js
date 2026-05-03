@@ -31,6 +31,7 @@
 
 const { chromium } = require('playwright');
 const path = require('path');
+const fs = require('fs');
 
 // ── Timeout defaults ──
 const NAV_TIMEOUT = 30000;
@@ -41,40 +42,71 @@ const POST_UPLOAD_SETTLE = 15000; // Wait for FB to process uploaded video
 const POST_CLICK_SETTLE = 4000;  // Standard settle after a UI click
 const POST_NAV_SETTLE = 6000;    // Settle after navigation/page load
 const POST_SCHEDULE_CONFIRM = 15000; // Wait for FB to confirm scheduled post
+
+// ── Dynamic readiness — adaptive wait based on FB DOM hydration ──
+// Adapted from Kling automation's DYNAMIC READINESS WAIT pattern.
+// FB's SPA loads fast but React hydration is slow — elements exist in DOM
+// but aren't interactive until hydration completes.
+const READINESS_MAX_WAIT = 15000;
+const READINESS_POLL_INTERVAL = 1000;
+const READINESS_CHECKS = [
+  // 1. Content Library heading
+  { name: 'contentLibrary', fn: (page) => page.$('text=Content Library').then(el => !!el).catch(() => false) },
+  // 2. "+ Create" button visible
+  { name: 'createButton', fn: (page) => page.$('[role="button"]:has-text("Create")').then(el => !!el).catch(() => false) },
+  // 3. Tab bar (Published/Scheduled/Drafts)
+  { name: 'tabBar', fn: (page) => page.$('text=Scheduled').then(el => !!el).catch(() => false) },
+  // 4. No loading spinner
+  { name: 'noSpinner', fn: (page) => page.$('[role="progressbar"]').then(el => !el).catch(() => true) },
+];
 const DESCRIPTION_TYPE_DELAY = 15; // ms between keystrokes (avoid FB's anti-bot)
 
-// ── Selectors (best-effort — refine during live testing) ──
-// These use text-based and role-based selectors for resilience.
+// ── Selectors (refined from live testing — May 2026 Facebook UI) ──
+// IMPORTANT: Facebook DOM changes frequently. These were verified against
+// the Professional Dashboard → Content Library → Create Reel flow.
 const SELECTORS = {
-  // Left nav
-  contentLink: 'a:has-text("Content"), [role="link"]:has-text("Content")',
+  // Left nav — "Content" sidebar link (has chevron ">")
+  contentLink: 'a:has-text("Content"), [role="link"]:has-text("Content"), span:text("Content")',
 
-  // Content tabs
-  scheduledTab: '[role="tab"]:has-text("Scheduled"), button:has-text("Scheduled")',
+  // Content Library tabs — plain text links, NOT role="tab"
+  // "Published | Scheduled | Drafts" in the Content Library header
+  scheduledTab: 'span:text("Scheduled"), a:text("Scheduled")',
 
-  // Create button
-  createButton: 'div[role="button"]:has-text("Create"), button:has-text("Create")',
+  // "+ Create" dropdown button (blue, with dropdown arrow)
+  createButton: 'div[role="button"]:has-text("Create"), span:text("Create")',
 
-  // Create menu — Reel option
-  reelOption: '[role="menuitem"]:has-text("Reel"), [role="option"]:has-text("Reel"), div:has-text("Reel"):near(div:has-text("Create"))',
+  // Create menu items — Post, Story, Reel, Bulk upload reels
+  reelOption: '[role="menuitem"]:has-text("Reel"), span:text("Reel")',
 
-  // Upload area — file input or clickable zone
-  fileInput: 'input[type="file"][accept*="video"]',
-  uploadButton: '[role="button"]:has-text("Add video"), [role="button"]:has-text("Upload"), [aria-label*="upload" i]',
+  // Upload area — file input or the "Add video" clickable zone
+  fileInput: 'input[type="file"][accept*="video"], input[type="file"]',
+  uploadButton: '[role="button"]:has-text("Add video"), span:text("Add video")',
 
-  // Next button (appears in reel creation wizard)
-  nextButton: '[role="button"]:has-text("Next"), button:has-text("Next")',
+  // "Upload" button at bottom of Create Reel panel (before video is selected)
+  uploadSubmitButton: 'div[role="button"]:has-text("Upload"):not(:has-text("Bulk")), span:text("Upload")',
 
-  // Description / caption textarea
-  descriptionField: '[role="textbox"][aria-label*="description" i], [role="textbox"][aria-label*="caption" i], textarea[aria-label*="description" i], div[contenteditable="true"][aria-label*="Write"]',
+  // Next button (appears in reel creation wizard — after upload, after description)
+  nextButton: 'div[role="button"]:has-text("Next"), span:text("Next")',
 
-  // Scheduling
-  scheduleForLaterOption: '[role="radio"]:has-text("Schedule"), [role="button"]:has-text("Schedule for later"), label:has-text("Schedule")',
-  dateInput: 'input[aria-label*="date" i], input[type="date"]',
-  timeInput: 'input[aria-label*="time" i], input[type="time"]',
+  // Description / caption field — "Describe your reel..." placeholder
+  descriptionField: 'div[contenteditable="true"][aria-placeholder*="Describe"], div[contenteditable="true"][data-placeholder*="Describe"], div[contenteditable="true"]',
 
-  // Final schedule button
-  scheduleButton: '[role="button"]:has-text("Schedule"):not(:has-text("for later")), button:has-text("Schedule"):not(:has-text("for later"))',
+  // Reel Settings page — "Scheduling options" row (shows "Publish now" by default)
+  schedulingOptionsRow: 'div:has-text("Scheduling options"):has-text("Publish now"), span:text("Scheduling options")',
+
+  // Scheduling options sub-panel — Date and Time input fields
+  // Date field shows "May 2, 2026" format; Time field shows "10:34 AM" format
+  dateInput: 'input[aria-label*="date" i], input[aria-label*="Date" i]',
+  timeInput: 'input[aria-label*="time" i], input[aria-label*="Time" i]',
+
+  // "Schedule for later" button inside the scheduling sub-panel
+  scheduleForLaterButton: 'div[role="button"]:has-text("Schedule for later"), span:text("Schedule for later")',
+
+  // Final "Schedule" button (appears AFTER date/time are set, replaces "Post")
+  scheduleButton: 'div[role="button"]:has-text("Schedule"):not(:has-text("for later")):not(:has-text("Scheduling")), span:text-is("Schedule")',
+
+  // "Post" button (default before scheduling is set — we should NOT click this)
+  postButton: 'div[role="button"]:has-text("Post")',
 };
 
 class FacebookUploader {
@@ -168,6 +200,9 @@ class FacebookUploader {
       }
     };
 
+    // Dismiss any popups that appear on initial load (shortcuts dialog, banners, etc.)
+    await this._dismissPopups();
+
     if (await isLoggedIn()) {
       this.log('[FB-UPLOAD] Already logged in — proceeding');
       return;
@@ -212,88 +247,115 @@ class FacebookUploader {
     }
 
     try {
-      // Step 1: Navigate to Professional Dashboard
-      this.log('[FB-UPLOAD] Step 1: Navigating to Professional Dashboard');
-      await this.page.goto('https://www.facebook.com/professional_dashboard', {
+      // ── Step 1: Navigate to Content Library (direct URL — faster than dashboard → content)
+      this.log('[FB-UPLOAD] Step 1: Navigating to Content Library');
+      await this.page.goto('https://www.facebook.com/professional_dashboard/content/content_library/?filter=SCHEDULED', {
         waitUntil: 'domcontentloaded',
         timeout: NAV_TIMEOUT,
       });
-      await this.page.waitForTimeout(POST_NAV_SETTLE);
+      // Dynamic readiness wait — polls for Content Library UI indicators
+      await this._waitForPageReady();
+      await this._dismissPopups(); // FB shows popups on first load (shortcuts, banners, etc.)
       this.onStepComplete('navigate');
 
-      // Step 2: Click "Content" in left nav
-      this.log('[FB-UPLOAD] Step 2: Clicking Content');
-      await this._clickWithFallback(SELECTORS.contentLink);
-      await this.page.waitForTimeout(POST_NAV_SETTLE);
-      this.onStepComplete('content');
-
-      // Step 3: Click "Scheduled" tab
-      this.log('[FB-UPLOAD] Step 3: Clicking Scheduled tab');
-      await this._clickWithFallback(SELECTORS.scheduledTab);
-      await this.page.waitForTimeout(POST_CLICK_SETTLE);
-      this.onStepComplete('scheduled_tab');
-
-      // Step 4: Click "Create"
-      this.log('[FB-UPLOAD] Step 4: Clicking Create');
-      await this._clickWithFallback(SELECTORS.createButton);
+      // ── Step 2: Click "+ Create" dropdown (with retry — FB DOM can be slow)
+      this.log('[FB-UPLOAD] Step 2: Clicking + Create');
+      await this._retryStep('Step 2 (Create)', async () => {
+        await this._clickWithFallback(SELECTORS.createButton);
+      });
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('create');
 
-      // Step 5: Select "Reel"
-      this.log('[FB-UPLOAD] Step 5: Selecting Reel');
-      await this._clickWithFallback(SELECTORS.reelOption);
+      // ── Step 3: Select "Reel" from dropdown menu (with retry)
+      this.log('[FB-UPLOAD] Step 3: Selecting Reel');
+      await this._retryStep('Step 3 (Reel)', async () => {
+        // The dropdown has: Post, Story, Reel, Bulk upload reels
+        // Use getByText for exact match to avoid hitting "Bulk upload reels"
+        try {
+          await this._dismissPopups();
+          await this.page.getByText('Reel', { exact: true }).click({ timeout: CLICK_TIMEOUT });
+        } catch (_) {
+          await this._clickWithFallback(SELECTORS.reelOption);
+        }
+      });
       await this.page.waitForTimeout(POST_NAV_SETTLE);
+      await this._dismissPopups();
       this.onStepComplete('reel_selected');
 
-      // Step 6: Upload video file
-      this.log(`[FB-UPLOAD] Step 6: Uploading video: ${path.basename(filePath)}`);
+      // ── Step 4: Upload video file
+      // "Create reel" modal appears with "Add video / or drag and drop" area
+      this.log(`[FB-UPLOAD] Step 4: Uploading video: ${path.basename(filePath)}`);
       await this._uploadVideo(filePath);
-      // Wait for FB to fully process the uploaded video (progress bar, thumbnail gen)
-      this.log('[FB-UPLOAD] Step 6b: Waiting for upload processing...');
+      this.log('[FB-UPLOAD] Step 4b: Waiting for upload processing...');
       await this._waitForUploadProcessing();
       this.onStepComplete('uploaded');
 
-      // Step 7: Click "Next" (after upload — button only enables when processing done)
-      this.log('[FB-UPLOAD] Step 7: Clicking Next (post-upload)');
-      await this._waitAndClick(SELECTORS.nextButton, UPLOAD_TIMEOUT);
-      await this.page.waitForTimeout(POST_UPLOAD_SETTLE);
+      // ── Step 5: Click "Next" (post-upload — goes to Edit reel / description page)
+      this.log('[FB-UPLOAD] Step 5: Clicking Next (post-upload)');
+      await this._retryStep('Step 5 (Next post-upload)', async () => {
+        await this._clickNext();
+      });
+      await this.page.waitForTimeout(POST_NAV_SETTLE);
       this.onStepComplete('next_1');
 
-      // Step 8: Enter description
-      this.log('[FB-UPLOAD] Step 8: Entering description');
+      // ── Step 6: Enter description ("Describe your reel..." field)
+      this.log('[FB-UPLOAD] Step 6: Entering description');
       await this._enterDescription(description);
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('description');
 
-      // Step 9: Click "Next" (after description)
-      this.log('[FB-UPLOAD] Step 9: Clicking Next (post-description)');
-      await this._clickWithFallback(SELECTORS.nextButton);
+      // ── Step 7: Click "Next" (goes to Reel settings page)
+      this.log('[FB-UPLOAD] Step 7: Clicking Next (to Reel settings)');
+      await this._retryStep('Step 7 (Next to settings)', async () => {
+        await this._clickNext();
+      });
       await this.page.waitForTimeout(POST_NAV_SETTLE);
       this.onStepComplete('next_2');
 
-      // Step 10: Select "Schedule for later"
-      this.log('[FB-UPLOAD] Step 10: Selecting Schedule for later');
-      await this._clickWithFallback(SELECTORS.scheduleForLaterOption);
+      // ── Step 8: Click "Scheduling options" row (shows "Publish now" by default)
+      // This opens a sub-panel with date/time inputs + "Schedule for later" button
+      this.log('[FB-UPLOAD] Step 8: Opening Scheduling options');
+      await this._retryStep('Step 8 (Scheduling options)', async () => {
+        await this._clickSchedulingOptions();
+      });
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
-      this.onStepComplete('schedule_option');
 
-      // Step 11: Set date
-      this.log(`[FB-UPLOAD] Step 11: Setting date: ${scheduledDate}`);
+      // Debug: screenshot the scheduling sub-panel so we can see what FB shows
+      try {
+        const debugPath = path.join(path.dirname(filePath), `fb_debug_schedule_panel_${Date.now()}.png`);
+        await this.page.screenshot({ path: debugPath, fullPage: false });
+        this.log(`[FB-UPLOAD] Debug screenshot of scheduling panel: ${debugPath}`);
+      } catch (_) {}
+
+      this.onStepComplete('scheduling_opened');
+
+      // ── Step 9: Set date in the scheduling sub-panel
+      this.log(`[FB-UPLOAD] Step 9: Setting date: ${scheduledDate}`);
       await this._setScheduleDate(scheduledDate);
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('date_set');
 
-      // Step 12: Set time
-      this.log(`[FB-UPLOAD] Step 12: Setting time: ${scheduledTime}`);
+      // ── Step 10: Set time in the scheduling sub-panel
+      this.log(`[FB-UPLOAD] Step 10: Setting time: ${scheduledTime}`);
       await this._setScheduleTime(scheduledTime);
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('time_set');
 
-      // Step 13: Click "Schedule" button
-      this.log('[FB-UPLOAD] Step 13: Clicking Schedule');
-      await this._clickWithFallback(SELECTORS.scheduleButton);
-      // Wait for FB to confirm the schedule (toast/redirect/UI update)
-      this.log('[FB-UPLOAD] Step 13b: Waiting for schedule confirmation...');
+      // ── Step 11: Click "Schedule for later" button (inside the sub-panel)
+      // This confirms the date/time and returns to Reel settings
+      // where the "Post" button is now replaced with "Schedule"
+      this.log('[FB-UPLOAD] Step 11: Clicking Schedule for later');
+      await this._retryStep('Step 11 (Schedule for later)', async () => {
+        await this._clickWithFallback(SELECTORS.scheduleForLaterButton);
+      });
+      await this.page.waitForTimeout(POST_NAV_SETTLE);
+      this.onStepComplete('schedule_for_later');
+
+      // ── Step 12: Click "Schedule" button (final confirmation)
+      // The Reel settings page now shows "Save" + "Schedule" buttons
+      this.log('[FB-UPLOAD] Step 12: Clicking Schedule (final)');
+      await this._clickFinalSchedule();
+      this.log('[FB-UPLOAD] Step 12b: Waiting for schedule confirmation...');
       await this._waitForScheduleConfirmation();
       this.onStepComplete('scheduled');
 
@@ -328,9 +390,166 @@ class FacebookUploader {
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
+   * Dismiss any Facebook popup/dialog/overlay that blocks the main UI.
+   * Facebook randomly shows these: keyboard shortcuts, cookie consent,
+   * "videos are now reels" banners, notification permission prompts, etc.
+   *
+   * Called automatically before every click action to keep the flow clear.
+   *
+   * IMPORTANT: Uses page.locator() / page.getByText() — NOT page.$() —
+   * because text-based matching requires Playwright's locator engine.
+   */
+  async _dismissPopups() {
+    // Each entry: a function that returns a locator + a label for logging
+    const popups = [
+      {
+        // "Keep single-character shortcuts turned on?" dialog
+        // Click "Turn off" to prevent FB shortcuts interfering with keyboard.type()
+        find: () => this.page.locator('[role="dialog"]').getByText('Turn off', { exact: true }),
+        label: 'keyboard shortcuts dialog',
+      },
+      {
+        // Cookie consent / privacy banner
+        find: () => this.page.locator('button[data-cookiebanner="accept_button"]'),
+        label: 'cookie consent',
+      },
+      {
+        // Cookie consent variant
+        find: () => this.page.locator('[data-testid="cookie-policy-manage-dialog-accept-button"]'),
+        label: 'cookie consent (testid)',
+      },
+      {
+        // "Videos are now reels" info banner — dismiss X
+        find: () => this.page.locator('[aria-label="Dismiss"]'),
+        label: 'dismiss banner',
+      },
+      {
+        // Notification permission prompt — "Not now"
+        find: () => this.page.locator('[role="dialog"]').getByText('Not now', { exact: true }),
+        label: 'notification prompt',
+      },
+      // NOTE: Do NOT add a generic "dialog close button" handler here!
+      // It will close the Create Reel / Edit Reel wizard dialogs.
+    ];
+
+    for (const popup of popups) {
+      try {
+        const locator = popup.find();
+        if (await locator.count() > 0) {
+          // Verify it's visible before clicking
+          const box = await locator.first().boundingBox();
+          if (box) {
+            await locator.first().click({ timeout: 3000 });
+            this.log(`[FB-UPLOAD] Dismissed popup: ${popup.label}`);
+            await this.page.waitForTimeout(1000);
+            // Recurse — sometimes dismissing one reveals another
+            return this._dismissPopups();
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Escape fallback for any unmatched dialog — but protect our reel wizard
+    try {
+      const dialogs = this.page.locator('[role="dialog"]');
+      if (await dialogs.count() > 0) {
+        const text = await dialogs.first().textContent().catch(() => '');
+        const isOurWizard = text && (
+          text.includes('Create reel') ||
+          text.includes('Edit reel') ||
+          text.includes('Reel settings') ||
+          text.includes('Scheduling options') ||
+          text.includes('Schedule for later') ||
+          text.includes('Add video') ||
+          text.includes('Describe your reel')
+        );
+        if (!isOurWizard) {
+          await this.page.keyboard.press('Escape');
+          this.log('[FB-UPLOAD] Dismissed popup: unknown dialog (Escape)');
+          await this.page.waitForTimeout(1000);
+        }
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Dynamic readiness wait — polls for key FB UI indicators before proceeding.
+   * Adapted from Kling automation's DYNAMIC READINESS WAIT pattern:
+   *   - Poll for multiple DOM indicators of a fully loaded page
+   *   - Threshold: ≥75% of checks must pass
+   *   - Buffer: add 10% of elapsed time as extra settle
+   *
+   * Call after navigation to ensure FB's SPA has fully hydrated.
+   */
+  async _waitForPageReady() {
+    const startTime = Date.now();
+    const threshold = Math.ceil(READINESS_CHECKS.length * 0.75);
+    let passedCount = 0;
+
+    for (let attempt = 0; attempt < 15; attempt++) {
+      passedCount = 0;
+      for (const check of READINESS_CHECKS) {
+        if (await check.fn(this.page)) passedCount++;
+      }
+
+      if (passedCount >= threshold) break;
+
+      if (Date.now() - startTime > READINESS_MAX_WAIT) {
+        this.log(`[FB-UPLOAD] Page readiness timeout: ${passedCount}/${READINESS_CHECKS.length} checks after ${READINESS_MAX_WAIT / 1000}s`);
+        break;
+      }
+
+      await this.page.waitForTimeout(READINESS_POLL_INTERVAL);
+    }
+
+    // Buffer: add 10% of elapsed time as extra settle (like Kling pattern)
+    const elapsed = Date.now() - startTime;
+    const buffer = Math.max(1000, Math.round(elapsed * 0.1));
+    this.log(`[FB-UPLOAD] Page ready: ${passedCount}/${READINESS_CHECKS.length} checks in ${(elapsed / 1000).toFixed(1)}s — ${buffer}ms buffer`);
+    await this.page.waitForTimeout(buffer);
+  }
+
+  /**
+   * PRE-UPLOAD RECOVERY — "Disk Recovery" pattern from Higgsfield.
+   *
+   * Before starting the upload flow for a short, check if a reel matching
+   * this short already exists in the Scheduled tab. This handles:
+   *   - Previous upload that succeeded but was marked as failed (automation
+   *     crashed after FB confirmed but before DB was updated)
+   *   - Manual uploads the user did outside the pipeline
+   *   - Re-runs after a crash where the reel was actually created
+   *
+   * Matches by description text (first 40 chars of the SEO description).
+   * Returns { alreadyScheduled: true/false, matchText?: string }
+   */
+  /**
+   * Retry a step function up to maxRetries times with exponential backoff.
+   * @param {string} stepName - For logging
+   * @param {function} fn - Async function to retry
+   * @param {number} maxRetries - Max attempts (default: 2 = 1 try + 1 retry)
+   * @param {number} baseDelay - Initial delay in ms before retry (default: 3000)
+   */
+  async _retryStep(stepName, fn, maxRetries = 2, baseDelay = 3000) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (attempt === maxRetries) throw err;
+        const delay = baseDelay * attempt; // Linear backoff: 3s, 6s, 9s...
+        this.log(`[FB-UPLOAD] ${stepName} failed (attempt ${attempt}/${maxRetries}): ${err.message} — retrying in ${delay / 1000}s`);
+        await this.page.waitForTimeout(delay);
+        await this._dismissPopups();
+      }
+    }
+  }
+
+  /**
    * Click using primary selector with fallback to alternatives.
    */
   async _clickWithFallback(selectorString) {
+    // Dismiss any blocking popups first
+    await this._dismissPopups();
+
     const selectors = selectorString.split(', ');
     for (const sel of selectors) {
       try {
@@ -358,6 +577,9 @@ class FacebookUploader {
    * Wait for an element and click it (longer timeout for upload processing).
    */
   async _waitAndClick(selectorString, timeout = CLICK_TIMEOUT) {
+    // Dismiss any blocking popups first
+    await this._dismissPopups();
+
     const selectors = selectorString.split(', ');
     for (const sel of selectors) {
       try {
@@ -465,63 +687,319 @@ class FacebookUploader {
   }
 
   /**
-   * Set the schedule date.
-   * Facebook's date picker varies — try multiple approaches.
+   * Set the schedule date in FB's scheduling sub-panel.
+   *
+   * FB's date field shows "May 2, 2026" format. It could be:
+   *   - A real <input> with various aria-labels
+   *   - A contenteditable span/div
+   *   - A label+combobox combo
+   *
+   * Strategy: find ALL inputs/editables in the scheduling panel area,
+   * identify the date one by its current value pattern (month name + day + year).
    */
   async _setScheduleDate(dateStr) {
     // dateStr format: YYYY-MM-DD
     const [year, month, day] = dateStr.split('-');
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthName = monthNames[parseInt(month) - 1];
+    const dayNum = parseInt(day);
 
-    // Approach 1: Direct input field
+    // FB format: "May 10, 2026" or "MM/DD/YYYY"
+    const fbDate = `${monthName} ${dayNum}, ${year}`;
+    const usDate = `${month}/${String(dayNum).padStart(2, '0')}/${year}`;
+
+    // Approach 1: Find input by aria-label containing date/Date/Schedule date
+    const dateSelectors = [
+      'input[aria-label*="date" i]',
+      'input[aria-label*="Date"]',
+      'input[aria-label*="schedule" i]',
+      'input[type="text"][aria-label]',
+      'input[placeholder*="date" i]',
+    ];
+    for (const sel of dateSelectors) {
+      try {
+        const el = await this.page.waitForSelector(sel, { timeout: 3000 });
+        if (el) {
+          const val = await el.inputValue().catch(() => '');
+          // Check if this looks like a date (contains a month name or slash-separated numbers)
+          if (val.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i) || val.match(/^\d{1,2}\/\d{1,2}\/\d{4}$/)) {
+            this.log(`[FB-UPLOAD] Found date input (value="${val}"), setting to ${fbDate}`);
+            await el.click({ clickCount: 3 });
+            await this.page.waitForTimeout(200);
+            await this.page.keyboard.press('Control+A');
+            await el.fill(fbDate);
+            await this.page.keyboard.press('Tab');
+            return;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Approach 2: Find ALL visible inputs and pick the one with a date-like value
     try {
-      const dateInput = await this.page.waitForSelector(SELECTORS.dateInput, { timeout: 5000 });
-      if (dateInput) {
-        await dateInput.click({ clickCount: 3 }); // select all
-        await dateInput.type(`${month}/${day}/${year}`); // MM/DD/YYYY format
+      const inputs = await this.page.$$('input[type="text"], input:not([type])');
+      for (const input of inputs) {
+        const val = await input.inputValue().catch(() => '');
+        if (val.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i) ||
+            val.match(/^\d{1,2}\/\d{1,2}\/\d{4}$/)) {
+          this.log(`[FB-UPLOAD] Found date input by value scan (value="${val}"), setting to ${fbDate}`);
+          await input.click({ clickCount: 3 });
+          await this.page.waitForTimeout(200);
+          await this.page.keyboard.press('Control+A');
+          await input.fill(fbDate);
+          await this.page.keyboard.press('Tab');
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // Approach 3: Find by label text "Date" near the scheduling panel
+    try {
+      const dateLabel = this.page.getByText('Date', { exact: true });
+      if (await dateLabel.count() > 0) {
+        // Click the label — FB often makes labels open an input
+        await dateLabel.first().click();
+        await this.page.waitForTimeout(500);
+        // Now try to find the focused/active input
+        await this.page.keyboard.press('Control+A');
+        await this.page.keyboard.type(fbDate, { delay: 10 });
         await this.page.keyboard.press('Tab');
         return;
       }
     } catch (_) {}
 
-    // Approach 2: Click through date picker UI
-    // This will need refinement during live testing
-    this.log('[FB-UPLOAD] Date input not found via direct selector — attempting picker UI');
-    // Find and click the date display/button
-    const dateDisplay = await this.page.locator(`text=/${month}|${day}|Date/i`).first();
-    if (dateDisplay) {
-      await dateDisplay.click();
-      await this.page.waitForTimeout(500);
-      // Type date into whatever field appears
-      await this.page.keyboard.type(`${month}/${day}/${year}`);
-      await this.page.keyboard.press('Enter');
-    }
+    this.log(`[FB-UPLOAD] WARNING: Could not find date input — proceeding with default date`);
   }
 
   /**
-   * Set the schedule time.
+   * Set the schedule time in FB's scheduling sub-panel.
+   *
+   * FB's time field shows "10:34 AM" format (12h). It could be:
+   *   - A real <input> with various aria-labels
+   *   - A combobox/select
+   *
+   * Strategy: find ALL inputs in the scheduling panel, identify the time one
+   * by its value pattern (HH:MM AM/PM).
    */
   async _setScheduleTime(timeStr) {
     // timeStr format: HH:MM (24h)
     const [hours, minutes] = timeStr.split(':');
+    const h = parseInt(hours);
+    const period = h >= 12 ? 'PM' : 'AM';
+    const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+    const fbTime = `${h12}:${minutes} ${period}`;
 
-    // Approach 1: Direct input field
+    // Approach 1: Find input by aria-label containing time/Time
+    const timeSelectors = [
+      'input[aria-label*="time" i]',
+      'input[aria-label*="Time"]',
+      'input[placeholder*="time" i]',
+    ];
+    for (const sel of timeSelectors) {
+      try {
+        const el = await this.page.waitForSelector(sel, { timeout: 3000 });
+        if (el) {
+          const val = await el.inputValue().catch(() => '');
+          if (val.match(/\b(AM|PM)\b/i) || val.match(/^\d{1,2}:\d{2}/)) {
+            this.log(`[FB-UPLOAD] Found time input (value="${val}"), setting to ${fbTime}`);
+            await el.click({ clickCount: 3 });
+            await this.page.waitForTimeout(200);
+            await this.page.keyboard.press('Control+A');
+            await el.fill(fbTime);
+            await this.page.keyboard.press('Tab');
+            return;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Approach 2: Find ALL visible inputs and pick the one with a time-like value
     try {
-      const timeInput = await this.page.waitForSelector(SELECTORS.timeInput, { timeout: 5000 });
-      if (timeInput) {
-        await timeInput.click({ clickCount: 3 });
-        // Facebook may use 12h format
-        const h = parseInt(hours);
-        const period = h >= 12 ? 'PM' : 'AM';
-        const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
-        await timeInput.type(`${String(h12).padStart(2, '0')}:${minutes} ${period}`);
+      const inputs = await this.page.$$('input[type="text"], input:not([type])');
+      for (const input of inputs) {
+        const val = await input.inputValue().catch(() => '');
+        if (val.match(/\b(AM|PM)\b/i) || val.match(/^\d{1,2}:\d{2}\s*(AM|PM)?$/i)) {
+          this.log(`[FB-UPLOAD] Found time input by value scan (value="${val}"), setting to ${fbTime}`);
+          await input.click({ clickCount: 3 });
+          await this.page.waitForTimeout(200);
+          await this.page.keyboard.press('Control+A');
+          await input.fill(fbTime);
+          await this.page.keyboard.press('Tab');
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // Approach 3: Find by label text "Time" near the scheduling panel
+    try {
+      const timeLabel = this.page.getByText('Time', { exact: true });
+      if (await timeLabel.count() > 0) {
+        await timeLabel.first().click();
+        await this.page.waitForTimeout(500);
+        await this.page.keyboard.press('Control+A');
+        await this.page.keyboard.type(fbTime, { delay: 10 });
         await this.page.keyboard.press('Tab');
         return;
       }
     } catch (_) {}
 
-    // Approach 2: Time picker dropdowns
-    this.log('[FB-UPLOAD] Time input not found via direct selector — attempting dropdown');
-    // Will need refinement during live testing
+    this.log(`[FB-UPLOAD] WARNING: Could not find time input — proceeding with default time`);
+  }
+
+  /**
+   * Click the "Scheduling options" row on the Reel Settings page.
+   * This row shows "Publish now" by default and opens a sub-panel
+   * with date/time inputs + "Schedule for later" button.
+   */
+
+  /**
+   * Click the "Next" button — used by steps 5 and 7.
+   * FB's Next button can be a <button>, <div role="button">, or <span> inside either.
+   * Uses multiple Playwright APIs for maximum reliability.
+   */
+  async _clickNext() {
+    await this._dismissPopups();
+
+    // Strategy 1: getByRole — most reliable for React-rendered buttons
+    try {
+      const btn = this.page.getByRole('button', { name: 'Next' });
+      if (await btn.count() > 0) {
+        await btn.first().click({ timeout: CLICK_TIMEOUT });
+        return;
+      }
+    } catch (_) {}
+
+    // Strategy 2: getByText exact match
+    try {
+      const btn = this.page.getByText('Next', { exact: true });
+      if (await btn.count() > 0) {
+        // Click the first visible one
+        const first = btn.first();
+        const box = await first.boundingBox();
+        if (box) {
+          await first.click({ timeout: CLICK_TIMEOUT });
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // Strategy 3: CSS selectors — button element, div role=button, span
+    const cssSelectors = [
+      'button:has-text("Next")',
+      'div[role="button"]:has-text("Next")',
+      'span:text-is("Next")',
+    ];
+    for (const sel of cssSelectors) {
+      try {
+        const el = await this.page.waitForSelector(sel, { timeout: 5000 });
+        if (el) {
+          await el.click();
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // Strategy 4: Evaluate — find by text content in JS
+    try {
+      const clicked = await this.page.evaluate(() => {
+        // Check <button> elements first
+        const buttons = document.querySelectorAll('button');
+        for (const b of buttons) {
+          if (b.textContent.trim() === 'Next' && b.offsetParent !== null) {
+            b.click();
+            return true;
+          }
+        }
+        // Check div[role="button"]
+        const divBtns = document.querySelectorAll('[role="button"]');
+        for (const b of divBtns) {
+          if (b.textContent.trim() === 'Next' && b.offsetParent !== null) {
+            b.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (clicked) return;
+    } catch (_) {}
+
+    throw new Error('Could not find or click "Next" button');
+  }
+
+  /**
+   * Click the "Scheduling options" row on the Reel Settings page.
+   * This row shows "Publish now" by default and opens a sub-panel
+   *
+   * The row structure (from screenshots):
+   *   [clock icon] Scheduling options
+   *                 Publish now          [chevron >]
+   */
+  async _clickSchedulingOptions() {
+    // Strategy 1: Find the row by text — it contains both "Scheduling options" and "Publish now"
+    try {
+      const row = await this.page.locator('div:has(> span:text("Scheduling options"))').first();
+      if (row) {
+        await row.click({ timeout: CLICK_TIMEOUT });
+        return;
+      }
+    } catch (_) {}
+
+    // Strategy 2: Use getByText on "Scheduling options" text
+    try {
+      await this.page.getByText('Scheduling options').click({ timeout: CLICK_TIMEOUT });
+      return;
+    } catch (_) {}
+
+    // Strategy 3: Find "Publish now" text and click its parent row
+    try {
+      const publishNow = await this.page.getByText('Publish now');
+      if (publishNow) {
+        // Click the parent container (the clickable row)
+        await publishNow.locator('..').click({ timeout: CLICK_TIMEOUT });
+        return;
+      }
+    } catch (_) {}
+
+    // Strategy 4: CSS fallback from SELECTORS
+    await this._clickWithFallback(SELECTORS.schedulingOptionsRow);
+  }
+
+  /**
+   * Click the final "Schedule" button on the Reel Settings page.
+   * After setting date/time and clicking "Schedule for later" in the sub-panel,
+   * the main Reel Settings page shows "Save" + "Schedule" buttons at the bottom.
+   *
+   * IMPORTANT: Must NOT click:
+   *   - "Schedule for later" (that's in the sub-panel, step 11)
+   *   - "Scheduling options" (that's the row, step 8)
+   *   - "Post" (that's the default before scheduling)
+   *
+   * The "Schedule" button is a standalone button with exact text "Schedule".
+   */
+  async _clickFinalSchedule() {
+    // Strategy 1: getByRole button with exact name "Schedule"
+    try {
+      await this.page.getByRole('button', { name: 'Schedule', exact: true }).click({ timeout: CLICK_TIMEOUT });
+      return;
+    } catch (_) {}
+
+    // Strategy 2: Use text-is selector (exact match, no substring)
+    try {
+      const btn = await this.page.waitForSelector('div[role="button"] span:text-is("Schedule")', { timeout: CLICK_TIMEOUT });
+      if (btn) {
+        // Click the parent role=button, not the span
+        await btn.evaluate(el => {
+          const button = el.closest('[role="button"]');
+          if (button) button.click();
+          else el.click();
+        });
+        return;
+      }
+    } catch (_) {}
+
+    // Strategy 3: CSS fallback — exclude "for later" and "Scheduling" variants
+    await this._clickWithFallback(SELECTORS.scheduleButton);
   }
 
   /**
@@ -573,7 +1051,5 @@ class FacebookUploader {
     this.log('[FB-UPLOAD] Schedule confirmation timeout — assuming success');
   }
 }
-
-const fs = require('fs');
 
 module.exports = { FacebookUploader, SELECTORS };

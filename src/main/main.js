@@ -266,6 +266,9 @@ ipcMain.handle('generate-seo-metadata', () => pipeline ? pipeline.generateSEOMet
 ipcMain.handle('update-platform-metadata', (_, platform, fields) => pipeline ? pipeline.updatePlatformMetadata(platform, fields) : null);
 ipcMain.handle('approve-publish', () => pipeline ? pipeline.approvePublish() : null);
 
+// Credit usage
+ipcMain.handle('get-project-credit-usage', (_, projectId) => db.getProjectCreditUsage(projectId));
+
 // Shorts tab
 const { ShortsController } = require('./shorts');
 let shortsController = null;

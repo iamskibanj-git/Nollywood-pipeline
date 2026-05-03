@@ -75,6 +75,9 @@ contextBridge.exposeInMainWorld('api', {
   updatePlatformMetadata: (platform, fields) => ipcRenderer.invoke('update-platform-metadata', platform, fields),
   approvePublish: () => ipcRenderer.invoke('approve-publish'),
 
+  // Credit usage
+  getProjectCreditUsage: (projectId) => ipcRenderer.invoke('get-project-credit-usage', projectId),
+
   // Shorts tab
   getShortsProjects: () => ipcRenderer.invoke('shorts:getProjects'),
   getShortsStatus: (projectId) => ipcRenderer.invoke('shorts:getStatus', projectId),

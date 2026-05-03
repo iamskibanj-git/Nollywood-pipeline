@@ -21,6 +21,8 @@ class ThumbnailGenerator {
     this.automation = automation;
     this.geminiApiKey = options.geminiApiKey || '';
     this.presets = this._loadPresets(options.presetsPath);
+    // Optional callback: (creditCost, stage) => {} — called after each Generate click
+    this.onCreditUsed = options.onCreditUsed || null;
   }
 
   /**
@@ -70,7 +72,7 @@ class ThumbnailGenerator {
     // Stage 3: Composite
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
     await this.compositeThumbnail({
-      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath,
+      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
     });
 
     return { thumbnailPath, keyArtPath, titleCardPath };
@@ -101,23 +103,23 @@ Requirements:
     try {
       // Wait for login if session expired before attempting generation
       await this._ensureLoggedIn();
-      await this.automation.generateImage({
+      await this._genImage({
         prompt,
         outputPath,
         aspectRatio,
         useUnlimited: true,
-      });
+      }, 'key-art');
     } catch (genErr) {
       if (genErr.message.includes('SESSION_EXPIRED')) {
         console.log('[THUMBNAIL] Session expired — waiting for login...');
         await this._waitForLogin();
         // Retry once after login
-        await this.automation.generateImage({
+        await this._genImage({
           prompt,
           outputPath,
           aspectRatio,
           useUnlimited: true,
-        });
+        }, 'key-art');
       } else {
         console.warn(`[THUMBNAIL] Stage 1 generation failed: ${genErr.message} — attempting Asset library recovery`);
         const recovered = await this._tryAssetRecovery(prompt, outputPath, 'key art');
@@ -155,12 +157,12 @@ Requirements:
       console.log(`[THUMBNAIL] Stage 2: Generating title card (attempt ${attempt}/${maxAttempts}, ${aspectRatio})...`);
       try {
         await this._ensureLoggedIn();
-        await this.automation.generateImage({
+        await this._genImage({
           prompt,
           outputPath,
           aspectRatio,
           useUnlimited: true,
-        });
+        }, 'title-card');
       } catch (genErr) {
         if (genErr.message.includes('SESSION_EXPIRED')) {
           console.log('[THUMBNAIL] Session expired — waiting for login...');
@@ -206,12 +208,17 @@ Requirements:
   /**
    * Stage 3: Composite title card over key art using both as references.
    */
-  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath }) {
-    const placementInstruction = placement === 'upper-third'
-      ? 'Position the title text in the UPPER THIRD of the frame'
-      : placement === 'lower-third'
-        ? 'Position the title text in the LOWER THIRD of the frame'
-        : 'Position the title text in the area with the most negative space';
+  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9' }) {
+    const placementInstructions = {
+      'upper-third':    'Position the title text in the UPPER THIRD of the frame, spanning the full width',
+      'lower-third':    'Position the title text in the LOWER THIRD of the frame, spanning the full width',
+      'left-side':      'Position the title text on the LEFT SIDE of the frame (left 35-40%), vertically centered. Keep the right side clear so the character face/body is fully visible',
+      'right-side':     'Position the title text on the RIGHT SIDE of the frame (right 35-40%), vertically centered. Keep the left side clear so the character face/body is fully visible',
+      'bottom-bar':     'Position the title text in a narrow CINEMATIC BAR at the very BOTTOM of the frame (bottom 15-20%), like a movie poster tagline strip. Keep it well below any faces',
+      'split-diagonal': 'Position the title text on a DIAGONAL across the BOTTOM-LEFT CORNER of the frame, angled slightly upward. The text should occupy the corner area, leaving the center and upper portion clear for the character',
+      'auto':           'Position the title text in the area with the most negative space, AWAY from any faces or key character features',
+    };
+    const placementInstruction = placementInstructions[placement] || placementInstructions['auto'];
 
     const prompt = `Composite thumbnail: overlay the title card (second reference image) onto the key art (first reference image).
 
@@ -219,6 +226,7 @@ Requirements:
 - Use the EXACT key art as the background — do not modify the characters, lighting, or composition
 - Overlay the EXACT title text from the title card — same font, same color, same style
 - ${placementInstruction}
+- Do NOT cover or obscure character faces with text — faces must remain fully visible
 - Blend naturally: slight darkened gradient behind text area for readability
 - Final result should look like a professional YouTube thumbnail
 - NO additional text, NO watermarks, NO borders`;
@@ -226,24 +234,24 @@ Requirements:
     console.log(`[THUMBNAIL] Stage 3: Compositing (placement: ${placement})...`);
     try {
       await this._ensureLoggedIn();
-      await this.automation.generateImage({
+      await this._genImage({
         prompt,
         outputPath,
         references: [keyArtPath, titleCardPath],
-        aspectRatio: '16:9',
+        aspectRatio,
         useUnlimited: true,
-      });
+      }, 'composite');
     } catch (genErr) {
       if (genErr.message.includes('SESSION_EXPIRED')) {
         console.log('[THUMBNAIL] Session expired — waiting for login...');
         await this._waitForLogin();
-        await this.automation.generateImage({
+        await this._genImage({
           prompt,
           outputPath,
           references: [keyArtPath, titleCardPath],
-          aspectRatio: '16:9',
+          aspectRatio,
           useUnlimited: true,
-        });
+        }, 'composite');
       } else {
         console.warn(`[THUMBNAIL] Stage 3 generation failed: ${genErr.message} — attempting Asset library recovery`);
         const recovered = await this._tryAssetRecovery(prompt, outputPath, 'composite');
@@ -499,7 +507,7 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
     // Stage 3: Composite (same as scene-based flow)
     const thumbnailPath = path.join(outputDir, 'thumbnail-custom.png');
     await this.compositeThumbnail({
-      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath,
+      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
     });
 
     return { thumbnailPath, keyArtPath, titleCardPath };
@@ -533,22 +541,22 @@ Requirements:
     console.log(`[THUMBNAIL] Custom Stage 1: Generating close-up of @${characterElementName} (${expression}, ${aspectRatio})...`);
     try {
       await this._ensureLoggedIn();
-      await this.automation.generateImage({
+      await this._genImage({
         prompt,
         outputPath,
         aspectRatio,
         useUnlimited: true,
-      });
+      }, 'custom-closeup');
     } catch (genErr) {
       if (genErr.message.includes('SESSION_EXPIRED')) {
         console.log('[THUMBNAIL] Session expired — waiting for login...');
         await this._waitForLogin();
-        await this.automation.generateImage({
+        await this._genImage({
           prompt,
           outputPath,
           aspectRatio,
           useUnlimited: true,
-        });
+        }, 'custom-closeup');
       } else {
         console.warn(`[THUMBNAIL] Custom Stage 1 failed: ${genErr.message} — attempting Asset library recovery`);
         const recovered = await this._tryAssetRecovery(prompt, outputPath, 'custom key art');
@@ -757,6 +765,20 @@ Requirements:
     }
 
     throw new Error('Login wait timed out after 10 minutes — please restart the pipeline');
+  }
+
+  /**
+   * Wrapper around automation.generateImage that automatically wires
+   * onGenClicked for credit tracking via the onCreditUsed callback.
+   * @param {string} stage - human label for the stage (e.g. 'key-art', 'title-card', 'composite')
+   */
+  _genImage(opts, stage) {
+    if (this.onCreditUsed) {
+      opts.onGenClicked = (creditCost) => {
+        try { this.onCreditUsed(creditCost, stage); } catch (_) {}
+      };
+    }
+    return this.automation.generateImage(opts);
   }
 }
 

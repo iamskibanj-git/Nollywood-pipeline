@@ -60,9 +60,16 @@ async function init(filepath) {
   db.run('PRAGMA journal_mode = WAL');
   db.run('PRAGMA foreign_keys = ON');
 
+  // Backup before any migrations or recovery changes
+  backup('startup');
+
   runMigrations();
   recoverOnStartup(); // Reset stuck assets, clean temp files
   save(); // Persist any migration/recovery changes
+
+  // Start periodic auto-backups
+  startAutoBackup();
+
   return db;
 }
 
@@ -81,6 +88,167 @@ function save() {
   const tmpPath = dbPath + '.tmp';
   fs.writeFileSync(tmpPath, buffer);
   fs.renameSync(tmpPath, dbPath);
+}
+
+// ── Backup System ──
+
+const BACKUP_MAX_AUTO = 5;       // Rolling window for automatic backups
+const BACKUP_MAX_MANUAL = 10;    // Keep more manual/pre-operation backups
+const BACKUP_INTERVAL = 30 * 60 * 1000; // 30 minutes
+let backupTimer = null;
+
+/**
+ * Create a backup of the current database file.
+ *
+ * @param {string} tag - Label for the backup (e.g. 'startup', 'pre-upload', 'auto')
+ * @returns {string|null} Path to the backup file, or null if backup failed
+ */
+function backup(tag = 'manual') {
+  if (!dbPath) return null;
+
+  // Ensure current in-memory state is on disk first
+  save();
+
+  if (!fs.existsSync(dbPath)) return null;
+
+  const dir = path.join(path.dirname(dbPath), 'backups');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+  const filename = `nollywood-pipeline_${timestamp}_${tag}.sqlite`;
+  const backupPath = path.join(dir, filename);
+
+  try {
+    fs.copyFileSync(dbPath, backupPath);
+    console.log(`[DB] Backup created: ${filename}`);
+
+    // Prune old backups of the same tag category
+    _pruneBackups(dir, tag);
+
+    return backupPath;
+  } catch (err) {
+    console.error(`[DB] Backup failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Start automatic periodic backups (every BACKUP_INTERVAL ms).
+ * Call once after init. Safe to call multiple times — only one timer runs.
+ */
+function startAutoBackup() {
+  if (backupTimer) return;
+  backupTimer = setInterval(() => {
+    backup('auto');
+  }, BACKUP_INTERVAL);
+  // Don't let the timer prevent process exit
+  if (backupTimer.unref) backupTimer.unref();
+  console.log(`[DB] Auto-backup enabled (every ${BACKUP_INTERVAL / 60000} min)`);
+}
+
+/**
+ * Stop automatic periodic backups.
+ */
+function stopAutoBackup() {
+  if (backupTimer) {
+    clearInterval(backupTimer);
+    backupTimer = null;
+  }
+}
+
+/**
+ * List existing backups sorted by date (newest first).
+ * @returns {Array<{filename, tag, date, size}>}
+ */
+function listBackups() {
+  if (!dbPath) return [];
+  const dir = path.join(path.dirname(dbPath), 'backups');
+  if (!fs.existsSync(dir)) return [];
+
+  return fs.readdirSync(dir)
+    .filter(f => f.startsWith('nollywood-pipeline_') && f.endsWith('.sqlite'))
+    .map(f => {
+      const stat = fs.statSync(path.join(dir, f));
+      // Parse tag from filename: nollywood-pipeline_2026-05-02_18-30-00_startup.sqlite
+      const parts = f.replace('.sqlite', '').split('_');
+      const tag = parts[parts.length - 1] || 'unknown';
+      return { filename: f, tag, date: stat.mtime, size: stat.size };
+    })
+    .sort((a, b) => b.date - a.date);
+}
+
+/**
+ * Restore from a backup file. Creates a safety backup of current state first.
+ * @param {string} backupFilename - Filename (not full path) of the backup to restore
+ * @returns {boolean} true if restore succeeded
+ */
+function restoreBackup(backupFilename) {
+  if (!dbPath) return false;
+  const dir = path.join(path.dirname(dbPath), 'backups');
+  const backupPath = path.join(dir, backupFilename);
+
+  if (!fs.existsSync(backupPath)) {
+    console.error(`[DB] Backup not found: ${backupFilename}`);
+    return false;
+  }
+
+  // Safety backup of current state before restoring
+  backup('pre-restore');
+
+  try {
+    // Close current DB
+    if (db) {
+      db.close();
+      db = null;
+    }
+
+    // Copy backup over the main DB file
+    fs.copyFileSync(backupPath, dbPath);
+    console.log(`[DB] Restored from backup: ${backupFilename}`);
+
+    // Note: caller must re-init the DB after restore
+    return true;
+  } catch (err) {
+    console.error(`[DB] Restore failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Prune old backups, keeping the most recent N per tag category.
+ * 'auto' backups keep BACKUP_MAX_AUTO, others keep BACKUP_MAX_MANUAL.
+ */
+function _pruneBackups(dir, currentTag) {
+  const maxKeep = currentTag === 'auto' ? BACKUP_MAX_AUTO : BACKUP_MAX_MANUAL;
+
+  const allFiles = fs.readdirSync(dir)
+    .filter(f => f.startsWith('nollywood-pipeline_') && f.endsWith('.sqlite'))
+    .sort()
+    .reverse(); // Newest first (ISO timestamps sort lexicographically)
+
+  // Group by tag
+  const byTag = {};
+  for (const f of allFiles) {
+    const parts = f.replace('.sqlite', '').split('_');
+    const tag = parts[parts.length - 1] || 'unknown';
+    if (!byTag[tag]) byTag[tag] = [];
+    byTag[tag].push(f);
+  }
+
+  // Prune each tag category
+  for (const [tag, files] of Object.entries(byTag)) {
+    const limit = tag === 'auto' ? BACKUP_MAX_AUTO : BACKUP_MAX_MANUAL;
+    if (files.length > limit) {
+      const toDelete = files.slice(limit);
+      for (const f of toDelete) {
+        try {
+          fs.unlinkSync(path.join(dir, f));
+          console.log(`[DB] Pruned old backup: ${f}`);
+        } catch (_) {}
+      }
+    }
+  }
 }
 
 /**
@@ -170,6 +338,8 @@ function getDb() {
  */
 function close() {
   if (db) {
+    stopAutoBackup();
+    backup('shutdown');
     save();
     db.close();
     db = null;
@@ -1668,6 +1838,12 @@ module.exports = {
   isTitleProduced,
   // Deduplication
   findExistingGeneration,
+  // Backup & restore
+  backup,
+  startAutoBackup,
+  stopAutoBackup,
+  listBackups,
+  restoreBackup,
   // Crash recovery & filesystem reconciliation
   resetStuckAssets,
   recoverOnStartup,

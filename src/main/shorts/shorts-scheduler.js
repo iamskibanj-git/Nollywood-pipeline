@@ -467,7 +467,7 @@ Reply with ONLY valid JSON:
    */
   markFailed(shortId, errorMessage) {
     db.runSql(`
-      UPDATE shorts SET status = 'failed',
+      UPDATE shorts SET status = 'upload_failed',
                         error_message = ?,
                         updated_at = datetime('now')
       WHERE id = ?
@@ -495,13 +495,15 @@ Reply with ONLY valid JSON:
   }
 
   /**
-   * Get the next short that needs uploading (status = 'seo_done').
+   * Get the next short that needs uploading.
+   * Picks up both fresh (seo_done) and retryable (upload_failed) shorts.
+   * Order: short_number ASC — short_001 always goes first.
    */
   getNextPendingUpload(projectId) {
     return db.queryOne(`
       SELECT * FROM shorts
-      WHERE project_id = ? AND status = 'seo_done'
-      ORDER BY scheduled_date, scheduled_time
+      WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')
+      ORDER BY short_number ASC
       LIMIT 1
     `, [projectId]);
   }

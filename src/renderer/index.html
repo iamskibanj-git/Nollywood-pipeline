@@ -709,7 +709,11 @@
                   <select id="publish-placement" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;">
                     <option value="lower-third">Lower Third</option>
                     <option value="upper-third">Upper Third</option>
-                    <option value="auto">Auto (Gemini picks)</option>
+                    <option value="left-side">Left Side</option>
+                    <option value="right-side">Right Side</option>
+                    <option value="bottom-bar">Bottom Bar</option>
+                    <option value="split-diagonal">Diagonal Corner</option>
+                    <option value="auto">Auto (negative space)</option>
                   </select>
                   <select id="publish-genre" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;">
                     <option value="drama">Drama</option>
@@ -717,6 +721,11 @@
                     <option value="romance">Romance</option>
                     <option value="comedy">Comedy</option>
                     <option value="action">Action</option>
+                  </select>
+                  <select id="publish-aspect-ratio" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:12px;" title="Thumbnail aspect ratio (overrides project default)">
+                    <option value="">Project Default</option>
+                    <option value="16:9">16:9 Landscape</option>
+                    <option value="9:16">9:16 Portrait</option>
                   </select>
                   <button class="btn btn-primary" onclick="generatePublishThumbnail()" style="font-size:12px;">Generate Thumbnail</button>
                 </div>
@@ -848,6 +857,7 @@
             <span id="complete-badge-duration">10 min</span>
           </div>
           <p id="output-path" style="font-size:12px;color:var(--accent);word-break:break-all;margin-bottom:8px;"></p>
+          <div id="complete-credit-stats" style="margin-bottom:16px;"></div>
           <div id="complete-cache-status" style="margin-bottom:16px;"></div>
           <div class="btn-group" style="justify-content:center;flex-wrap:wrap;">
             <button class="btn btn-primary" onclick="openOutputFolder()">Open Output Folder</button>
@@ -2507,6 +2517,20 @@
       }
     }
 
+    // ── Aspect Ratio Override — update preview box aspect ratio ──
+    document.getElementById('publish-aspect-ratio').addEventListener('change', function() {
+      const preview = document.getElementById('publish-thumbnail-preview');
+      const ratio = this.value || null;
+      // Update preview box aspect ratio (fallback to 16/9 for project default)
+      if (ratio === '9:16') {
+        preview.style.aspectRatio = '9/16';
+        preview.style.maxWidth = '220px';
+      } else {
+        preview.style.aspectRatio = '16/9';
+        preview.style.maxWidth = '';
+      }
+    });
+
     // ── Thumbnail Mode Toggle ──
     let currentThumbMode = 'scene'; // 'scene' or 'custom'
     let publishCharactersLoaded = false;
@@ -2573,9 +2597,10 @@
     async function generatePublishThumbnail() {
       const placement = document.getElementById('publish-placement').value;
       const genre = document.getElementById('publish-genre').value;
+      const aspectRatioOverride = document.getElementById('publish-aspect-ratio').value || null;
       const btn = document.querySelector('[onclick="generatePublishThumbnail()"]');
       if (btn) { btn.disabled = true; btn.textContent = 'Launching browser...'; }
-      addLog(`Generating ${currentThumbMode} thumbnail...`, 'info');
+      addLog(`Generating ${currentThumbMode} thumbnail${aspectRatioOverride ? ` (${aspectRatioOverride})` : ''}...`, 'info');
       try {
         let result;
         if (currentThumbMode === 'custom') {
@@ -2586,9 +2611,9 @@
             if (btn) { btn.disabled = false; btn.textContent = 'Generate Thumbnail'; }
             return;
           }
-          result = await window.api.generateCustomThumbnail({ placement, genre, characterElementName, expression });
+          result = await window.api.generateCustomThumbnail({ placement, genre, characterElementName, expression, aspectRatioOverride });
         } else {
-          result = await window.api.generateThumbnail({ placement, genre });
+          result = await window.api.generateThumbnail({ placement, genre, aspectRatioOverride });
         }
         if (result && result.error === 'login-required') {
           addLog(result.message, 'warn');
@@ -2887,12 +2912,21 @@
         if (data.summary && data.summary.total > 0) {
           const s = data.summary;
           const planned = s.planned || 0;
-          statusEl.textContent = `${s.total} shorts — ${planned} planned, ${s.scheduled} scheduled, ${s.seo_done} ready, ${s.failed} failed`;
+          const uploadFailed = s.upload_failed || 0;
+          const assembled = (s.assembled || 0) + (s.seo_done || 0) + (s.scheduled || 0) + uploadFailed;
+          statusEl.textContent = `${s.total} shorts — ${planned} planned, ${s.scheduled} scheduled, ${s.seo_done} ready` + (uploadFailed > 0 ? `, ${uploadFailed} upload failed` : '');
+          // Disable Plan Calendar once any shorts have been assembled/uploaded
+          // Re-planning would orphan assembled files from their schedule slots
+          const planBtn = document.getElementById('btn-plan-shorts');
+          planBtn.disabled = assembled > 0;
+          planBtn.title = assembled > 0 ? 'Calendar is locked — shorts have been assembled' : '';
+          document.getElementById('shorts-mode').disabled = assembled > 0;
+          document.getElementById('shorts-calendar-days').disabled = assembled > 0;
           // Enable assemble if there are planned shorts
           document.getElementById('btn-assemble-shorts').disabled = planned === 0;
-          // Enable upload only when all shorts are assembled (none left planned) and some ready
-          const allAssembled = planned === 0 && s.seo_done > 0;
-          document.getElementById('btn-upload-all').disabled = !allAssembled;
+          // Enable upload when there are uploadable shorts (seo_done or upload_failed needing retry)
+          const uploadable = (s.seo_done || 0) + uploadFailed;
+          document.getElementById('btn-upload-all').disabled = uploadable === 0;
           // Render stats from DB (survives restart)
           if (data.stats) renderShortsStats(data.stats);
         } else {
@@ -2914,7 +2948,7 @@
       }
       tbody.innerHTML = '';
       shorts.forEach(s => {
-        const statusColors = { planned: '#888', pending: 'var(--muted)', assembled: 'var(--yellow)', seo_done: 'var(--accent)', scheduled: 'var(--green)', failed: 'var(--red)' };
+        const statusColors = { planned: '#888', pending: 'var(--muted)', assembled: 'var(--yellow)', seo_done: 'var(--accent)', scheduled: 'var(--green)', upload_failed: 'var(--red)', failed: 'var(--red)' };
         const tr = document.createElement('tr');
         tr.style.borderBottom = '1px solid var(--border)';
         tr.innerHTML = `
@@ -3043,7 +3077,7 @@
         if (result.failed === 0) {
           statusEl.innerHTML = `<span style="color:var(--green);">All ${result.uploaded} shorts scheduled on Facebook! Project marked as repurposed.</span>`;
         } else {
-          statusEl.innerHTML = `<span style="color:var(--yellow);">${result.uploaded} uploaded, ${result.failed} failed. Re-run to retry failed shorts.</span>`;
+          statusEl.innerHTML = `<span style="color:var(--yellow);">${result.uploaded} uploaded, ${result.failed} failed. Click "Upload All" again to retry failed shorts.</span>`;
         }
         await refreshShortsCalendar();
       } catch (e) {
@@ -3142,6 +3176,54 @@
         container.scrollTop = 0;
       } catch (e) {
         container.innerHTML = `<div style="color:#f87171;padding:8px;">Error loading logs: ${e.message}</div>`;
+      }
+    }
+
+    // ── Credit Stats ──
+    async function loadCreditStats(projectId) {
+      const container = document.getElementById('complete-credit-stats');
+      if (!container) return;
+      try {
+        const usage = await window.api.getProjectCreditUsage(projectId);
+        if (!usage || usage.total === 0) {
+          container.innerHTML = '';
+          return;
+        }
+        // Friendly labels for asset types
+        const labels = {
+          portrait: 'Portraits',
+          character_grid: 'Character Grids',
+          scene_image: 'Scene Images',
+          scene_image_cinematic: 'Cinematic Scenes',
+          location_image: 'Location Images',
+          video_clip: 'Video Clips',
+          video_clip_cinematic: 'Cinematic Video',
+          thumbnail: 'Thumbnails',
+        };
+        let rows = '';
+        const types = Object.keys(usage.byType).sort((a, b) => usage.byType[b].credits - usage.byType[a].credits);
+        for (const type of types) {
+          const { credits, count } = usage.byType[type];
+          const label = labels[type] || type.replace(/_/g, ' ');
+          const costStr = credits === 0 ? 'free' : `${credits.toFixed(1)} cr`;
+          rows += `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border);">
+            <span>${label} <span style="color:var(--muted);">(${count})</span></span>
+            <span style="color:${credits === 0 ? 'var(--green)' : 'var(--yellow)'};">${costStr}</span>
+          </div>`;
+        }
+        const totalStr = usage.total === 0 ? 'Free (Unlimited)' : `${usage.total.toFixed(1)} credits`;
+        container.innerHTML = `
+          <div style="display:inline-block;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:260px;max-width:360px;">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px;text-align:center;">Credit Usage</div>
+            ${rows}
+            <div style="display:flex;justify-content:space-between;padding:6px 0 0;font-weight:600;font-size:13px;">
+              <span>Total</span>
+              <span style="color:${usage.total === 0 ? 'var(--green)' : 'var(--accent)'};">${totalStr}</span>
+            </div>
+          </div>`;
+      } catch (e) {
+        console.warn('[CREDIT] Failed to load credit stats:', e.message);
+        container.innerHTML = '';
       }
     }
 
@@ -3625,6 +3707,11 @@
               cmBadge.style.display = 'inline-block';
             }
           } catch (_) {}
+
+          // Show credit usage stats
+          if (event.project?.id) {
+            loadCreditStats(event.project.id);
+          }
 
           // Show pool status + Next Story button
           const cs = event.cacheStatus;

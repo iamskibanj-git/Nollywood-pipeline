@@ -4084,6 +4084,29 @@ class HiggsFieldAutomation {
     const generateClickTime = Date.now();
 
     // ══════════════════════════════════════════════════════════
+    // PRE-GENERATION SNAPSHOT — taken BEFORE Layer 1 runs
+    // ══════════════════════════════════════════════════════════
+    // If Layer 1 (API) fails after 45s, the image may already be in the
+    // History tab. Layer 2 needs a BASELINE from before generation started
+    // so it can detect images that appeared during Layer 1's polling.
+    // Previously Layer 2 took its snapshot after Layer 1 failed, making the
+    // completed image part of the "initial" set — invisible to diffing.
+    let preGenUrls = new Set();
+    let preGenCount = 0;
+    try {
+      const historyTab = await page.$('button:has-text("History")');
+      if (historyTab) {
+        await historyTab.click().catch(() => {});
+        await page.waitForTimeout(1500);
+      }
+      preGenUrls = await this._getHistoryCdnUrls(type);
+      preGenCount = await this.countHistoryItems(type);
+      console.log(`[WAIT] Pre-gen snapshot: ${preGenCount} items, ${preGenUrls.size} CDN URLs`);
+    } catch (_) {
+      console.warn('[WAIT] Pre-gen snapshot failed — Layer 2 will take its own');
+    }
+
+    // ══════════════════════════════════════════════════════════
     // LAYER 1: API-based job tracking (primary)
     // ══════════════════════════════════════════════════════════
     if (jobIdPromise) {
@@ -4121,31 +4144,54 @@ class HiggsFieldAutomation {
 
     // ══════════════════════════════════════════════════════════
     // LAYER 2: Timestamp-gated CDN URL diffing (fallback)
+    // Uses pre-gen baseline so images completed during Layer 1
+    // are detected as "new."
     // ══════════════════════════════════════════════════════════
     console.log('[WAIT] Layer 2 (fallback): Timestamp-gated CDN URL diffing');
 
     const startTime = Date.now();
     const pollInterval = 5000;
+    const HISTORY_REFRESH_INTERVAL = 30000; // Re-click History tab every 30s to force DOM update
+    const L2_STALL_LIMIT = 60000;           // If no changes for 60s, bail to Layer 3
     let wasGenerating = false;
     let promptCheckAttempts = 0;
     const maxPromptChecks = 5;
+    let lastHistoryRefresh = 0;
+    let lastChangeTime = Date.now(); // Track when we last saw any change
 
-    // Click History tab to watch for new results
-    const historyTab = await page.$('button:has-text("History")');
-    if (historyTab) {
-      await historyTab.click().catch(() => {});
-      await page.waitForTimeout(1500);
-    }
+    // Re-click History tab (may have been defocused during Layer 1 polling)
+    try {
+      const historyTab = await page.$('button:has-text("History")');
+      if (historyTab) {
+        await historyTab.click().catch(() => {});
+        await page.waitForTimeout(1500);
+      }
+      lastHistoryRefresh = Date.now();
+    } catch (_) {}
 
-    // Snapshot existing CDN URLs
-    const initialUrls = await this._getHistoryCdnUrls(type);
-    let initialCount = await this.countHistoryItems(type);
-    console.log(`[WAIT] L2 Initial: ${initialCount} items, ${initialUrls.size} CDN URLs`);
+    // Use pre-gen baseline if available, otherwise take a fresh snapshot
+    const initialUrls = preGenUrls.size > 0 ? preGenUrls : await this._getHistoryCdnUrls(type);
+    let initialCount = preGenCount > 0 ? preGenCount : await this.countHistoryItems(type);
+    console.log(`[WAIT] L2 Initial (pre-gen baseline): ${initialCount} items, ${initialUrls.size} CDN URLs`);
 
     while (Date.now() - startTime < timeout) {
       if (this.cancelled) throw new Error('Cancelled');
 
       await page.waitForTimeout(pollInterval);
+
+      // ── Periodically re-click History tab to force DOM refresh ──
+      // Higgsfield's SPA doesn't always auto-update the History grid.
+      if (Date.now() - lastHistoryRefresh > HISTORY_REFRESH_INTERVAL) {
+        try {
+          const histTab = await page.$('button:has-text("History")');
+          if (histTab) {
+            await histTab.click().catch(() => {});
+            await page.waitForTimeout(1500);
+            lastHistoryRefresh = Date.now();
+            console.log('[WAIT] L2: Refreshed History tab');
+          }
+        } catch (_) {}
+      }
 
       // Check for error messages
       const errorEl = await page.$('.error-message, [data-testid="generation-error"]');
@@ -4161,7 +4207,10 @@ class HiggsFieldAutomation {
         return 'unknown';
       }).catch(() => 'unknown');
 
-      if (statusText === 'generating') wasGenerating = true;
+      if (statusText === 'generating') {
+        wasGenerating = true;
+        lastChangeTime = Date.now(); // Generation is actively running
+      }
       const elapsed = Math.round((Date.now() - startTime) / 1000);
 
       // === Detect new CDN URLs ===
@@ -4169,6 +4218,7 @@ class HiggsFieldAutomation {
       const newUrls = [...currentUrls].filter(url => !initialUrls.has(url));
 
       if (newUrls.length > 0) {
+        lastChangeTime = Date.now();
         // TIMESTAMP GATE: check if this URL was created after our Generate click
         const cdnDate = this._parseCdnTimestamp(newUrls[0]);
         const clickDate = new Date(generateClickTime);
@@ -4191,6 +4241,7 @@ class HiggsFieldAutomation {
       // === Count-based detection ===
       const currentCount = await this.countHistoryItems(type);
       if (currentCount > initialCount) {
+        lastChangeTime = Date.now();
         console.log(`[WAIT] L2: Count increased (${initialCount} -> ${currentCount}) — waiting for URL (${elapsed}s)`);
         await page.waitForTimeout(1500);
         const finalUrls = await this._getHistoryCdnUrls(type);
@@ -4222,7 +4273,36 @@ class HiggsFieldAutomation {
         }
       }
 
+      // === Layer 2 stall detection → bail to Layer 3 (Asset Recovery) ===
+      // If Layer 2 sees zero changes for L2_STALL_LIMIT, the image is likely
+      // finished but the History grid isn't updating. Go directly to Asset
+      // library recovery instead of waiting for the full timeout.
+      if (Date.now() - lastChangeTime > L2_STALL_LIMIT && elapsed > 30) {
+        console.warn(`[WAIT] L2 STALLED: No changes for ${Math.round((Date.now() - lastChangeTime) / 1000)}s — bailing to Layer 3 (Asset Recovery)`);
+        break; // Fall through to Layer 3 below
+      }
+
       console.log(`[WAIT] L2: ${statusText} | items: ${currentCount}/${initialCount} | urls: ${currentUrls.size}/${initialUrls.size} | ${elapsed}s`);
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // LAYER 3: Asset Library CDN URL Recovery
+    // Layer 2 stalled or timed out — the image is likely sitting
+    // in the Asset library. Navigate there, find it by prompt
+    // match, and extract its CDN URL. No download here — the
+    // caller (generateImage → downloadLatestResult) handles that.
+    // ══════════════════════════════════════════════════════════
+    if (submittedPrompt) {
+      console.log('[WAIT] Layer 3: Scanning Asset library for completed image...');
+      try {
+        const cdnUrl = await this._recoverCdnUrlFromAssets(submittedPrompt, type);
+        if (cdnUrl) {
+          console.log(`[WAIT] Layer 3 SUCCESS — found CDN URL in Asset library`);
+          return cdnUrl;
+        }
+      } catch (recErr) {
+        console.warn(`[WAIT] Layer 3 failed: ${recErr.message}`);
+      }
     }
 
     throw new Error(`Generation timed out after ${timeout / 1000}s`);
@@ -4429,6 +4509,8 @@ class HiggsFieldAutomation {
     let throttleWarned = false;
 
     let pollCount = 0;
+    let consecutive404s = 0;
+    const MAX_CONSECUTIVE_404S = 15; // ~45s of 404s → bail to Layer 2
 
     while (Date.now() - startTime < timeout) {
       if (this.cancelled) throw new Error('Cancelled');
@@ -4543,8 +4625,25 @@ class HiggsFieldAutomation {
       }
 
       if (result.status === 'fetch_error') {
+        // Track consecutive 404s — if the endpoint is consistently dead,
+        // bail early to Layer 2 (CDN URL diffing) instead of wasting 7 minutes.
+        // The job UUID may be invalid, or the API endpoint may have changed.
+        if (result.code === 404) {
+          consecutive404s++;
+          if (consecutive404s >= MAX_CONSECUTIVE_404S) {
+            console.warn(`[API] ═══ ${MAX_CONSECUTIVE_404S} consecutive 404s — API endpoint dead for job ${jobId} ═══`);
+            console.warn(`[API] Bailing Layer 1 → falling back to Layer 2 (CDN URL diffing) after ${elapsedSec}s`);
+            // Throw a non-fatal error so waitForGeneration falls through to Layer 2
+            const err = new Error(`API_ENDPOINT_DEAD: ${MAX_CONSECUTIVE_404S} consecutive 404s polling job ${jobId}`);
+            err.apiEndpointDead = true; // Not a server-side generation failure
+            throw err;
+          }
+        } else {
+          consecutive404s = 0; // Reset on non-404 errors (transient network issues)
+        }
         console.warn(`[API] Fetch error polling job ${jobId}: ${result.error || result.code || result.body?.slice(0, 100)} (${elapsedSec}s)`);
       } else {
+        consecutive404s = 0; // Reset on any successful poll (even if status != completed)
         // Log extra detail every 10th poll to track if results field changes
         if (pollCount % 10 === 0) {
           console.log(`[API] Job ${jobId}: ${result.status} | results: ${result._raw?.slice(0, 100)} (${elapsedSec}s)`);
@@ -5443,6 +5542,130 @@ class HiggsFieldAutomation {
     }
 
     console.warn(`[IMG RECOVERY] No matching image found after checking ${tilesToCheck.length} tiles`);
+    return null;
+  }
+
+  /**
+   * Layer 3 recovery: navigate to Asset library, find image by prompt match,
+   * extract its CDN URL. Does NOT download — returns the URL for the caller
+   * to download via downloadLatestResult.
+   *
+   * Lighter-weight than recoverTimedOutImage (no context recreate, no download).
+   * Used inline by waitForGeneration when Layer 2 stalls.
+   *
+   * @param {string} submittedPrompt - The prompt to match against
+   * @param {string} type - 'image' or 'video'
+   * @returns {Promise<string|null>} CDN URL if found, null otherwise
+   */
+  async _recoverCdnUrlFromAssets(submittedPrompt, type = 'image') {
+    const page = this.page;
+    if (!page) return null;
+
+    const assetUrl = type === 'video'
+      ? 'https://higgsfield.ai/asset/video'
+      : 'https://higgsfield.ai/asset/image';
+
+    try {
+      await page.goto(assetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    } catch (navErr) {
+      console.warn(`[L3 RECOVERY] Navigation failed: ${navErr.message.split('\n')[0]}`);
+      return null;
+    }
+    await page.waitForTimeout(3000);
+
+    // Scan for asset tiles
+    let tiles = [];
+    for (let poll = 0; poll < 4; poll++) {
+      tiles = await page.evaluate(() => {
+        const results = [];
+        const figures = document.querySelectorAll('figure[data-asset-id]');
+        for (const fig of figures) {
+          const r = fig.getBoundingClientRect();
+          if (r.width < 80 || r.height < 80) continue;
+          results.push({ uuid: fig.getAttribute('data-asset-id') || null });
+        }
+        return results;
+      }).catch(() => []);
+      if (tiles.length > 0) break;
+      await page.waitForTimeout(2000);
+    }
+
+    if (tiles.length === 0) {
+      console.warn('[L3 RECOVERY] No asset tiles found');
+      return null;
+    }
+    console.log(`[L3 RECOVERY] Found ${tiles.length} tiles — checking first 4`);
+
+    // Check each tile (most recent first — limit to 4)
+    for (let i = 0; i < Math.min(4, tiles.length); i++) {
+      const tile = tiles[i];
+      if (!tile.uuid) continue;
+
+      try {
+        await page.goto(`https://higgsfield.ai/asset/${type}/${tile.uuid}`, {
+          waitUntil: 'domcontentloaded', timeout: 15000,
+        });
+        await page.waitForTimeout(2000);
+
+        // Wait for detail panel
+        let ready = false;
+        for (let w = 0; w < 6; w++) {
+          ready = await page.evaluate(() => {
+            const body = document.body?.innerText || '';
+            return body.includes('PROMPT') && (body.includes('Copy') || body.includes('INFORMATION'));
+          }).catch(() => false);
+          if (ready) break;
+          await page.waitForTimeout(1000);
+        }
+        if (!ready) continue;
+
+        // Scrape prompt
+        const tilePrompt = await page.evaluate(() => {
+          const body = document.body?.innerText || '';
+          const pi = body.indexOf('PROMPT');
+          const ii = body.indexOf('INFORMATION');
+          if (pi >= 0 && ii > pi) {
+            return body.substring(pi + 6, ii).replace(/^Copy\s*/i, '').replace(/\s*See all\s*$/i, '').trim();
+          }
+          return '';
+        }).catch(() => '');
+
+        if (!tilePrompt || tilePrompt.length < 20) continue;
+
+        const similarity = this._promptSimilarity(submittedPrompt, tilePrompt);
+        console.log(`[L3 RECOVERY] Tile ${i + 1} (${tile.uuid}): ${similarity}% similarity`);
+
+        if (similarity < 60) continue;
+
+        // MATCH — extract CDN URL from the detail page (img src in the main preview)
+        const cdnUrl = await page.evaluate(() => {
+          // Look for the main preview image (large, CDN-hosted)
+          const imgs = document.querySelectorAll('img[src]');
+          for (const img of imgs) {
+            const src = img.src;
+            if ((src.includes('higgs') || src.includes('cloudfront') || src.includes('cdn')) &&
+                img.naturalWidth > 200) {
+              return src;
+            }
+          }
+          return null;
+        }).catch(() => null);
+
+        if (cdnUrl) {
+          console.log(`[L3 RECOVERY] ✓ MATCH at ${similarity}% — CDN URL: ${cdnUrl.slice(0, 120)}...`);
+          return cdnUrl;
+        }
+
+        // Fallback: return null but don't throw — download will use card-click
+        console.log(`[L3 RECOVERY] ✓ MATCH at ${similarity}% but no CDN URL extracted — returning null for card-click download`);
+        return null;
+      } catch (tileErr) {
+        console.warn(`[L3 RECOVERY] Error on tile ${i + 1}: ${tileErr.message.split('\n')[0]}`);
+        continue;
+      }
+    }
+
+    console.warn('[L3 RECOVERY] No matching asset found');
     return null;
   }
 

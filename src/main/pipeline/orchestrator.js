@@ -8937,6 +8937,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this.emit({ type: 'stage', stage: stageName });
     this.log(`── Stage: ${stageName} ──`);
     const pid = this.state.project?.id;
+    // Backup DB before each stage — pipeline stages do bulk asset writes
+    db.backup(`pre-${stageName}`);
     if (pid) db.logEvent(pid, 'stage_start', { stage: stageName });
     await fn();
     if (pid) db.logEvent(pid, 'stage_complete', { stage: stageName });
@@ -10244,7 +10246,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     const { ThumbnailGenerator } = require('../publish/thumbnailGenerator');
     const geminiKey = this.store.get('geminiApiKey', '');
-    const thumbGen = new ThumbnailGenerator(automation, { geminiApiKey: geminiKey });
+    const thumbGen = new ThumbnailGenerator(automation, {
+      geminiApiKey: geminiKey,
+      onCreditUsed: (creditCost, stage) => {
+        this.log(`[PUBLISH] Thumbnail credit: ${creditCost ?? 0} (${stage})`);
+        db.runSql(
+          `INSERT INTO project_assets (project_id, type, status, credit_cost, prompt_used, completed_at)
+           VALUES (?, 'thumbnail', 'done', ?, ?, datetime('now'))`,
+          [project.id, creditCost, `thumbnail-${stage}`]
+        );
+      },
+    });
 
     const script = project.script_json ? JSON.parse(project.script_json) : {};
     const characters = (script.character_bible || []).map(c => c.name);
@@ -10276,9 +10288,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
     }
 
-    const aspectRatio = project.aspect_ratio || '16:9';
+    const aspectRatio = options.aspectRatioOverride || project.aspect_ratio || '16:9';
 
-    this.log(`[PUBLISH] Generating thumbnail (genre: ${genre}, aspect: ${aspectRatio}, placement: ${options.placement || 'lower-third'})...`);
+    this.log(`[PUBLISH] Generating thumbnail (genre: ${genre}, aspect: ${aspectRatio}${options.aspectRatioOverride ? ' [override]' : ''}, placement: ${options.placement || 'lower-third'})...`);
     this.emit({ type: 'publish-status', message: 'Generating thumbnail...' });
 
     try {
@@ -10405,7 +10417,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     const { ThumbnailGenerator } = require('../publish/thumbnailGenerator');
     const geminiKey = this.store.get('geminiApiKey', '');
-    const thumbGen = new ThumbnailGenerator(automation, { geminiApiKey: geminiKey });
+    const thumbGen = new ThumbnailGenerator(automation, {
+      geminiApiKey: geminiKey,
+      onCreditUsed: (creditCost, stage) => {
+        this.log(`[PUBLISH] Thumbnail credit: ${creditCost ?? 0} (${stage})`);
+        db.runSql(
+          `INSERT INTO project_assets (project_id, type, status, credit_cost, prompt_used, completed_at)
+           VALUES (?, 'thumbnail', 'done', ?, ?, datetime('now'))`,
+          [project.id, creditCost, `thumbnail-${stage}`]
+        );
+      },
+    });
 
     const script = project.script_json ? JSON.parse(project.script_json) : {};
     const settings = project.settings ? JSON.parse(project.settings) : {};
@@ -10415,9 +10437,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       throw new Error('characterElementName is required for custom thumbnail');
     }
 
-    const aspectRatio = project.aspect_ratio || '16:9';
+    const aspectRatio = options.aspectRatioOverride || project.aspect_ratio || '16:9';
 
-    this.log(`[PUBLISH] Generating custom thumbnail (character: ${options.characterElementName}, expression: ${options.expression || 'intense determined'}, aspect: ${aspectRatio})...`);
+    this.log(`[PUBLISH] Generating custom thumbnail (character: ${options.characterElementName}, expression: ${options.expression || 'intense determined'}, aspect: ${aspectRatio}${options.aspectRatioOverride ? ' [override]' : ''})...`);
     this.emit({ type: 'publish-status', message: 'Generating custom close-up thumbnail...' });
 
     try {

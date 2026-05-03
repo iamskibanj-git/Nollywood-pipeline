@@ -2922,6 +2922,91 @@ it does NOT correspond to a Higgsfield element. `createLocationElement()` in
 - Architecture: `ShortsController` (index.js) → `ShortsScheduler` + `FacebookUploader`.
 - IPC-ready: controller methods map to `ipcMain.handle('shorts:*')` calls.
 
+**Database Auto-Backup System (Session 30M):**
+- Location: `AppData/Roaming/nollywood-ai-pipeline/backups/`
+- Filename format: `nollywood-pipeline_YYYY-MM-DD_HH-MM-SS_<tag>.sqlite`
+- `db.backup(tag)`: saves current DB state, prunes old backups per tag category.
+- Automatic triggers (no manual action needed):
+  - `startup` — on app init, before migrations/recovery run
+  - `shutdown` — on app close, after final save
+  - `auto` — every 30 minutes during runtime (timer via `startAutoBackup()`)
+  - `pre-<stageName>` — before each pipeline stage via `runStage()` (covers research, portraits, scene_images, locations, cinematic_scenes, video_clips, assembly)
+  - `pre-upload` — before Facebook upload session starts
+  - `pre-assembly` — before shorts assembly begins
+- Rolling pruning: `auto` keeps last 5, all other tags keep last 10.
+- `db.restoreBackup(filename)`: creates safety backup first, then restores. Caller must re-init DB after.
+- `db.listBackups()`: returns all backups sorted newest-first with tag, date, size.
+- `fix-shorts-status.js`: creates `pre-fix` backup before any status changes.
+- Functions exported: `backup`, `startAutoBackup`, `stopAutoBackup`, `listBackups`, `restoreBackup`.
+
+**Pipeline Progress Stats with ETA (Session 30M):**
+- All major pipeline stages emit rich progress events with `elapsed`, `eta`, `generated`, `skipped`, `failed` fields.
+- ETA pattern: `startTime` + `genCount` counter → `perItem = elapsed / genCount` → `remaining = perItem * (total - current)`.
+- Renderer: `formatETA()` and `formatElapsed()` helpers, `updateGenProgress(current, total, extra)` accepts extra fields.
+- Progress text uses `<pre>` for multi-line clip labels.
+- Assembly progress: weighted progress bar (0-60% processing, 70% concat, 85% upscale, 100% done).
+- Stages covered: portraits, scene images, cinematic locations, cinematic scenes, video clips (Kling + Veo), final assembly (FFmpeg).
+
+**Facebook Uploader — Login Wait + Popup Dismissal (Session 30M):**
+- `_waitForLogin()`: navigates to facebook.com, polls for logged-in indicators every 3s, waits up to 3 min for login + 2FA.
+- `_dismissPopups()`: auto-dismisses FB overlays (keyboard shortcuts, cookie consent, notification prompts, banners) before every click action.
+  - Uses `page.locator()`/`getByText()` — NOT `page.$()` (which silently fails on Playwright text selectors).
+  - Recursive: dismissing one popup re-checks for another underneath.
+  - Escape fallback for unknown dialogs, but protects reel wizard dialogs (Create reel, Edit reel, Reel settings, etc.).
+  - IMPORTANT: No generic `[role="dialog"] [aria-label="Close"]` handler — it closes the Create Reel wizard.
+- Timeout increases: CLICK_TIMEOUT 20s, POST_CLICK_SETTLE 4s, POST_NAV_SETTLE 6s, POST_SCHEDULE_CONFIRM 15s.
+
+**Facebook Uploader — Selectors + Flow Rewrite (Session 30M):**
+- SELECTORS rewritten to match May 2026 Professional Dashboard Content Library UI.
+- `scheduleReel()`: 12-step flow via direct Content Library URL (`?filter=SCHEDULED`).
+- `_clickSchedulingOptions()`: multi-strategy click on "Scheduling options / Publish now" row.
+- `_clickFinalSchedule()`: exact-match "Schedule" button via `getByRole`/`text-is`, excludes "Schedule for later"/"Scheduling options".
+- `_setScheduleDate()` / `_setScheduleTime()`: 3-tier strategy — aria-label inputs → value-scan all inputs for date/time pattern → label text click.
+- `_uploadVideo()`: uses `setInputFiles()` on `input[type="file"]` directly — no filechooser event, no Windows file picker modal.
+- Debug screenshot saved after opening scheduling panel for diagnosis.
+- Upload order: `ORDER BY short_number ASC` — short_001 uploads first, matches earliest scheduled date.
+
+**Shorts Status: `upload_failed` (Session 30M):**
+- Upload errors now set status to `upload_failed` (not generic `failed`).
+- `failed` is reserved for SEO generation failures (description/hashtags generation).
+- `upload_failed` = Playwright/Facebook upload error (retryable via Upload All).
+- `getNextPendingUpload()` picks up both `seo_done` and `upload_failed` — clicking "Upload All" auto-retries failed uploads.
+- "Upload All" button enabled whenever `seo_done + upload_failed > 0`.
+- Plan Calendar button/controls disabled once any shorts are assembled — prevents re-planning from orphaning assembled files.
+- Data migration: `node fix-failed-to-upload-failed.js` renames existing `failed` → `upload_failed`.
+
+**Facebook Uploader — Dynamic Readiness Wait + Retry (Session 30M):**
+- `_waitForPageReady()`: adapted from Kling automation's DYNAMIC READINESS WAIT pattern.
+  - Polls 4 indicators: Content Library heading, Create button, tab bar, no spinner.
+  - Threshold: ≥75% must pass. Buffer: 10% of elapsed time.
+  - Replaces fixed `POST_NAV_SETTLE` delay after Content Library navigation.
+- `_retryStep(stepName, fn, maxRetries, baseDelay)`: retry wrapper with linear backoff.
+  - Default: 2 attempts (1 try + 1 retry), 3s base delay (3s → 6s).
+  - Dismisses popups between retries.
+  - Wrapped steps: 2 (Create), 3 (Reel select), 8 (Scheduling options), 11 (Schedule for later).
+
+**waitForGeneration — 3-Layer Detection Rewrite (Session 30M):**
+- **Bug fixed**: Layer 2 snapshoted History URLs AFTER Layer 1 failed (45s in), so the
+  completed image was in the "initial" baseline and never detected as "new." Now the
+  pre-gen snapshot is taken BEFORE Layer 1 runs.
+- **Layer 2 History refresh**: re-clicks History tab every 30s to force Higgsfield's SPA
+  to update the DOM.
+- **Layer 2 stall detection**: if no changes for 60s (no new URLs, no count change, no
+  status transition), bails to Layer 3 instead of waiting for the full 7-minute timeout.
+- **Layer 3** (new): `_recoverCdnUrlFromAssets(submittedPrompt, type)` — lightweight Asset
+  library scan. Navigates to `/asset/image`, checks first 4 tiles by prompt match (60%
+  similarity via `_promptSimilarity`), extracts CDN URL from detail page. No context
+  recreate, no download — returns URL for the existing `downloadLatestResult` flow.
+  Falls back cleanly on failure.
+
+**Higgsfield API Polling — Consecutive 404 Bail-out (Session 30M):**
+- `_pollJobCompletion()`: tracks consecutive 404 responses from the job polling endpoint.
+- After 15 consecutive 404s (~45s), throws `API_ENDPOINT_DEAD` — a non-fatal error that
+  lets `waitForGeneration()` fall through to Layer 2 (CDN URL diffing in History tab).
+- **Bug fixed**: previously, a dead API endpoint would waste 7 minutes (full IMAGE_GEN_TIMEOUT_MS)
+  polling 404s before Layer 2 could detect the completed image. Now bails in ~45s.
+- Counter resets on non-404 errors (transient issues) and on successful polls.
+
 **Publish Tab — standalone + custom thumbnail (Session 30j):**
 - Publish is now a standalone tab (like Shorts) — accessible at any time.
 - Eligible projects: any project with scene images generated (not just fully completed).
@@ -3085,7 +3170,58 @@ Facebook uploader — login wait + timing fixes:
   POST_NAV_SETTLE 4→6s, POST_SCHEDULE_CONFIRM 10→15s.
 - Upload flow emits `logging_in` progress status before `launch()` returns.
 
-Aspect ratio threading (from session 30k, completed):
+Aspect ratio threading (from session 30k, completed session 30M):
 - Orchestrator's `generateThumbnail()` and `generateCustomThumbnail()` now read
   `project.aspect_ratio` and pass it to ThumbnailGenerator. All 3 thumbnail stages
   (key art, title card, composite) generate in the project's configured orientation.
+- Bug fix (30M): `compositeThumbnail()` had hard-coded `'16:9'` in both its
+  `generateImage()` calls. Added `aspectRatio` parameter to method signature
+  (default `'16:9'`), both callers (`generateThumbnail`, `generateCustomThumbnail`)
+  now pass the project's aspect ratio through.
+
+Composite placement options (session 30M):
+- 7 placements: `lower-third`, `upper-third`, `left-side`, `right-side`,
+  `bottom-bar`, `split-diagonal`, `auto`
+- Each has specific prompt instructions anchoring text to a region and keeping
+  character faces clear. All include "Do NOT cover or obscure character faces."
+- `left-side` / `right-side`: text in 35-40% lateral strip, opposite side clear
+- `bottom-bar`: narrow cinematic strip in bottom 15-20% (movie poster style)
+- `split-diagonal`: text on a diagonal across the bottom-left corner
+- `auto`: text in area with most negative space, away from faces
+
+Publish aspect ratio override (session 30M):
+- Dropdown in Publish tab: "Project Default" | "16:9 Landscape" | "9:16 Portrait"
+- Overrides global `project.aspect_ratio` for thumbnail gen only (all 3 stages)
+- Passed as `options.aspectRatioOverride` through renderer → IPC → orchestrator
+- Both `generateThumbnail()` and `generateCustomThumbnail()` in orchestrator use
+  `options.aspectRatioOverride || project.aspect_ratio || '16:9'`
+- Preview box aspect-ratio CSS updates dynamically on dropdown change
+
+Credit usage stats (session 30M):
+- Pipeline Complete screen shows per-type credit breakdown widget
+- `getProjectCreditUsage(projectId)` in db.js aggregates `credit_cost` from `project_assets`
+- IPC: `get-project-credit-usage` → `db.getProjectCreditUsage(projectId)`
+- Renderer: `loadCreditStats(projectId)` called on `pipeline-complete` event
+- Widget: inline card with per-type rows (portraits, scenes, video, thumbnails) showing
+  generation count + credit sum. Total at bottom. Color-coded: green=free, yellow=paid.
+
+Thumbnail credit tracking (session 30M):
+- ThumbnailGenerator constructor accepts `onCreditUsed(creditCost, stage)` callback
+- New `_genImage(opts, stage)` wrapper — injects `onGenClicked` into every
+  `automation.generateImage()` call and fires `onCreditUsed` with stage label
+- Stage labels: `key-art`, `title-card`, `composite`, `custom-closeup`
+- Orchestrator's `generateThumbnail()` and `generateCustomThumbnail()` pass
+  `onCreditUsed` that inserts lightweight `thumbnail` type asset rows into
+  `project_assets` with `credit_cost` and `prompt_used = 'thumbnail-<stage>'`
+- These rows are picked up by `getProjectCreditUsage()` and shown in the widget
+
+---
+
+## Session 30N: Script Engine Review
+
+**Commit script:** `commit-session30N.ps1`
+
+**Task:** Thorough review of `src/main/pipeline/script-engine.js` — the Claude API integration
+that generates titles and screenplays. Review scope: prompt quality, JSON parsing resilience,
+error handling, structural grading, cinematic vs staged mode divergence, duration preset
+compliance, and any bugs or improvement opportunities discovered during review.
