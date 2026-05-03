@@ -1250,18 +1250,40 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
             return match;
           });
 
-          // ── 3. Add @ prefix to bare character names ──
-          // Sort longest-first to avoid partial matches
+          // ── 3. Add @ prefix to bare character names (OUTSIDE dialogue quotes only) ──
+          // Sort longest-first to avoid partial matches.
+          // First, identify character positions inside dialogue quotes so we can skip them.
+          // Dialogue quotes follow the pattern ]: "..."
+          const dialogueRanges = [];
+          const dqRe = /\]:\s*"([^"]*)"/gi;
+          let dqMatch;
+          while ((dqMatch = dqRe.exec(prompt)) !== null) {
+            // Range covers the content inside the quotes (group 1)
+            const contentStart = dqMatch.index + dqMatch[0].indexOf('"') + 1;
+            const contentEnd = contentStart + dqMatch[1].length;
+            dialogueRanges.push({ start: contentStart, end: contentEnd });
+          }
+          const isInsideDialogue = (pos) => dialogueRanges.some(r => pos >= r.start && pos < r.end);
+
           const sortedNames = [...validCharNames].sort((a, b) => b.length - a.length);
           for (const charName of sortedNames) {
             const escaped = charName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const bareRe = new RegExp(`(?<!@)\\b${escaped}\\b`, 'gi');
             const before = prompt;
-            prompt = prompt.replace(bareRe, (match) => {
-              // Don't add @ inside dialogue quotes — those should use human names
-              return `@${match.toLowerCase()}`;
-            });
-            if (prompt !== before) {
+            // Build replacement by checking each match position
+            let offset = 0;
+            let result = '';
+            let lastEnd = 0;
+            let m;
+            const tempRe = new RegExp(`(?<!@)\\b${escaped}\\b`, 'gi');
+            while ((m = tempRe.exec(prompt)) !== null) {
+              if (isInsideDialogue(m.index)) continue; // skip — human names in dialogue
+              result += prompt.slice(lastEnd, m.index) + `@${m[0].toLowerCase()}`;
+              lastEnd = m.index + m[0].length;
+            }
+            if (lastEnd > 0) {
+              result += prompt.slice(lastEnd);
+              prompt = result;
               totalFixes++;
             }
           }
@@ -1287,26 +1309,31 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
           // ── 6. Dual-speaker strip (Shots 2 & 3) ──
           // Shot 2 and Shot 3 must have only ONE [@speaker] tag. If Claude wrote
           // two speaker tags in the same shot, strip the second one.
+          // Collect replacements first, then apply — modifying prompt mid-iteration
+          // with a stateful regex (g flag + exec loop) corrupts lastIndex.
           const shotBlockRe = /Shot\s*(2|3)\s*\([^)]*\)\s*:\s*([\s\S]*?)(?=\nShot\s*\d+\s*\(|$)/gi;
+          const dualSpeakerFixes = []; // { original, cleaned, shotNum }
           let shotBlockMatch;
           while ((shotBlockMatch = shotBlockRe.exec(prompt)) !== null) {
             const shotNum = shotBlockMatch[1];
             const shotBody = shotBlockMatch[2];
             const speakerTags = shotBody.match(/\[@[a-z0-9_]+,\s*speaking/gi) || [];
             if (speakerTags.length > 1) {
-              // Keep the first speaker tag, strip subsequent ones and their dialogue
               let cleaned = shotBody;
               let firstFound = false;
               cleaned = cleaned.replace(/\n?\[@([a-z0-9_]+),\s*speaking[^\]]*\]:\s*"[^"]*"/gi, (m) => {
                 if (!firstFound) { firstFound = true; return m; }
-                totalFixes++;
-                console.log(`[PROMPT-SANITIZE] ${label}: stripped extra speaker from Shot ${shotNum}`);
                 return '';
               });
               if (cleaned !== shotBody) {
-                prompt = prompt.replace(shotBody, cleaned);
+                dualSpeakerFixes.push({ original: shotBody, cleaned, shotNum });
               }
             }
+          }
+          for (const fix of dualSpeakerFixes) {
+            prompt = prompt.replace(fix.original, fix.cleaned);
+            totalFixes++;
+            console.log(`[PROMPT-SANITIZE] ${label}: stripped extra speaker from Shot ${fix.shotNum}`);
           }
 
           // ── 7. Shot direction length warning ──
@@ -1454,8 +1481,10 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
    * Close unclosed brackets and braces by counting open/close pairs.
    */
   _closeUnclosedBrackets(json) {
-    let openBraces = 0;
-    let openBrackets = 0;
+    // Track the ORDERED nesting stack so we close in the correct reverse order.
+    // The old approach counted braces/brackets separately and always appended
+    // ] before } — wrong when the nesting is [ { (should close } then ]).
+    const stack = []; // each entry: '{' or '['
     let inString = false;
     let escaped = false;
 
@@ -1466,18 +1495,20 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
       if (ch === '"') { inString = !inString; continue; }
       if (inString) continue;
 
-      if (ch === '{') openBraces++;
-      else if (ch === '}') openBraces--;
-      else if (ch === '[') openBrackets++;
-      else if (ch === ']') openBrackets--;
+      if (ch === '{') stack.push('{');
+      else if (ch === '}') { if (stack.length && stack[stack.length - 1] === '{') stack.pop(); }
+      else if (ch === '[') stack.push('[');
+      else if (ch === ']') { if (stack.length && stack[stack.length - 1] === '[') stack.pop(); }
     }
 
     // Remove any trailing comma before we close
     let result = json.replace(/,\s*$/, '');
 
-    // Close any unclosed structures
-    while (openBrackets > 0) { result += ']'; openBrackets--; }
-    while (openBraces > 0) { result += '}'; openBraces--; }
+    // Close unclosed structures in reverse nesting order
+    while (stack.length > 0) {
+      const opener = stack.pop();
+      result += (opener === '{') ? '}' : ']';
+    }
 
     return result;
   }
@@ -1522,9 +1553,10 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
         } else {
           // Check if this quote ends the string or is an unescaped inner quote
           // Look ahead: if next non-whitespace char is : , } ] or end-of-string, it's a boundary
+          // Also treat \n as boundary — JSON string values end before newlines in key:value pairs
           const rest = json.slice(i + 1).trimStart();
           const nextChar = rest[0];
-          if (!nextChar || ':,}]'.includes(nextChar)) {
+          if (!nextChar || ':,}]\n\r'.includes(nextChar)) {
             // This is a legitimate string boundary
             inString = false;
             result += ch;
@@ -2009,8 +2041,8 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        console.warn('[REVIEW] No JSON in grader response — defaulting to neutral pass');
-        return { score: 65, pass: true, tier, issues: [], strengths: [], summary: 'Grader returned malformed response; script auto-passed with neutral score.' };
+        console.warn('[REVIEW] No JSON in grader response — defaulting to cautious fail (re-review needed)');
+        return { score: 0, pass: false, tier, threshold: 0, issues: [{ severity: 'critical', category: 'grader_error', description: 'Structural grader returned no valid JSON. Cannot verify script quality — please regenerate or override manually.' }], strengths: [], summary: 'Grader returned malformed response; script blocked until re-review or manual override.' };
       }
       const parsed = JSON.parse(jsonMatch[0]);
       // Cinematic mode raises the bar by 5 pts at every tier — weak Kling clips
@@ -2032,7 +2064,7 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
       };
     } catch (e) {
       console.error('[REVIEW] Parse error:', e);
-      return { score: 65, pass: true, tier, issues: [], strengths: [], summary: `Grader parse error: ${e.message}. Script auto-passed.` };
+      return { score: 0, pass: false, tier, threshold: 0, issues: [{ severity: 'critical', category: 'grader_error', description: `Structural grader response failed to parse: ${e.message}. Cannot verify script quality.` }], strengths: [], summary: `Grader parse error: ${e.message}. Script blocked until re-review or manual override.` };
     }
   }
 
