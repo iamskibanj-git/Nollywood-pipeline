@@ -525,11 +525,38 @@ Generate Chapter ${chNum} now. JSON only.`;
         throw new Error(`${chLabel} returned 0 chapters. Generated ${allChapters.length}/${totalChapters} before failure.`);
       }
 
-      allChapters.push(...chChapters);
-      const lastCh = chChapters[chChapters.length - 1];
-      const sceneCount = (lastCh.scenes || []).length;
-      const clipCount = (lastCh.scenes || []).reduce((sum, s) => sum + (s.kling_clips || []).length, 0);
+      // Validate: expect exactly one chapter with the correct chapter_number
+      if (chChapters.length > 1) {
+        console.warn(`[SCRIPT] ${chLabel} returned ${chChapters.length} chapters — expected 1. Taking first only.`);
+      }
+      const returnedCh = chChapters[0];
+      if (returnedCh.chapter_number !== undefined && returnedCh.chapter_number !== chNum) {
+        console.warn(`[SCRIPT] ${chLabel} returned chapter_number ${returnedCh.chapter_number} — expected ${chNum}. Correcting.`);
+        returnedCh.chapter_number = chNum;
+      } else if (returnedCh.chapter_number === undefined) {
+        returnedCh.chapter_number = chNum;
+      }
+
+      allChapters.push(returnedCh);
+      const sceneCount = (returnedCh.scenes || []).length;
+      const clipCount = (returnedCh.scenes || []).reduce((sum, s) => sum + (s.kling_clips || []).length, 0);
       console.log(`[SCRIPT] ${chLabel} complete: ${sceneCount} scenes, ${clipCount} clips (total: ${allChapters.length}/${totalChapters})`);
+    }
+
+    // ── Validate final chapter coverage: exactly 1..totalChapters ──
+    const finalChNums = allChapters.map(c => c.chapter_number);
+    const finalSet = new Set(finalChNums);
+    const finalMissing = [];
+    for (let i = 1; i <= totalChapters; i++) {
+      if (!finalSet.has(i)) finalMissing.push(i);
+    }
+    if (finalMissing.length || allChapters.length !== totalChapters) {
+      throw new Error(
+        `Phase B chapter validation failed — expected ${totalChapters} chapters (1-${totalChapters}), ` +
+        `got ${allChapters.length} chapters [${finalChNums.join(',')}]` +
+        (finalMissing.length ? `. Missing: ${finalMissing.join(', ')}` : '') +
+        `. Re-run to retry.`
+      );
     }
 
     return {
@@ -947,8 +974,10 @@ Generate chapter outlines ${batchStart}-${batchEnd} now. JSON only.`;
     // ── Validate outline coverage: every chapter 1..totalChapters exactly once ──
     const seen = new Set();
     const duplicates = [];
+    const outOfRange = [];
     for (const ol of allChapterOutlines) {
       const cn = ol.chapter_number;
+      if (cn < 1 || cn > totalChapters) outOfRange.push(cn);
       if (seen.has(cn)) duplicates.push(cn);
       seen.add(cn);
     }
@@ -956,12 +985,14 @@ Generate chapter outlines ${batchStart}-${batchEnd} now. JSON only.`;
     for (let i = 1; i <= totalChapters; i++) {
       if (!seen.has(i)) missing.push(i);
     }
-    if (duplicates.length || missing.length) {
+    if (duplicates.length || missing.length || outOfRange.length || allChapterOutlines.length !== totalChapters) {
       const parts = [];
+      if (allChapterOutlines.length !== totalChapters) parts.push(`expected ${totalChapters} outlines but got ${allChapterOutlines.length}`);
+      if (outOfRange.length) parts.push(`out-of-range chapters: ${outOfRange.join(', ')}`);
       if (missing.length) parts.push(`missing chapters: ${missing.join(', ')}`);
       if (duplicates.length) parts.push(`duplicate chapters: ${duplicates.join(', ')}`);
       throw new Error(
-        `Prestige outline validation failed — expected exactly chapters 1-${totalChapters} but got ${allChapterOutlines.length} outlines (${parts.join('; ')}). ` +
+        `Prestige outline validation failed — expected exactly chapters 1-${totalChapters} (${parts.join('; ')}). ` +
         `Re-run to retry.`
       );
     }
@@ -1375,7 +1406,19 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
       }
       console.log(`[SCRIPT] Story-driven stats: ${totalScenes} scenes, ${totalLines} lines, ${totalClips} clips across ${actualChapters} chapters`);
       if (maxCharsPerScene > 3) {
-        console.warn(`[SCRIPT] ⚠ Max characters in a single scene: ${maxCharsPerScene} (Kling limit is 3)`);
+        // Collect offending scenes for the error message
+        const overloadedScenes = [];
+        for (const ch of (script.chapters || [])) {
+          for (const sc of (ch.scenes || [])) {
+            const n = (sc.characters_present || []).length;
+            if (n > 3) overloadedScenes.push(`Ch${ch.chapter_number} S${sc.scene_number || '?'} (${n} chars)`);
+          }
+        }
+        throw new Error(
+          `Kling hard limit: max 3 characters per scene. ${overloadedScenes.length} scene(s) exceed this: ` +
+          `${overloadedScenes.slice(0, 5).join(', ')}${overloadedScenes.length > 5 ? '...' : ''}. ` +
+          `Regenerate the script — scene splitting must happen at outline level.`
+        );
       }
 
       // ── OVERSIZED CLIP AUTO-SPLIT ──
@@ -1427,15 +1470,28 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
         }
       }
       if (oversizedFixed > 0) {
-        console.warn(`[SCRIPT] Auto-split ${oversizedFixed} oversized clip(s). Prompts marked [AUTO-SPLIT] need vision pass regeneration.`);
+        console.warn(`[SCRIPT] Auto-split ${oversizedFixed} oversized clip(s).`);
         // Update total clip count after splits
         totalClips = 0;
+        const autoSplitClipIds = [];
         for (const ch of (script.chapters || [])) {
           for (const sc of (ch.scenes || [])) {
-            totalClips += (sc.kling_clips || []).length;
+            for (const clip of (sc.kling_clips || [])) {
+              totalClips++;
+              if (clip.multi_shot_prompt && clip.multi_shot_prompt.startsWith('[AUTO-SPLIT')) {
+                autoSplitClipIds.push(clip.clip_id);
+              }
+            }
           }
         }
         console.log(`[SCRIPT] Adjusted clip count after splits: ${totalClips}`);
+        if (autoSplitClipIds.length > 0) {
+          throw new Error(
+            `${autoSplitClipIds.length} clip(s) have [AUTO-SPLIT] placeholder prompts that would waste Kling credits: ` +
+            `${autoSplitClipIds.slice(0, 5).join(', ')}${autoSplitClipIds.length > 5 ? '...' : ''}. ` +
+            `Regenerate the script to fix oversized clips at the source.`
+          );
+        }
       }
 
       const totalCharacters = (script.character_bible || []).length;

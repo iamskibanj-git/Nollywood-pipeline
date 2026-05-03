@@ -246,8 +246,28 @@ LOW:
 
 **Implementation gotchas discovered:**
 - Bash sandbox NTFS mount sync: `node -c` may see stale file versions and report false syntax errors. The Read tool is the source of truth for file completeness.
-- Phase A2 sends compact character bible (outfits stripped to `outfit_count`) to stay within token budget — full outfit details are only needed at Phase B chapter generation time.
+- Phase A2 compact bible now includes full outfit IDs + context (not just `outfit_count`) — needed for correct `character_outfits` mappings in scene beats.
 - Voice anchors use a style descriptor lookup table (10 entries) rather than raw speech_style strings, giving the chapter generator actionable voice guidance rather than just a label.
+
+**Session 30O — Prestige Validation Hardening (8 fixes):**
+
+Round 1 (UI/data fixes):
+- **Outline coverage validation** (~line 947): After A2 batches, validates `allChapterOutlines` has exactly chapters 1..totalChapters — checks for missing, duplicate, and out-of-range chapters, and requires `length === totalChapters`. Sorts by chapter_number after validation.
+- **Outfit IDs in compact bible** (~line 819): `compactBible` now includes `outfits` array with `outfit_id` + `context` per outfit instead of just `outfit_count`. Enables A2 to assign valid outfit IDs in `character_outfits` scene beat mappings.
+- **Prestige tier labels in UI** (index.html lines 1042, 1076, 1363): All three `tierLabel` ternaries now handle `'prestige'` — cinematic summary shows "prestige — 5-act + dual B-plots", review panel shows "Prestige (45 min)". Previously all fell through to "standard — 3-act".
+- **Prestige in rubric TIER DEFINITIONS** (structure-review-prompt.txt): Added prestige (45 min, 12-15 chapters, five-act, dual B-plots, VERY HIGH bar) alongside test/standard/long-form.
+
+Round 2 (validation hardening):
+- **Phase B chapter number validation** (~line 523): Each call now enforces exactly one chapter returned with `chapter_number === chNum` (corrects mismatches, warns on multi-chapter returns). Final 1..N coverage validation on `allChapters` before return — prevents duplicate/missing chapters from reaching downstream.
+- **AUTO-SPLIT placeholder hard-fail** (~line 1429): After oversized clip auto-split, scans all clips for `[AUTO-SPLIT` prefix in `multi_shot_prompt`. If any found, throws with clip IDs instead of warning. Prevents placeholder prompts from reaching Kling and wasting credits.
+- **3-character scene limit enforcement** (~line 1377): Promoted from `console.warn` to hard `throw` for cinematic mode. Error message lists offending scenes (chapter + scene number + character count). Kling platform constraint — warn-only was functionally no check at prestige scale.
+- **Out-of-range chapter rejection** (outline validation): Added `chapter_number < 1 || > totalChapters` check + explicit `length === totalChapters` guard. A model returning chapters 1-15 plus a bonus chapter 16 now fails validation.
+
+Files changed:
+- `src/main/pipeline/script-engine.js` — outline validation (range + length), Phase B per-call + final validation, auto-split hard-fail, 3-char scene enforcement, outfit IDs in compact bible
+- `src/renderer/index.html` — three tierLabel ternaries (cinematic, staged, review panel)
+- `prompts/structure-review-prompt.txt` — prestige tier definition
+- `CLAUDE.md` — this section
 
 ### Cinematic (Kling) — story-driven model
 
