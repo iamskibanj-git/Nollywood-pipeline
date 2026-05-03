@@ -1333,6 +1333,29 @@ class PipelineOrchestrator {
         }
       }
 
+      // ── PREFLIGHT: Verify Higgsfield session before burning credits ──
+      // A prestige run is 8-16 hours. If the session is expired, we want to
+      // know NOW rather than failing hours in. Non-cinematic skips this.
+      if (shouldRunStage('script-done') && (this.state.generatorMode || 'staged') === 'cinematic') {
+        const preflight = await this.automation.preflightCheck();
+        if (!preflight.ok) {
+          this.log(`Higgsfield preflight FAILED: ${preflight.reason}`, 'warn');
+          this.state.status = 'waiting_approval';
+          this.emit({ type: 'waiting', gate: 'preflight-failed', reason: preflight.reason });
+          this.log('Waiting for operator to fix Higgsfield session and click Resume...');
+          await this.waitForApproval('preflight-failed');
+          if (this.cancelled) return { success: false, reason: 'cancelled' };
+          // Re-check after resume
+          const recheck = await this.automation.preflightCheck();
+          if (!recheck.ok) {
+            throw new Error(`Higgsfield session still invalid after resume: ${recheck.reason}`);
+          }
+          this.log('[PREFLIGHT] ✓ Session confirmed after resume');
+        } else {
+          this.log('[PREFLIGHT] ✓ Higgsfield session alive — proceeding to generation');
+        }
+      }
+
       // ── Stage 3A: Character Portraits ──
       if (shouldRunStage('script-done')) {
         await this.runStage('portraits', async () => {
@@ -10672,6 +10695,37 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    * @returns {Promise<*>} Result of fn()
    */
   async _withSessionRetry(fn, label) {
+    // ── M1: Pre-generation credit check ──
+    // If the automation layer reports credits may be exhausted, pause with a
+    // clear gate instead of crashing mid-generation with a cryptic error.
+    if (this.automation && typeof this.automation.getAvailableCredits === 'function') {
+      try {
+        const credits = await this.automation.getAvailableCredits();
+        if (!credits.available) {
+          this.log(`[CREDITS] Generation paused before ${label}: ${credits.reason || 'credits may be exhausted'}`, 'warn');
+          this.state.status = 'waiting_approval';
+          this.emit({
+            type: 'waiting',
+            gate: 'credits-exhausted',
+            detail: {
+              label,
+              creditCost: credits.creditCost,
+              throttled: credits.throttled,
+              reason: credits.reason || 'Higgsfield credits appear exhausted',
+            },
+          });
+          await this.waitForApproval('credits-exhausted');
+          if (this.cancelled) throw new Error('Pipeline cancelled during credit pause');
+          // Invalidate cache so next check reads fresh state
+          if (this.automation._creditCache) this.automation._creditCache = null;
+        }
+      } catch (creditErr) {
+        if (creditErr.message?.includes('cancelled')) throw creditErr;
+        // Credit check failed — proceed anyway (non-blocking)
+        this.log(`[CREDITS] Pre-check failed for ${label} (non-blocking): ${creditErr.message}`, 'warn');
+      }
+    }
+
     try {
       return await fn();
     } catch (err) {

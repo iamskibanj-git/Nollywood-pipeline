@@ -269,6 +269,30 @@ Files changed:
 - `prompts/structure-review-prompt.txt` — prestige tier definition
 - `CLAUDE.md` — this section
 
+**Session 30P — Pipeline Stop-Point Mitigations (M1 + M2):**
+
+M1 — Credit-exhaustion pause gate:
+- **`getAvailableCredits()`** in higgsfield.js (~line 4066): Pre-generation credit check. Reads Generate button text to detect credit cost without clicking. Returns `{ available, creditCost, throttled }`. Cached 30 seconds. If throttled and button unreadable, flags `available: false` with reason string.
+- **Credit pre-check in `_withSessionRetry()`** (orchestrator.js ~line 10674): Before every Higgsfield generation call, checks `getAvailableCredits()`. If `available === false`, emits `'credits-exhausted'` gate with detail object (label, creditCost, throttled, reason). Operator adds credits and clicks Resume. Cache invalidated on resume to force fresh read. Non-blocking on check failure — proceeds to generation if scraping fails.
+
+M2 — Higgsfield preflight health check:
+- **`preflightCheck()`** in higgsfield.js (~line 4130): Lightweight session validation. Calls `ensureBrowser()` + navigates to higgsfield.ai + runs `isLoggedIn()` (3-signal check). 15-second timeout via `Promise.race()`. Returns `{ ok, reason }`.
+- **Preflight gate** (orchestrator.js, before Stage 3A portraits): Runs for cinematic mode only, after script approval. If preflight fails, emits `'preflight-failed'` gate with reason. On resume, re-runs preflight — throws if still invalid. Saves 8-16 hours of wasted run time on expired sessions.
+
+UI gates:
+- `index.html` — Two new gate handlers: `'preflight-failed'` shows session error + fix instructions, `'credits-exhausted'` shows credit status + cost per generation. Both use existing `updateLog()` + stepper pattern.
+
+Design decisions:
+- Credit check is best-effort, not authoritative. Higgsfield has no public credit balance API — we read the Generate button text (same regex as existing line 968). If parsing fails, we default to `available: true` to avoid false blocking.
+- Preflight reuses existing `isLoggedIn()` code (lines 3991-4064) — no new browser logic.
+- Both mitigations are non-breaking: they degrade gracefully to the pre-30P behavior on failure.
+
+Files changed:
+- `src/main/automation/higgsfield.js` — getAvailableCredits(), preflightCheck()
+- `src/main/pipeline/orchestrator.js` — preflight gate, credit pre-check in _withSessionRetry()
+- `src/renderer/index.html` — gate UI handlers for preflight-failed, credits-exhausted
+- `CLAUDE.md` — this section
+
 ### Cinematic (Kling) — story-driven model
 
 Cinematic mode uses a **credit-first, story-driven** approach. The clip is the atomic cost unit, not the line. Structure is flexible — scenes, lines, and characters are unlimited and driven by what the story needs.

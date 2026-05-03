@@ -4064,6 +4064,113 @@ class HiggsFieldAutomation {
   }
 
   /**
+   * Pre-generation credit check. Navigates to the create page and reads the
+   * Generate button text to determine credit cost without clicking.
+   * Returns { available: boolean, creditCost: number|null, throttled: boolean }.
+   *
+   * "available" is true if we can generate (unlimited active + not throttled,
+   * OR credits are detected on the button). This is a best-effort check —
+   * if parsing fails, available defaults to true to avoid false blocking.
+   *
+   * Cached for 30 seconds to avoid redundant navigations.
+   */
+  async getAvailableCredits() {
+    // Return cached result if fresh (< 30s)
+    if (this._creditCache && Date.now() - this._creditCache.ts < 30000) {
+      return this._creditCache.result;
+    }
+
+    const result = { available: true, creditCost: null, throttled: this.throttled };
+
+    try {
+      await this.ensureBrowser();
+      const page = this.page;
+      if (!page || page.isClosed()) return result;
+
+      const sel = this.selectors;
+      // Try to read the Generate button text from the current page
+      const btnText = await page.evaluate((btnSel, btnFallback) => {
+        const btn = document.querySelector(btnSel) || document.querySelector(btnFallback);
+        return btn ? btn.textContent : null;
+      }, sel.generateButton, sel.generateButtonFallback).catch(() => null);
+
+      if (btnText) {
+        const costMatch = btnText.match(/([\d,.]+)\s*$/);
+        if (costMatch) {
+          const cost = parseFloat(costMatch[1].replace(/,/g, ''));
+          if (!isNaN(cost)) {
+            result.creditCost = cost;
+            // If the button shows a cost > 0 and we're throttled, credits are being used.
+            // We can't know the balance directly — just that generation will cost credits.
+            // "available" remains true (the button is enabled = Higgsfield will accept it).
+          }
+        }
+        // If button shows "GENERATE" with no cost number and we're not throttled → unlimited
+        if (!costMatch && !this.throttled) {
+          result.creditCost = 0;
+        }
+      }
+
+      // If throttled and no button visible, flag as potentially unavailable
+      if (this.throttled && !btnText) {
+        result.available = false;
+        result.reason = 'Throttled and unable to read Generate button — credits may be exhausted';
+      }
+
+      console.log(`[CREDITS] Pre-check: available=${result.available}, cost=${result.creditCost ?? 'unknown'}, throttled=${result.throttled}`);
+    } catch (err) {
+      console.warn(`[CREDITS] Pre-check failed (non-blocking): ${err.message}`);
+      // On error, default to available=true so we don't block unnecessarily
+    }
+
+    this._creditCache = { ts: Date.now(), result };
+    return result;
+  }
+
+  /**
+   * Preflight health check — validates Higgsfield session is alive and usable.
+   * Runs ensureBrowser() + isLoggedIn() with a 15-second timeout.
+   * Returns { ok: boolean, reason?: string }.
+   *
+   * Call this before starting a long generation run to catch expired sessions
+   * early instead of failing hours into a prestige run.
+   */
+  async preflightCheck() {
+    const TIMEOUT = 15000;
+    try {
+      const result = await Promise.race([
+        (async () => {
+          await this.ensureBrowser();
+          const page = this.page;
+          if (!page || page.isClosed()) {
+            return { ok: false, reason: 'Browser page is closed or unavailable' };
+          }
+
+          // Navigate to Higgsfield to trigger session check
+          const url = page.url();
+          if (!url || !url.includes('higgsfield.ai')) {
+            await page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
+          }
+
+          const loggedIn = await this.isLoggedIn();
+          if (!loggedIn) {
+            return { ok: false, reason: 'Higgsfield session expired — not logged in' };
+          }
+
+          return { ok: true };
+        })(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Preflight timed out after 15s')), TIMEOUT)),
+      ]);
+      console.log(`[PREFLIGHT] ${result.ok ? '✓ Session alive' : '✗ ' + result.reason}`);
+      return result;
+    } catch (err) {
+      const reason = err.message || 'Unknown preflight error';
+      console.warn(`[PREFLIGHT] ✗ ${reason}`);
+      return { ok: false, reason };
+    }
+  }
+
+  /**
    * Wait for generation to complete. Returns the CDN URL of our generated asset.
    *
    * STRATEGY (layered combo):

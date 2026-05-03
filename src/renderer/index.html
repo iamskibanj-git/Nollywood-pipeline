@@ -3550,6 +3550,21 @@
             updateStepper('verify', 'waiting_approval');
             showVerifyTable();
           }
+          if (event.gate === 'preflight-failed') {
+            // Higgsfield session check failed before generation starts
+            const reason = event.reason || 'Higgsfield session may be expired';
+            const msg = `⚠ Higgsfield Preflight Failed\n\n${reason}\n\nFix the session (log into Higgsfield in the automation browser), then click Resume.`;
+            updateLog(msg, 'warn');
+            updateStepper('portraits', 'waiting_approval');
+          }
+          if (event.gate === 'credits-exhausted') {
+            // Credit pre-check detected potential exhaustion
+            const d = event.detail || {};
+            const reason = d.reason || 'Higgsfield credits may be exhausted';
+            const cost = d.creditCost != null ? ` (cost per generation: ${d.creditCost} credits)` : '';
+            const msg = `⚠ Credits Exhausted\n\n${reason}${cost}\n\nAdd credits in Higgsfield, then click Resume.`;
+            updateLog(msg, 'warn');
+          }
           break;
 
         case 'cinematic-manual-element-checklist':
