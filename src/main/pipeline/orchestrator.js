@@ -6792,7 +6792,22 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
           // Multi-outfit resolution: check if this character has an outfit specified for this scene
           let elementName = null;
-          const outfitId = sceneOutfits[charId] || null;
+          let outfitId = sceneOutfits[charId] || null;
+          // Safety net: if direct lookup missed but sceneOutfits has entries,
+          // resolve via elemMap to catch residual key format mismatches
+          if (!outfitId && Object.keys(sceneOutfits).length > 0) {
+            const myElement = elemMap[charId] || elemMap[`@${charId}`];
+            if (myElement) {
+              for (const [oKey, oId] of Object.entries(sceneOutfits)) {
+                const keyElement = elemMap[oKey] || elemMap[`@${oKey}`];
+                if (keyElement && keyElement === myElement) {
+                  outfitId = oId;
+                  this.log(`[CINEMATIC] outfit key safety-net: "${charId}" matched via elemMap to key "${oKey}" → outfit ${oId}`);
+                  break;
+                }
+              }
+            }
+          }
           if (outfitId && outfitElemMap[charId] && outfitElemMap[charId][outfitId]) {
             // Direct outfit-aware resolution
             elementName = outfitElemMap[charId][outfitId];
@@ -7864,7 +7879,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           return match;
         }
         // Try outfit-aware resolution: baseName + scene outfit → full element name
-        const outfitId = sceneOutfits[nameLower] || null;
+        let outfitId = sceneOutfits[nameLower] || null;
+        // Safety net: resolve via elemMap to catch residual key format mismatches
+        if (!outfitId && Object.keys(sceneOutfits).length > 0) {
+          const myElement = elemMap[nameLower] || elemMap[`@${nameLower}`];
+          if (myElement) {
+            for (const [oKey, oId] of Object.entries(sceneOutfits)) {
+              const keyElement = elemMap[oKey] || elemMap[`@${oKey}`];
+              if (keyElement && keyElement === myElement) {
+                outfitId = oId;
+                this.log(`[CINEMATIC] outfit key safety-net: "${nameLower}" matched via elemMap to key "${oKey}" → outfit ${oId}`);
+                break;
+              }
+            }
+          }
+        }
         if (outfitId && outfitElemMap[nameLower] && outfitElemMap[nameLower][outfitId]) {
           const resolved = outfitElemMap[nameLower][outfitId];
           return `@${resolved}`;

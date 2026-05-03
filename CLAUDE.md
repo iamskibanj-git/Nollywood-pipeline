@@ -361,6 +361,23 @@ Files changed:
 - `src/main/pipeline/orchestrator.js` — both fixes
 - `CLAUDE.md` — this section
 
+**Session 30U — Outfit Key Normalization:**
+
+Multi-outfit character_outfits keys from the LLM can arrive in mismatched formats (character_N, @Prefix, mixed case) that don't match the orchestrator's element_name_hint keys. This causes silent outfit resolution failures — the character renders in default outfit instead of the scene-specific one.
+
+P1 — Script-engine normalization (script-engine.js, `_sanitizeKlingClipPrompts` ~line 1722):
+- **Fix**: Added key normalization block at scene level, before the clip-level loop. Lowercases keys, strips `@` prefix, resolves `character_N` → `element_name_hint` via the existing `charIndexMap`. Normalized keys replace original `character_outfits` object on the scene.
+
+P2 — Orchestrator safety net (orchestrator.js, two consumption points):
+- **Scene image gen** (~line 6795): if `sceneOutfits[charId]` misses but `sceneOutfits` has entries, iterates keys and resolves both sides through `elemMap` — if they land on the same element, uses that outfit. Logs when safety-net fires.
+- **Kling prompt transform** (~line 7882): identical safety-net pattern for `sceneOutfits[nameLower]` lookup in the `@ref` replacement regex callback.
+- Both safety nets are no-ops when script-engine normalization succeeds (expected 95%+ of cases). They catch residual mismatches from cached/old scripts or unexpected LLM key formats.
+
+Files changed:
+- `src/main/pipeline/script-engine.js` — key normalization in `_sanitizeKlingClipPrompts`
+- `src/main/pipeline/orchestrator.js` — two safety-net blocks at outfit consumption points
+- `CLAUDE.md` — this section
+
 ### Cinematic (Kling) — story-driven model
 
 Cinematic mode uses a **credit-first, story-driven** approach. The clip is the atomic cost unit, not the line. Structure is flexible — scenes, lines, and characters are unlimited and driven by what the story needs.
