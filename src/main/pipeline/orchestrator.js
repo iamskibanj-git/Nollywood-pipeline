@@ -7319,6 +7319,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     let skipped = 0;
     let failed = 0;
     let dialogueSkipped = 0;
+    let batchRejected = 0;
+    let batchApprovedIds = null; // Set<clipId> — populated after batch gate
     const clipGenStartTime = Date.now();
 
     // ── LAZY VISION VERIFICATION CACHE ──
@@ -7328,6 +7330,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     // Scenes whose clips are all done never trigger verification.
     const verifiedBlockingCache = {}; // "ch{N}_sc{M}" → { chars: corrected visionRefinedChars, hadCorrections: bool }
     const shotReconcileCache = {};   // clipId → true (reconciled shot directions for this clip)
+
+    // ── BATCH PROMPT-PREVIEW (M4) ──
+    // Two-phase clip processing: Phase 1 runs all prompt transforms and collects
+    // final prompts. Then a single batch gate lets the operator review/reject
+    // clips before ANY generation starts. Phase 2 generates only approved clips.
+    const batchPreviewData = [];       // { clipId, clipIndex, clipLabel, prompt, startFramePath, durationSeconds }[]
+    const cachedFinalPrompts = {};     // clipId → finalMultiShotPrompt (fully transformed)
+    const cachedClipGenData = {};      // clipId → { clipAsset, outputPath, startFramePath, startFrameGenId, effectiveDuration, validElementNames, shotReconciled, label }
+    let batchPhase = 'collect';        // 'collect' → 'generate'
 
     for (let i = 0; i < allKlingClips.length; i++) {
       const item = allKlingClips[i];
@@ -8077,28 +8088,42 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       }
 
-      // ── PRE-GEN PROMPT PREVIEW GATE (TEMPORARY — remove when full production starts) ──
-      // Show the final multi_shot_prompt to the user before Playwright submits it
-      // to Kling. If the prompt looks wrong (bad blocking, weird phrasing), user
-      // can stop here without burning ~18 credits on a bad clip.
-      this.log(`[CINEMATIC] Prompt preview gate for ${clipId}`);
-      this.emit({
-        type: 'waiting',
-        gate: 'prompt-preview',
-        clipId,
-        clipIndex: i,
-        clipTotal: allKlingClips.length,
-        clipLabel: label,
-        prompt: finalMultiShotPrompt,
-        startFramePath,
-        durationSeconds: effectiveDuration,
-      });
-      const preGenDecision = await this.waitForApproval('prompt-preview');
-      if (preGenDecision === 'stop') {
-        this.log(`[CINEMATIC] User stopped before generating ${clipId} — skipping remaining clips`);
-        break;
+      // ── BATCH PROMPT-PREVIEW: COLLECTION PHASE ──
+      // In 'collect' phase, cache the fully-transformed prompt and metadata,
+      // then skip to the next clip. Generation happens in a second loop after
+      // the operator reviews the full batch.
+      if (batchPhase === 'collect') {
+        cachedFinalPrompts[clipId] = finalMultiShotPrompt;
+        cachedClipGenData[clipId] = {
+          clipAsset, outputPath, startFramePath, startFrameGenId,
+          effectiveDuration, validElementNames, label,
+          shotReconciled: shotReconcileCache[clipId] === true,
+        };
+        batchPreviewData.push({
+          clipId,
+          clipIndex: i,
+          clipTotal: allKlingClips.length,
+          clipLabel: label,
+          prompt: finalMultiShotPrompt,
+          startFramePath,
+          durationSeconds: effectiveDuration,
+        });
+        this.log(`[CINEMATIC] Collected prompt preview for ${clipId} (${batchPreviewData.length}/${allKlingClips.length - skipped - dialogueSkipped})`);
+        continue; // skip generation — will run in phase 2
       }
-      this.log(`[CINEMATIC] Prompt approved for ${clipId} — proceeding to Kling generation`);
+
+      // ── BATCH PROMPT-PREVIEW: GENERATION PHASE ──
+      // In 'generate' phase, use the cached prompt and skip rejected clips.
+      // batchApprovedIds is set between phases (see batch gate below the loop).
+      if (batchApprovedIds && !batchApprovedIds.has(clipId)) {
+        this.log(`[CINEMATIC] ${clipId} rejected in batch review — skipping generation`);
+        batchRejected++;
+        continue;
+      }
+      if (cachedFinalPrompts[clipId]) {
+        finalMultiShotPrompt = cachedFinalPrompts[clipId];
+      }
+      this.log(`[CINEMATIC] Generating approved clip ${clipId}`);
 
       try {
         if (clipAsset) {
@@ -8493,6 +8518,245 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         if (clipAsset) db.markAssetFailed(clipAsset.id, e.message);
         failed++;
       }
+    }
+
+    // ── BATCH PROMPT-PREVIEW GATE (M4) ──
+    // After Phase 1 (collect), show the operator ALL clip prompts in one batch.
+    // Operator can approve all, reject specific clips, or stop entirely.
+    // Phase 2 (generate) then loops over only the approved clips.
+    if (batchPhase === 'collect' && batchPreviewData.length > 0) {
+      this.log(`[CINEMATIC] Batch prompt preview: ${batchPreviewData.length} clips ready for review`);
+      this.emit({
+        type: 'waiting',
+        gate: 'prompt-preview-batch',
+        clips: batchPreviewData,
+        totalClips: allKlingClips.length,
+        pendingClips: batchPreviewData.length,
+        skippedClips: skipped + dialogueSkipped,
+      });
+      const batchDecision = await this.waitForApproval('prompt-preview-batch');
+
+      if (batchDecision === 'stop') {
+        this.log(`[CINEMATIC] Operator stopped at batch prompt review — no clips generated`);
+      } else {
+        // batchDecision can be:
+        // - 'approve' (string) → approve all
+        // - { approved: ['clipId1', ...] } → selective approval
+        if (typeof batchDecision === 'object' && batchDecision.approved) {
+          batchApprovedIds = new Set(batchDecision.approved);
+          this.log(`[CINEMATIC] Batch review: ${batchApprovedIds.size}/${batchPreviewData.length} clips approved`);
+        } else {
+          // Default: approve all
+          batchApprovedIds = new Set(batchPreviewData.map(c => c.clipId));
+          this.log(`[CINEMATIC] Batch review: all ${batchPreviewData.length} clips approved`);
+        }
+
+        // ── Phase 2: Generation loop ──
+        // Re-run the clip loop in 'generate' mode. Skip/done checks re-fire
+        // (same results). Transform code is skipped via cachedFinalPrompts.
+        // Only approved clips proceed to Kling generation.
+        batchPhase = 'generate';
+        generated = 0;
+        failed = 0;
+        // skipped/dialogueSkipped stay — they counted correctly in Phase 1
+
+        this.log(`[CINEMATIC] Starting generation phase: ${batchApprovedIds.size} approved clips`);
+
+        for (let i = 0; i < allKlingClips.length; i++) {
+          const item = allKlingClips[i];
+          let { chapter, scene, clipDef, startFramePath, startFrameGenId } = item;
+          const clipId = clipDef.clip_id || `ch${chapter}_sc${scene}_c${i + 1}`;
+          const cached = cachedClipGenData[clipId];
+
+          // Skip non-pending clips (same as Phase 1)
+          if (skippedByClipId[clipId] || doneByClipId[clipId]) continue;
+          const expectedOutputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
+          if (fs.existsSync(expectedOutputPath)) {
+            const stat = fs.statSync(expectedOutputPath);
+            if (stat.size > 50000) continue;
+          }
+
+          // Skip rejected clips
+          if (!batchApprovedIds.has(clipId)) {
+            this.log(`[CINEMATIC] ${clipId} rejected in batch review — skipping`);
+            batchRejected++;
+            continue;
+          }
+
+          if (!cached) {
+            this.log(`[CINEMATIC] ${clipId}: no cached data — skipping (should not happen)`, 'warn');
+            failed++;
+            continue;
+          }
+
+          const label = cached.label;
+          let finalMultiShotPrompt = cachedFinalPrompts[clipId];
+          let clipAsset = cached.clipAsset;
+          const outputPath = cached.outputPath;
+          const effectiveDuration = cached.effectiveDuration;
+          const validElementNames = cached.validElementNames;
+          startFramePath = cached.startFramePath;
+          startFrameGenId = cached.startFrameGenId;
+
+          // Emit progress
+          {
+            const processed = generated + failed + batchRejected;
+            const elapsed = (Date.now() - clipGenStartTime) / 1000;
+            const perClip = generated > 0 ? elapsed / generated : 0;
+            const remaining = generated > 0 ? Math.round(perClip * (batchApprovedIds.size - generated)) : null;
+            this.emit({
+              type: 'progress', stage: 'cinematic-video',
+              current: processed + 1, total: batchApprovedIds.size,
+              generated, skipped: batchRejected, failed,
+              clipId, clipLabel: label,
+              elapsed: Math.round(elapsed), eta: remaining,
+            });
+          }
+
+          try {
+            if (clipAsset) {
+              const promptPayload = {
+                prompt: finalMultiShotPrompt,
+                shot_directions_reconciled: cached.shotReconciled,
+              };
+              db.markAssetGenerating(clipAsset.id, JSON.stringify(promptPayload));
+            }
+
+            // Clean context between clips
+            if (generated > 0) {
+              this.log(`[CINEMATIC] Recreating browser context before ${clipId}...`);
+              try {
+                await this.automation.recreateContext();
+              } catch (ctxErr) {
+                this.log(`[CINEMATIC] Context recreate failed: ${ctxErr.message.split('\n')[0]} — proceeding anyway`, 'warn');
+              }
+            }
+
+            this.log(`[CINEMATIC] Generating ${label}`);
+
+            const result = await kling.generateClip({
+              startFramePath,
+              startFrameGenId,
+              multiShotPrompt: finalMultiShotPrompt,
+              durationSeconds: effectiveDuration,
+              outputPath,
+              validElements: validElementNames,
+              onGenClicked: (creditCost) => {
+                if (clipAsset) db.markAssetGenClicked(clipAsset.id, creditCost);
+              },
+            });
+
+            if (clipAsset) {
+              db.markAssetDone(clipAsset.id, result.path, {
+                model: result.model,
+                sourceGenId: result.sourceGenId,
+                cdnUrl: result.cdnUrl,
+              });
+            }
+            generated++;
+            this.state.videoClips = this.state.videoClips || [];
+            this.state.videoClips.push({
+              chapter, scene, clipId, path: result.path, status: 'complete',
+            });
+            this.emit({ type: 'clip-complete', index: i, path: result.path });
+
+            // Per-clip approval gate (credit-saving)
+            if (i < allKlingClips.length - 1) {
+              this.log(`[CINEMATIC] Waiting for clip approval: ${clipId} (${generated}/${batchApprovedIds.size})`);
+              this.emit({
+                type: 'waiting',
+                gate: 'clip-review',
+                clipId,
+                clipPath: result.path,
+                clipIndex: i,
+                clipTotal: batchApprovedIds.size,
+                clipLabel: label,
+              });
+              const decision = await this.waitForApproval('clip-review');
+              if (decision === 'stop') {
+                this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
+                break;
+              }
+              this.log(`[CINEMATIC] Clip ${clipId} approved — continuing to next`);
+            }
+          } catch (e) {
+            this.log(`[CINEMATIC] ${clipId} failed: ${e.message}`, 'warn');
+
+            // SESSION EXPIRED: pause, relaunch, wait for login
+            if (e.message && e.message.includes('SESSION_EXPIRED')) {
+              this.log('[CINEMATIC] Session expired — pausing for re-authentication...', 'warn');
+              this.paused = true;
+              this.state.status = 'session_expired';
+              this.emit({ type: 'session-expired', message: e.message });
+              if (this.automation) {
+                try { await this.automation.close(); } catch (_) {}
+                await this.automation.ensureBrowser();
+                await this.automation.page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                this.log('Fresh browser opened — please log into Higgsfield, then click Resume.');
+              }
+              await new Promise((resolve) => { this._pauseResolver = resolve; });
+              if (this.cancelled) return;
+              this.paused = false;
+              this.state.status = 'running';
+              this.log('[CINEMATIC] Resumed after re-authentication — retrying clip...');
+              i--;
+              continue;
+            }
+
+            // Simple retry (no recovery sweep in batch mode — keeps generation moving)
+            const isPreGen = e.message.includes('[PRE-GEN]');
+            const isBrowserDead = e.message.includes('closed') || e.message.includes('crashed') ||
+                                  e.message.includes('disconnected') || e.message.includes('Target');
+            if ((isPreGen || isBrowserDead) && !this.cancelled) {
+              this.log(`[CINEMATIC] ${clipId}: retrying generation (attempt 2/2)...`);
+              try {
+                if (clipAsset) {
+                  db.markAssetGenerating(clipAsset.id, JSON.stringify({
+                    prompt: finalMultiShotPrompt,
+                    shot_directions_reconciled: cached.shotReconciled,
+                  }));
+                }
+                try { await this.automation.recreateContext(); } catch (_) {}
+                const retryResult = await kling.generateClip({
+                  startFramePath,
+                  startFrameGenId,
+                  multiShotPrompt: finalMultiShotPrompt,
+                  durationSeconds: effectiveDuration,
+                  outputPath,
+                  validElements: validElementNames,
+                  onGenClicked: (creditCost) => {
+                    if (clipAsset) db.markAssetGenClicked(clipAsset.id, creditCost);
+                  },
+                });
+                if (clipAsset) {
+                  db.markAssetDone(clipAsset.id, retryResult.path, {
+                    model: retryResult.model,
+                    sourceGenId: retryResult.sourceGenId,
+                    cdnUrl: retryResult.cdnUrl,
+                  });
+                }
+                generated++;
+                this.state.videoClips = this.state.videoClips || [];
+                this.state.videoClips.push({
+                  chapter, scene, clipId, path: retryResult.path, status: 'complete',
+                });
+                this.emit({ type: 'clip-complete', index: i, path: retryResult.path });
+                this.log(`[CINEMATIC] ✓ ${clipId} succeeded on retry`);
+                continue;
+              } catch (retryErr) {
+                this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
+              }
+            }
+
+            if (clipAsset) db.markAssetFailed(clipAsset.id, e.message);
+            failed++;
+          }
+        }
+
+        this.log(`[CINEMATIC] Batch generation complete: ${generated} generated, ${batchRejected} rejected, ${failed} failed`);
+      }
+    } else if (batchPhase === 'collect' && batchPreviewData.length === 0) {
+      this.log(`[CINEMATIC] No pending clips to preview — all clips already done or skipped`);
     }
 
     // Emit final progress summary
@@ -9999,6 +10263,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       delete this._approvalResolvers['prompt-preview'];
     }
     this.log(`Prompt preview decision: ${decision}`);
+  }
+
+  /**
+   * Batch prompt-preview gate (M4). Operator reviews all clip prompts at once.
+   * @param {'approve'|'stop'|{approved: string[]}} decision
+   *   - 'approve' → approve all clips
+   *   - 'stop' → cancel entire generation run
+   *   - { approved: ['clipId1', ...] } → selective approval (omitted = rejected)
+   */
+  approvePromptPreviewBatch(decision) {
+    if (this._approvalResolvers['prompt-preview-batch']) {
+      this._approvalResolvers['prompt-preview-batch'](decision);
+      delete this._approvalResolvers['prompt-preview-batch'];
+    }
+    this.log(`Batch prompt preview decision: ${typeof decision === 'string' ? decision : `${(decision.approved || []).length} approved`}`);
   }
 
   /**
