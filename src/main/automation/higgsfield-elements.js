@@ -1,68 +1,63 @@
 /**
- * higgsfield-elements.js — Phase 2 of the cinematic workflow.
+ * Higgsfield Elements — @ Toolbar Button Modal Overlay Automation
  *
- * Automates Higgsfield's Elements panel: list existing elements and create new
- * Character / Location / Prop elements programmatically. These elements provide
- * the persistent visual + voice identity lock that makes the cinematic pipeline's
- * multi-shot Kling generations consistent across cuts.
+ * As of May 2026, Higgsfield removed the Elements tab/panel from Cinema Studio.
+ * The @ toolbar button in the bottom toolbar is now the SOLE entry point for
+ * element creation and browsing.
  *
- * DOM structure (verified via live Playwright DevTools, April 2026):
+ * ── UI Flow (May 2026) ──
  *
- *   TOP CENTER (only visible inside a project view):
- *     <div class="flex items-center gap-1 rounded-[10px] bg-white/5 p-1">
- *       <button class="button button-sm ...">Generations</button>
- *       <button class="button button-sm ...">Elements</button>   ← PREFERRED entry
- *     </div>
- *     NOTE: These tabs do NOT appear on "My Generations" default view.
- *           Must select/create a project first.
+ * 1. @ toolbar button (small no-text SVG button in bottom toolbar, after the
+ *    "1x1" grid button, at y > vh * 0.65) opens a modal overlay.
  *
- *   BOTTOM TOOLBAR @ BUTTON (alternate entry to Elements):
- *     After [Cinematic Cameras] [-1/4+] [16:9] [2K] [1x1]:
- *       button (34x32, no text, SVG with @ icon, y ≈ 779)
- *     Clicking this also opens the Elements panel.
+ * 2. Elements modal overlay contains:
+ *    - "Elements" heading at top
+ *    - Search bar
+ *    - X close button (top-right corner)
+ *    - Category sidebar: All / Pinned / Characters / Locations / Props
+ *    - "Create new" card (first position, has + icon)
+ *    - Scrollable grid of existing element cards (thumbnail + name label)
  *
- *   PROMPT TEXTBOX (Lexical editor):
- *     div[role="textbox"][contenteditable="true"]
- *     This is a Lexical editor — NOT a standard input/textarea.
- *     Use document.execCommand('insertText') to type text.
- *     Use keyboard.type() ONLY for '@' to trigger autocomplete dropdown.
- *     DO NOT walk React fibers — causes cross-origin crash.
+ * 3. Clicking "Create new" opens a dialog form inside the modal:
+ *    - Back arrow (<) — CRITICAL: closes ENTIRE modal, does NOT go back to list
+ *    - "New element" heading
+ *    - Upload images zone (hidden input[type="file"], 1x1px, multiple, accepts
+ *      png/jpeg/mp4)
+ *    - Element name input (placeholder="reference-name")
+ *    - Category combobox (Auto/Character/Location/Prop)
+ *    - Advanced settings toggle → Description textarea + Workspace combobox
+ *    - Cancel + Save buttons
  *
- *   ELEMENTS PANEL (after clicking Elements tab):
- *     "Project elements" header
- *     "Personal elements" collapsible section
- *       Element list: div.min-w-0.flex-1.flex.flex-col.gap-1 containers
- *         <p> name (e.g., "solomon")
- *         <p> category (e.g., "Character") or description text
- *     Grid card: "Create new" card with + icon (the entry point for new elements)
+ * 4. After Save, the back arrow closes the entire modal. To verify element
+ *    creation, must re-open the @ modal and check the elements grid.
  *
- *   ELEMENTS GRID (after the panel opens):
- *     Shows existing elements as thumbnail cards + a "Create new" card with + icon.
- *     Left sidebar filter: All | Pinned | Characters | Locations
+ * ── Key Differences from Old Elements Tab ──
  *
- *   ELEMENT CREATION FORM (after clicking "Create new"):
- *     Upload area: input[type="file"].sr-only (accept: image/png,jpeg,video/mp4; multiple)
- *     Name: input[type="text"][placeholder="reference-name"] (@ prefix shown in UI)
- *     Category: button[role="combobox"] → div[role="option"]: Auto | Character | Location | Prop
- *       NOTE: Singular "Character" / "Location" / "Prop" (NOT plural)
- *     "Advanced settings" toggle button → expands:
- *       Description: textarea[placeholder="Describe how to use this reference when it's mentioned"]
- *     Submit: button with text "Save" (NOT "Create")
+ * - No more "Elements" / "Generations" top tabs — they don't exist
+ * - Entry point is @ toolbar button (isTrusted click required — Radix UI)
+ * - Elements live in a modal overlay, not a persistent panel
+ * - "Create new" is a card in the grid, not a "Create Element" button
+ * - Form has Cancel + Save buttons (old form had no Cancel)
+ * - Back arrow from form closes entire modal (not back-to-list)
+ * - Verification after save requires re-opening the @ modal
  *
- * ⚠️ DESIGN INTENT: this automation is the PRIMARY path. The manual checklist
- * surfaced by the orchestrator when this fails is a DIAGNOSTIC FALLBACK, not
- * a routine UX. Session 8 first cinematic run showed all 3 character elements
- * falling through to manual — that's a regression to fix, not normal flow.
+ * ── isTrusted Requirement ──
+ *
+ * Cinema Studio uses Radix UI components that check event.isTrusted.
+ * All toolbar button clicks MUST use page.mouse.click(x, y) which goes
+ * through CDP Input.dispatchMouseEvent, producing isTrusted: true events.
+ * el.click() and dispatchEvent() produce isTrusted: false and are silently
+ * ignored by Radix handlers.
  */
 
-const path = require('path');
+'use strict';
 
 class HiggsfieldElements {
   /**
-   * @param {Object} opts
-   * @param {HiggsFieldAutomation} opts.automation - shared Playwright instance
-   * @param {Function} [opts.logger] - callback for log messages
-   * @param {Object} [opts.cinemaStudio] - CinemaStudioAutomation instance (for project management)
+   * @param {{ automation: object, logger?: Function, cinemaStudio?: object }} opts
+   *   automation — HiggsFieldAutomation instance (provides getPage(), recreateContext(), etc.)
+   *   logger — optional logging function
+   *   cinemaStudio — optional CinemaStudioAutomation instance
    */
   constructor({ automation, logger, cinemaStudio }) {
     this.automation = automation;
@@ -71,631 +66,545 @@ class HiggsfieldElements {
     this._cache = null;
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // NAVIGATION — OPEN ELEMENTS PANEL
-  // ═══════════════════════════════════════════════════════════
+  // ───────────────────────────────────────────────────────────────────
+  //  Name normalization + caching
+  // ───────────────────────────────────────────────────────────────────
 
-  /**
-   * Navigate to the Elements panel via the "Elements" tab (top center,
-   * next to "Generations"). This is only visible inside a project view.
-   *
-   * The Elements tab shows:
-   *   - Left: "Personal elements" list with existing elements
-   *   - Right: "Create Element" button + "Share elements inside project" area
-   *
-   * NOTE: The @ button in the bottom toolbar is NOT used for creation.
-   * Element existence is checked via the Elements panel scrape.
-   */
-  async _openElementsPanel() {
-    if (typeof this.automation.ensureBrowser === 'function') {
-      await this.automation.ensureBrowser();
-    }
-    const page = this.automation.page;
-    if (!page) throw new Error('Playwright page not ready even after ensureBrowser()');
-
-    await this._dismissOverlays(page);
-
-    // Navigate to Cinema Studio if not already there
-    if (!page.url().includes('/cinema-studio')) {
-      this.log('Navigating to Cinema Studio...');
-      await page.goto('https://higgsfield.ai/cinema-studio', { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(3000);
-    }
-
-    // Ensure we're in a project view (Elements tab only appears inside a project)
-    // If cinemaStudio instance has a project ID, navigate to it
-    if (this.cinemaStudio && this.cinemaStudio._projectId) {
-      const url = page.url();
-      if (!url.includes(this.cinemaStudio._projectId)) {
-        this.log(`Navigating to project ${this.cinemaStudio._projectId}...`);
-        await page.goto(`https://higgsfield.ai/cinema-studio?cinematic-project-id=${this.cinemaStudio._projectId}`, { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(3000);
-      }
-    }
-
-    // ── Click the "Elements" tab (top center, next to "Generations") ──
-    // Retry up to 4 times with waits — the tab may not be rendered yet.
-    let tabClicked = false;
-
-    for (let attempt = 0; attempt < 4 && !tabClicked; attempt++) {
-      if (attempt > 0) {
-        const waitMs = 2000 + attempt * 1000;
-        this.log(`Elements tab not found — waiting ${waitMs}ms (attempt ${attempt + 1}/4)...`);
-        await page.waitForTimeout(waitMs);
-      }
-
-      try {
-        tabClicked = await page.evaluate(() => {
-          const btns = document.querySelectorAll('button');
-          const vh = window.innerHeight;
-
-          // The Generations/Elements tabs are in the top area (y < 15% of viewport)
-          for (const b of btns) {
-            const r = b.getBoundingClientRect();
-            const text = b.textContent?.trim();
-            if (text === 'Elements' && r.y < vh * 0.15 && r.y > 0 && r.width > 0) {
-              b.click();
-              return true;
-            }
-          }
-
-          // Broader: any "Elements" button in top 20%
-          for (const b of btns) {
-            const r = b.getBoundingClientRect();
-            const text = b.textContent?.trim();
-            if (text === 'Elements' && r.y < vh * 0.20 && r.width > 0) {
-              b.click();
-              return true;
-            }
-          }
-
-          return false;
-        });
-      } catch (e) {
-        this.log(`Elements tab click failed (attempt ${attempt + 1}): ${e.message.split('\n')[0]}`);
-      }
-    }
-
-    if (!tabClicked) {
-      // Fallback: try clicking a project first (Elements tab only shows in project view)
-      this.log('Elements tab not found — trying to select a project first...');
-      const clicked = await this._clickFirstProject(page);
-      if (clicked) {
-        await page.waitForTimeout(2500);
-        // Retry Elements tab click
-        tabClicked = await page.evaluate(() => {
-          const btns = document.querySelectorAll('button');
-          for (const b of btns) {
-            const r = b.getBoundingClientRect();
-            if (b.textContent?.trim() === 'Elements' && r.y < window.innerHeight * 0.20 && r.width > 0) {
-              b.click();
-              return true;
-            }
-          }
-          return false;
-        }).catch(() => false);
-      }
-    }
-
-    if (tabClicked) {
-      this.log('Elements tab clicked');
-    } else {
-      throw new Error('Could not find "Elements" tab — must be in a project view');
-    }
-
-    await page.waitForTimeout(2000);
-
-    // ── Confirm panel is showing elements view ──
-    const confirmed = await page.evaluate(() => {
-      const allText = document.body.innerText || '';
-      return allText.includes('Personal elements') ||
-             allText.includes('Project elements') ||
-             allText.includes('Create Element') ||
-             allText.includes('Share elements');
-    }).catch(() => false);
-
-    if (!confirmed) {
-      await page.waitForTimeout(2000);
-      const retryConfirm = await page.evaluate(() => {
-        const allText = document.body.innerText || '';
-        return allText.includes('Personal elements') ||
-               allText.includes('Project elements') ||
-               allText.includes('Create Element') ||
-               allText.includes('Share elements');
-      }).catch(() => false);
-      if (!retryConfirm) {
-        throw new Error('Elements panel did not open after clicking Elements tab');
-      }
-    }
-
-    this.log('Elements panel open (via Elements tab)');
+  /** Normalize an element name for comparison: lowercase, trim, strip leading @. */
+  _normalizeName(name) {
+    return (name || '').toLowerCase().trim().replace(/^@+/, '');
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // NAVIGATION HELPERS
-  // ═══════════════════════════════════════════════════════════
-
-  /**
-   * Click the first project in the left sidebar.
-   */
-  async _clickFirstProject(page) {
-    return page.evaluate(() => {
-      const btns = document.querySelectorAll('button');
-      for (const b of btns) {
-        const r = b.getBoundingClientRect();
-        const text = b.textContent?.trim() || '';
-        // Sidebar project buttons: x < 80, not "My Generations" or "New project"
-        const vh = window.innerHeight;
-        if (r.x < 80 && r.y > vh * 0.08 && r.y < vh * 0.35 && r.width > 0 &&
-            !text.startsWith('My Generations') && !text.startsWith('New project') &&
-            text.includes('asset')) {
-          b.click();
-          return true;
-        }
-      }
-      return false;
-    }).catch(() => false);
-  }
-
-  /**
-   * Click "New project" in the left sidebar.
-   */
-  async _createNewProject(page) {
-    return page.evaluate(() => {
-      const btns = document.querySelectorAll('button');
-      for (const b of btns) {
-        const r = b.getBoundingClientRect();
-        if (r.x < 80 && b.textContent?.trim().includes('New project') && r.width > 0) {
-          b.click();
-          return true;
-        }
-      }
-      // Fallback: click "+" at sidebar bottom
-      let best = null, bestY = 0;
-      for (const b of btns) {
-        const r = b.getBoundingClientRect();
-        if (r.x < 80 && r.y > bestY && r.width > 0 && r.width < 60) {
-          best = b; bestY = r.y;
-        }
-      }
-      if (best) { best.click(); return true; }
-      return false;
-    }).catch(() => false);
-  }
-
-  async _dismissOverlays(page) {
-    if (!page) return;
-    try {
-      const underlays = await page.locator('[data-testid="underlay"]').all();
-      for (const u of underlays) {
-        const visible = await u.isVisible({ timeout: 300 }).catch(() => false);
-        if (visible) {
-          await u.click({ force: true, timeout: 1000 }).catch(() => {});
-          this.log('Dismissed stale underlay');
-        }
-      }
-    } catch (_) {}
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(150);
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(150);
-  }
-
-  /**
-   * Store the project name so _openElementsPanel can pass it to
-   * CinemaStudioAutomation.ensureProject() if needed.
-   */
-  setProjectName(name) {
-    this._projectName = name;
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // LIST EXISTING ELEMENTS
-  // ═══════════════════════════════════════════════════════════
-
-  /**
-   * List all existing elements. Returns [{ name, category }].
-   *
-   * DOM: elements are in div.min-w-0.flex-1.flex.flex-col.gap-1 containers,
-   * each with <p> tags: first = name, second = category or description.
-   */
-  async listExistingElements() {
-    if (this._cache) return this._cache;
-
-    await this._openElementsPanel();
-    const page = this.automation.page;
-
-    // Wait a beat for the element list to render
-    await page.waitForTimeout(1500);
-
-    // Scrape element names from the Elements tab list view.
-    // The Elements tab shows "Personal elements" with each element in a row:
-    //   div.min-w-0.flex-1.flex.flex-col.gap-1
-    //     <p> element_name (e.g., "mama_agbado")
-    //     <p> category (e.g., "Character")
-    //
-    // IMPORTANT: Reject generic UI labels aggressively. The old scraper was
-    // picking up "Image", "Video", "Audio", "New", "Edit", "Character" etc.
-    const names = await page.evaluate(() => {
-      const results = [];
-      const seen = new Set();
-
-      // Exhaustive blocklist of UI labels that are NOT element names
-      const UI_LABELS = new Set([
-        'all', 'pinned', 'characters', 'locations', 'props', 'create new',
-        'create element', 'search...', 'personal elements', 'project elements',
-        'visible only to you', 'share to', 'add to project', 'share elements',
-        'share elements inside project', 'elements', 'generations',
-        'image', 'video', 'audio', 'new', 'edit', 'character', 'location',
-        'prop', 'auto', 'delete', 'rename', 'duplicate', 'save', 'cancel',
-        'close', 'back', 'next', 'previous', 'settings', 'advanced settings',
-        'upload images', 'reference-name', 'description', 'category',
-        'my generations', 'new project', 'cinematic cameras', 'cinema studio',
-        'generate', 'ai director', 'text', 'members', 'credits',
-      ]);
-
-      // Strategy A: Structured list view — div.min-w-0 containers with <p> tags
-      const containers = document.querySelectorAll('div.min-w-0.flex-1.flex.flex-col.gap-1');
-      for (const c of containers) {
-        const paras = [...c.querySelectorAll('p')];
-        if (paras.length >= 1) {
-          const name = paras[0]?.textContent?.trim();
-          const cat = paras[1]?.textContent?.trim();
-          if (!name || name.length > 50) continue;
-          if (UI_LABELS.has(name.toLowerCase())) continue;
-          if (name.includes('Visible only') || name.includes('Share to')) continue;
-          const isCat = cat && ['Character', 'Location', 'Prop', 'Auto'].includes(cat);
-          if (!seen.has(name.toLowerCase())) {
-            seen.add(name.toLowerCase());
-            results.push({ name, category: isCat ? cat : null });
-          }
-        }
-      }
-
-      // Strategy B: Look for elements that have an image thumbnail + name label
-      // This handles grid/card layouts where names appear below thumbnails
-      if (results.length === 0) {
-        // Find containers that have BOTH an <img> and a short text label
-        const cards = document.querySelectorAll('div, li, article');
-        for (const card of cards) {
-          const r = card.getBoundingClientRect();
-          // Cards are typically 80-250px
-          if (r.width < 60 || r.width > 300 || r.height < 60 || r.height > 300) continue;
-          const hasImg = card.querySelector('img');
-          if (!hasImg) continue;
-
-          // Get the text that's NOT inside nested complex elements
-          const textNodes = [];
-          for (const child of card.querySelectorAll('p, span')) {
-            const text = child.textContent?.trim();
-            if (text && text.length > 1 && text.length < 50 && child.children.length <= 1) {
-              textNodes.push(text);
-            }
-          }
-
-          for (const text of textNodes) {
-            const clean = text.replace(/\.{3}$/, '');
-            if (!clean || UI_LABELS.has(clean.toLowerCase())) continue;
-            if (!seen.has(clean.toLowerCase())) {
-              seen.add(clean.toLowerCase());
-              results.push({ name: clean, category: null });
-            }
-          }
-        }
-      }
-
-      return results;
-    }).catch(() => []);
-
-    // DON'T close the Elements tab — it stays visible as a tab,
-    // not a modal. Just switch back to Generations if needed later.
-    this._cache = names;
-    this.log(`Found ${this._cache.length} existing element(s): ${this._cache.slice(0, 8).map(e => e.name).join(', ')}${this._cache.length > 8 ? '...' : ''}`);
-    return this._cache;
-  }
-
+  /** Clear the cached element list so the next call re-scrapes. */
   invalidateCache() {
     this._cache = null;
   }
 
   /**
-   * Check whether an element with the given name already exists.
-   * Case-insensitive match, leading @ normalized.
-   *
-   * Uses panel scrape (listExistingElements) to check the Elements panel.
-   * The authoritative check is the @ button click in Cinema Studio's toolbar
-   * (Phase 1b of generateSceneImage) — that runs separately before prompt typing.
+   * Check if an element with the given name exists.
+   * Uses cache if available; otherwise scrapes via listExistingElements().
+   * @param {string} name
+   * @returns {Promise<boolean>}
    */
   async elementExists(name) {
     const normalized = this._normalizeName(name);
-
-    try {
-      const existing = await this.listExistingElements();
-      if (existing.some(e => this._normalizeName(e.name) === normalized)) {
-        return true;
-      }
-    } catch (_) {}
-
-    return false;
+    if (!this._cache) {
+      this._cache = await this.listExistingElements();
+    }
+    return this._cache.some(el => this._normalizeName(el.name) === normalized);
   }
 
-  _normalizeName(name) {
-    return (name || '').toLowerCase().trim().replace(/^@+/, '');
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // ELEMENT CREATION
-  // ═══════════════════════════════════════════════════════════
+  // ───────────────────────────────────────────────────────────────────
+  //  @ Toolbar Button — Modal Open / Close
+  // ───────────────────────────────────────────────────────────────────
 
   /**
-   * Category map: our internal names → Higgsfield's singular UI labels.
-   */
-  static CATEGORY_MAP = {
-    'Characters': 'Character',
-    'Character': 'Character',
-    'Locations': 'Location',
-    'Location': 'Location',
-    'Props': 'Prop',
-    'Prop': 'Prop',
-  };
-
-  /**
-   * Create an element. Shared flow for Character/Location/Prop.
+   * Open the elements modal by clicking the @ toolbar button.
    *
-   * Steps:
-   *   1. Open Elements panel
-   *   2. Click "Create Element" button
-   *   3. Upload images via hidden file input
-   *   4. Fill element name
-   *   5. Set category via combobox dropdown
-   *   6. Expand "Advanced settings" and fill description
-   *   7. Click "Save"
-   *   8. Verify by re-listing
+   * The @ button is a small no-text SVG button in the bottom toolbar,
+   * positioned after the "1x1" grid button. It is at y > vh * 0.65.
+   * Must use page.mouse.click() for isTrusted events (Radix UI).
+   *
+   * Confirmation signal: "Elements" heading visible in the modal overlay.
+   *
+   * @returns {Promise<void>}
+   * @throws if @ button not found or modal doesn't open
    */
-  async _createElement({ name, imagePaths, description, category }) {
-    const normalized = this._normalizeName(name);
-    if (!normalized) throw new Error('_createElement: name required');
-    if (!imagePaths || imagePaths.length === 0) throw new Error('_createElement: imagePaths required');
+  async _openElementsModal() {
+    const page = this.automation.getPage();
+    this.log('Opening elements modal via @ toolbar button...');
 
-    // Map category to Higgsfield's singular form
-    const uiCategory = HiggsfieldElements.CATEGORY_MAP[category] || 'Auto';
+    // Find the @ button: no-text SVG button in bottom toolbar (y > 65% vh)
+    const btnInfo = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const yThreshold = vh * 0.65;
+      const candidates = [];
 
-    // Idempotency: skip if already exists
-    if (await this.elementExists(normalized)) {
-      this.log(`Element @${normalized} already exists — skipping`);
-      return { created: false, name: normalized, skipped: 'already-exists' };
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) continue;
+        if (rect.y < yThreshold) continue; // must be in bottom toolbar
+
+        const text = btn.textContent?.trim() || '';
+        const hasSvg = !!btn.querySelector('svg');
+
+        // @ button is a small no-text button with SVG, width 20-60px
+        if (!text && hasSvg && rect.width >= 15 && rect.width <= 80) {
+          candidates.push({
+            cx: rect.x + rect.width / 2,
+            cy: rect.y + rect.height / 2,
+            w: rect.width,
+            x: rect.x,
+            y: rect.y,
+          });
+        }
+      }
+
+      if (candidates.length === 0) return null;
+
+      // The @ button is positioned after the 1x1 grid button.
+      // Among no-text SVG buttons in the toolbar, pick the one with the
+      // highest x position that isn't the GENERATE button area (which is
+      // typically the rightmost and much wider).
+      // Sort by x position descending, pick the best match.
+      candidates.sort((a, b) => b.x - a.x);
+
+      // Filter out candidates that are too wide (GENERATE area) or too far right
+      const filtered = candidates.filter(c => c.w <= 60);
+      if (filtered.length === 0) return candidates[0]; // fallback
+
+      // The @ button should be the rightmost small no-text SVG button
+      // before the camera/model selector and GENERATE button
+      return filtered[0];
+    });
+
+    if (!btnInfo) {
+      throw new Error('Could not find @ toolbar button in bottom toolbar');
     }
 
-    await this._openElementsPanel();
-    const page = this.automation.page;
+    this.log(`Found @ button at (${Math.round(btnInfo.cx)}, ${Math.round(btnInfo.cy)}), w=${Math.round(btnInfo.w)}`);
 
-    // ── Step 2: Click "Create Element" button in Elements tab ──
-    //
-    // LAYOUT (from user screenshots):
-    //   Left panel: scrollable "Personal elements" list (solomon, claire, etc.)
-    //   Right panel: "Share elements inside project" + "Create Element" button
-    //
-    // The "Create Element" button is on the RIGHT SIDE of the viewport
-    // (x > 50% of viewport width). Element cards are on the LEFT.
-    // After clicking, the right panel becomes the creation form:
-    //   Upload images (+), Element name, Category, Advanced settings, Save
-    //
-    // CRITICAL: The "Create Element" button is the ONLY button on the right
-    // side with that exact text. Element cards on the left do NOT have this text.
-    // Previous bugs happened because we clicked element cards — now we use
-    // POSITION (right side only) as the primary filter.
+    // Click with real mouse (isTrusted)
+    await page.mouse.click(btnInfo.cx, btnInfo.cy);
+    await page.waitForTimeout(1500);
 
-    let createClicked = false;
-    for (let createAttempt = 0; createAttempt < 4 && !createClicked; createAttempt++) {
-      if (createAttempt > 0) {
-        this.log(`Retrying Create button click (attempt ${createAttempt + 1}/4)...`);
-        await page.waitForTimeout(2500);
+    // Verify modal opened: look for "Elements" heading
+    const modalOpened = await this._isElementsModalOpen(page);
+    if (!modalOpened) {
+      // Retry click once
+      this.log('Modal not detected after first click — retrying...');
+      await page.mouse.click(btnInfo.cx, btnInfo.cy);
+      await page.waitForTimeout(2000);
+
+      const retryOpened = await this._isElementsModalOpen(page);
+      if (!retryOpened) {
+        throw new Error('Elements modal did not open after clicking @ toolbar button');
       }
+    }
 
-      // Single strategy: find "Create Element" button on the RIGHT side
-      const result = await page.evaluate(() => {
-        const vw = window.innerWidth;
-        const midX = vw * 0.5; // Right half of viewport
-        const btns = document.querySelectorAll('button, a, div[role="button"]');
+    this.log('Elements modal opened');
+  }
 
-        // Log all candidates for debugging
-        const debug = [];
+  /**
+   * Check if the elements modal overlay is currently open.
+   * Looks for "Elements" heading and modal-like overlay structure.
+   */
+  async _isElementsModalOpen(page) {
+    return page.evaluate(() => {
+      // Look for "Elements" heading in a modal/overlay context
+      const allText = document.body.innerText || '';
+      const hasElementsHeading = allText.includes('Elements');
+      const hasCreateNew = allText.includes('Create new');
 
-        for (const b of btns) {
-          const text = b.textContent?.trim();
-          const r = b.getBoundingClientRect();
-          if (r.width === 0 || r.height === 0) continue;
-          if (!text) continue;
+      // Check for modal/dialog overlay
+      const dialogs = document.querySelectorAll('[role="dialog"], [data-state="open"]');
+      const overlays = document.querySelectorAll('[class*="overlay"], [class*="modal"]');
 
-          // Only "Create Element" exact text
-          if (text !== 'Create Element') continue;
+      // Also check for the search bar and category sidebar which are unique to the modal
+      const hasSearch = !!document.querySelector('input[type="search"], input[placeholder*="earch"]');
 
-          const centerX = r.x + r.width / 2;
-          debug.push({ text, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), centerX: Math.round(centerX), rightSide: centerX > midX });
+      return (hasElementsHeading && hasCreateNew) ||
+             (dialogs.length > 0 && hasElementsHeading) ||
+             (overlays.length > 0 && hasElementsHeading) ||
+             (hasSearch && hasCreateNew);
+    }).catch(() => false);
+  }
 
-          // MUST be on the right side of the viewport
-          if (centerX > midX) {
-            b.click();
-            return { clicked: `Create Element (right panel, x=${Math.round(r.x)}, y=${Math.round(r.y)})`, debug };
-          }
+  /**
+   * Close the elements modal overlay.
+   * Strategy order: X close button → Cancel button → Escape key.
+   */
+  async _closeElementsModal() {
+    const page = this.automation.getPage();
+    this.log('Closing elements modal...');
+
+    // Strategy 1: Click X close button (top-right of modal)
+    let closed = await page.evaluate(() => {
+      // Find X / close buttons in the modal area
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width < 1) continue;
+
+        const text = btn.textContent?.trim() || '';
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+
+        // X close button: small button with × or x text, or aria-label close/dismiss
+        const isClose = text === '×' || text === '✕' || text === 'x' || text === 'X' ||
+          ariaLabel.includes('close') || ariaLabel.includes('dismiss');
+
+        if (isClose && rect.width <= 60) {
+          btn.click();
+          return 'x-button';
         }
-
-        return { clicked: false, debug };
-      }).catch(() => ({ clicked: false, debug: [] }));
-
-      if (result.debug.length > 0) {
-        this.log(`Create button candidates: ${JSON.stringify(result.debug)}`);
       }
+      return false;
+    }).catch(() => false);
 
-      if (result.clicked) {
-        createClicked = result.clicked;
-        break;
-      }
+    if (closed) {
+      this.log(`Closed modal via: ${closed}`);
+      await page.waitForTimeout(1000);
+      return;
+    }
 
-      // On later attempts, scroll the right panel area to reveal the button
-      if (createAttempt >= 1) {
-        this.log('Scrolling right panel to find Create Element button...');
-        await page.evaluate(() => {
-          const vw = window.innerWidth;
-          const midX = vw * 0.5;
-          const divs = document.querySelectorAll('div');
-          for (const div of divs) {
-            const r = div.getBoundingClientRect();
-            // Right panel: x starts past midpoint, has scroll
-            if (r.x > midX * 0.6 && r.width > 200 &&
-                div.scrollHeight > div.clientHeight + 50) {
-              div.scrollTop = div.scrollHeight;
-              return true;
+    // Strategy 2: Press Escape
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(1000);
+
+    const stillOpen = await this._isElementsModalOpen(page);
+    if (!stillOpen) {
+      this.log('Closed modal via Escape');
+      return;
+    }
+
+    // Strategy 3: Click outside the modal overlay
+    await page.mouse.click(50, 50);
+    await page.waitForTimeout(1000);
+    this.log('Attempted to close modal by clicking outside');
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  //  Dismiss Overlays (ads, promos) — preserved from original
+  // ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Dismiss any promo overlays, modals, or popups that might interfere.
+   */
+  async _dismissOverlays() {
+    const page = this.automation.getPage();
+    try {
+      await page.evaluate(() => {
+        const btns = document.querySelectorAll('button');
+        for (const b of btns) {
+          const text = b.textContent?.trim() || '';
+          const ariaLabel = (b.getAttribute('aria-label') || '').toLowerCase();
+          if ((text === '×' || text === '✕' || ariaLabel.includes('close') || ariaLabel.includes('dismiss')) &&
+              b.getBoundingClientRect().width > 0 && b.getBoundingClientRect().width <= 50) {
+            // Only click small close buttons (not the modal close we might need)
+            const rect = b.getBoundingClientRect();
+            if (rect.y < window.innerHeight * 0.3) {
+              b.click();
             }
           }
-          // Also try scrolling the whole page
-          window.scrollTo(0, document.body.scrollHeight);
-          return false;
-        });
-        await page.waitForTimeout(2000);
-      }
-    }
-
-    if (!createClicked) {
-      throw new Error('Could not find "Create Element" button on right panel of Elements tab');
-    }
-    this.log(`Clicked "${createClicked}"`);
-    await page.waitForTimeout(2500);
-
-    // Wait for the creation form to appear on the right panel
-    // Indicators: "Upload images" text, input[placeholder="reference-name"], "Save" button
-    let formReady = false;
-    for (let attempt = 0; attempt < 6 && !formReady; attempt++) {
-      formReady = await page.evaluate(() => {
-        const vw = window.innerWidth;
-        const midX = vw * 0.5;
-
-        // Check for name input on right side
-        const nameInput = document.querySelector('input[placeholder="reference-name"]');
-        if (nameInput) {
-          const r = nameInput.getBoundingClientRect();
-          if (r.x > midX * 0.5 && r.width > 0) return 'name-input';
         }
+      });
+    } catch (_) {}
+    await page.waitForTimeout(500);
+  }
 
-        // Check for "Upload images" text on right side
-        const allText = document.querySelectorAll('span, p, div');
-        for (const el of allText) {
-          if (el.textContent?.trim() === 'Upload images') {
-            const r = el.getBoundingClientRect();
-            if (r.x > midX * 0.5) return 'upload-text';
+  // ───────────────────────────────────────────────────────────────────
+  //  Set Project Name — preserved from original
+  // ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Set the project name in the Cinema Studio sidebar.
+   * Called by orchestrator to ensure the correct project is active.
+   * @param {string} projectName
+   */
+  async setProjectName(projectName) {
+    // Delegate to cinemaStudio if available; otherwise no-op.
+    // The orchestrator manages project creation/selection via
+    // CinemaStudioAutomation.ensureProject() before element creation.
+    if (this.cinemaStudio && typeof this.cinemaStudio.setProjectName === 'function') {
+      await this.cinemaStudio.setProjectName(projectName);
+    } else {
+      this.log(`setProjectName("${projectName}") — no cinemaStudio instance, skipping`);
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  //  List Existing Elements (scrape from @ modal grid)
+  // ───────────────────────────────────────────────────────────────────
+
+  /**
+   * List all existing elements by opening the @ modal and scraping the grid.
+   * Returns [{ name, category }]. Caches the result.
+   * @returns {Promise<Array<{name: string, category: string}>>}
+   */
+  async listExistingElements() {
+    const page = this.automation.getPage();
+
+    try {
+      await this._openElementsModal();
+    } catch (e) {
+      this.log(`Could not open elements modal for listing: ${e.message}`);
+      return [];
+    }
+
+    await page.waitForTimeout(1000);
+
+    // Scrape element cards from the modal grid
+    const elements = await page.evaluate(() => {
+      const results = [];
+      const seen = new Set();
+
+      // Strategy 1: Find cards in the modal grid.
+      // Each element card has a thumbnail image and a name label.
+      // The "Create new" card has a + icon and "Create new" text — skip it.
+
+      // Look for the modal/overlay container
+      const containers = [
+        ...document.querySelectorAll('[role="dialog"]'),
+        ...document.querySelectorAll('[data-state="open"]'),
+        ...document.querySelectorAll('[class*="modal"], [class*="overlay"], [class*="popover"]'),
+      ];
+
+      // Also search the body for element-like cards
+      const searchContexts = containers.length > 0 ? containers : [document.body];
+
+      for (const container of searchContexts) {
+        // Look for elements with name labels — typically small text under thumbnails
+        // Each element card is a clickable div/button with an image + text
+        const allButtons = container.querySelectorAll('button, [role="button"], div[tabindex]');
+        for (const card of allButtons) {
+          const text = card.textContent?.trim() || '';
+          const rect = card.getBoundingClientRect();
+          if (rect.width < 30 || rect.height < 30) continue;
+
+          // Skip the "Create new" card
+          if (text.includes('Create new') || text === '+') continue;
+          // Skip navigation/utility buttons
+          if (['Save', 'Cancel', 'All', 'Pinned', 'Characters', 'Locations', 'Props',
+               'Elements', '×', '✕', 'X'].includes(text)) continue;
+          // Skip search input
+          if (card.tagName === 'INPUT') continue;
+
+          // An element card should have an image (thumbnail) and a short name
+          const hasImage = !!card.querySelector('img, video, svg[class*="icon"]');
+          const nameLen = text.replace(/\s+/g, ' ').length;
+
+          if (hasImage && nameLen > 0 && nameLen < 80) {
+            // Extract just the name — take the last line (name is typically below thumbnail)
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            const name = lines[lines.length - 1] || text;
+
+            const key = name.toLowerCase().trim();
+            if (!seen.has(key)) {
+              seen.add(key);
+              results.push({ name: name.trim(), category: 'unknown' });
+            }
           }
         }
 
-        return false;
-      }).catch(() => false);
+        // Strategy 2: Scan for text nodes near images in the grid area
+        // Some element cards may not be buttons
+        const images = container.querySelectorAll('img');
+        for (const img of images) {
+          const rect = img.getBoundingClientRect();
+          if (rect.width < 30 || rect.height < 30) continue;
 
-      if (!formReady) {
-        this.log(`Waiting for creation form... (attempt ${attempt + 1}/6)`);
-        await page.waitForTimeout(2000);
+          // Look at the parent card for a name label
+          let parent = img.parentElement;
+          for (let i = 0; i < 4 && parent; i++) {
+            const text = parent.textContent?.trim() || '';
+            if (text.includes('Create new') || text === '+') break;
+
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            // Find a line that looks like an element name (short, no common UI words)
+            for (const line of lines) {
+              if (line.length > 2 && line.length < 60 &&
+                  !['Upload images', 'Save', 'Cancel', 'Elements', 'Create new',
+                    'All', 'Pinned', 'Characters', 'Locations', 'Props',
+                    'Advanced settings', 'Search'].some(skip => line.includes(skip))) {
+                const key = line.toLowerCase().trim();
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  results.push({ name: line.trim(), category: 'unknown' });
+                }
+              }
+            }
+            parent = parent.parentElement;
+          }
+        }
       }
+
+      return results;
+    }).catch(e => {
+      console.error('Element scraping failed:', e);
+      return [];
+    });
+
+    // Try to determine categories from the sidebar filter
+    // Click "Characters" filter to tag character elements, etc.
+    // For now, leave as 'unknown' — category is not critical for the pipeline.
+
+    this.log(`Found ${elements.length} existing elements: ${elements.map(e => e.name).join(', ') || '(none)'}`);
+
+    // Close the modal
+    await this._closeElementsModal();
+
+    this._cache = elements;
+    return elements;
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  //  Category Map
+  // ───────────────────────────────────────────────────────────────────
+
+  static CATEGORY_MAP = {
+    character: 'Character',
+    location: 'Location',
+    prop: 'Prop',
+    auto: 'Auto',
+  };
+
+  // ───────────────────────────────────────────────────────────────────
+  //  Create Element (core implementation)
+  // ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a new element via the @ toolbar modal.
+   *
+   * Flow:
+   *   1. Open @ modal → click "Create new" card → fill form → Save
+   *   2. Re-open @ modal → verify element appears in grid
+   *
+   * @param {{ name: string, imagePaths: string[], description?: string, category?: string }} opts
+   * @returns {Promise<{created: boolean, name: string}>}
+   */
+  async _createElement({ name, imagePaths, description, category = 'Auto' }) {
+    const page = this.automation.getPage();
+    const normalized = this._normalizeName(name);
+    const uiCategory = HiggsfieldElements.CATEGORY_MAP[(category || 'auto').toLowerCase()] || 'Auto';
+
+    if (!normalized) throw new Error('Element name is required');
+    if (!imagePaths || imagePaths.length === 0) throw new Error('At least one image path required');
+
+    this.log(`Creating element @${normalized} (${uiCategory}) with ${imagePaths.length} image(s)...`);
+
+    // ── Idempotency: check if element already exists ──
+    const alreadyExists = await this.elementExists(normalized);
+    if (alreadyExists) {
+      this.log(`Element @${normalized} already exists — skipping creation`);
+      return { created: false, name: normalized };
     }
 
-    if (formReady) {
-      this.log(`Creation form detected (${formReady})`);
+    // ── Dismiss any lingering overlays ──
+    await this._dismissOverlays();
+
+    // ── Step 1: Open the @ modal ──
+    this.log('Step 1: Opening elements modal...');
+    await this._openElementsModal();
+    await page.waitForTimeout(1000);
+
+    // ── Step 2: Click "Create new" card ──
+    this.log('Step 2: Clicking "Create new" card...');
+    let createNewClicked = false;
+
+    // Strategy A: Find by text content "Create new"
+    const createNewInfo = await page.evaluate(() => {
+      // Search for "Create new" text in buttons/cards within the modal
+      const allClickable = document.querySelectorAll('button, [role="button"], div[tabindex], a');
+      for (const el of allClickable) {
+        const text = el.textContent?.trim() || '';
+        if (text.includes('Create new')) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 20 && rect.height > 20) {
+            return { cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 };
+          }
+        }
+      }
+
+      // Strategy B: Find the + icon card (first card in grid with + or plus)
+      for (const el of allClickable) {
+        const text = el.textContent?.trim() || '';
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 30 || rect.height < 30) continue;
+        // Look for a plus icon card (+ symbol or SVG with plus path)
+        if (text === '+' || (text === '' && el.querySelector('svg') && rect.width < 120 && rect.height < 120)) {
+          return { cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 };
+        }
+      }
+
+      return null;
+    });
+
+    if (createNewInfo) {
+      await page.mouse.click(createNewInfo.cx, createNewInfo.cy);
+      createNewClicked = true;
+      this.log('Clicked "Create new" card');
     } else {
-      this.log('Warn: creation form not detected — proceeding with caution');
+      // Fallback: use Playwright locator
+      try {
+        const createBtn = page.getByText('Create new', { exact: false }).first();
+        await createBtn.click({ timeout: 5000 });
+        createNewClicked = true;
+        this.log('Clicked "Create new" via locator');
+      } catch (e) {
+        throw new Error(`Could not find "Create new" card in elements modal: ${e.message}`);
+      }
     }
 
-    // ── SAFETY CHECK: Is this a NEW form or an EDIT form? ──
-    // EDIT form has: Delete button (bottom left, red), filled name, existing images.
-    // NEW form has: "Upload images" placeholder, empty name, NO Delete button.
-    const formType = await page.evaluate(() => {
+    await page.waitForTimeout(2000);
+
+    // ── Verify the form appeared ──
+    const formAppeared = await page.evaluate(() => {
       const nameInput = document.querySelector('input[placeholder="reference-name"]');
-      const nameValue = nameInput ? nameInput.value : '';
+      if (nameInput && nameInput.getBoundingClientRect().width > 0) return true;
+      // Fallback: check for "New element" heading or "Upload images" text
+      const text = document.body.innerText || '';
+      return text.includes('New element') || (text.includes('Upload images') && text.includes('Save'));
+    }).catch(() => false);
 
-      // Check for Delete button — ONLY present in edit mode
-      let hasDelete = false;
-      const btns = document.querySelectorAll('button');
-      for (const b of btns) {
-        if (b.textContent?.trim() === 'Delete' && b.getBoundingClientRect().width > 0) {
-          hasDelete = true;
-          break;
-        }
+    if (!formAppeared) {
+      this.log('Form did not appear after clicking "Create new" — waiting longer...');
+      await page.waitForTimeout(3000);
+      const retryForm = await page.evaluate(() => {
+        const nameInput = document.querySelector('input[placeholder="reference-name"]');
+        return nameInput && nameInput.getBoundingClientRect().width > 0;
+      }).catch(() => false);
+      if (!retryForm) {
+        // Try to close modal and bail
+        await this._closeElementsModal();
+        throw new Error('Element creation form did not appear after clicking "Create new"');
       }
+    }
 
-      // Check for "Upload images" placeholder text (present in NEW form only)
-      let hasUploadPlaceholder = false;
-      const allText = document.querySelectorAll('span, p, div');
-      for (const el of allText) {
-        if (el.textContent?.trim() === 'Upload images' && el.getBoundingClientRect().width > 0) {
-          hasUploadPlaceholder = true;
-          break;
-        }
-      }
+    this.log('Element creation form is open');
 
-      return {
-        nameValue,
-        hasDelete,
-        hasUploadPlaceholder,
-        isEditForm: hasDelete || (nameValue.length > 0),
-      };
-    }).catch(() => ({ isEditForm: false }));
+    // ── Safety check: make sure we're on a NEW form, not editing existing ──
+    const formState = await page.evaluate(() => {
+      const nameInput = document.querySelector('input[placeholder="reference-name"]');
+      const currentValue = nameInput ? nameInput.value : '';
+      return { nameValue: currentValue };
+    }).catch(() => ({ nameValue: '' }));
 
-    this.log(`Form safety: name="${formType.nameValue}", delete=${formType.hasDelete}, uploadPlaceholder=${formType.hasUploadPlaceholder}, isEdit=${formType.isEditForm}`);
-
-    if (formType.isEditForm) {
-      this.log('SAFETY ABORT: Opened an EDIT form instead of CREATE — closing form');
-      await this._closeCreationForm(page);
-      await page.waitForTimeout(2000);
-      throw new Error(`Opened edit form for "${formType.nameValue}" instead of create form`);
+    if (formState.nameValue && formState.nameValue.length > 0) {
+      this.log(`Warn: form has pre-filled name "${formState.nameValue}" — may be editing. Clearing.`);
+      try {
+        const nameInput = page.locator('input[placeholder="reference-name"]').first();
+        await nameInput.click({ timeout: 3000 });
+        await nameInput.fill('', { timeout: 3000 });
+      } catch (_) {}
     }
 
     // ── Step 3: Upload images ──
-    //
-    // From user screenshots, the upload area is a large box on the right panel
-    // with a + icon and "Upload images" text. A hidden input[type="file"] is
-    // in the DOM (sr-only). Clicking the upload area opens a native file picker.
-    //
-    // In headed Electron+Playwright, native file dialogs BLOCK the automation.
-    // Playwright's filechooser event intercept also fails (timeout).
-    //
-    // WORKING APPROACH: Use Playwright's setInputFiles() on the hidden input.
-    // This sets files programmatically. To make React see them, we trigger
-    // React's internal onChange via the native input setter trick.
-
-    this.log(`Uploading ${imagePaths.length} image(s): ${imagePaths.map(p => require('path').basename(p)).join(', ')}`);
-
+    this.log(`Step 3: Uploading ${imagePaths.length} image(s)...`);
     try {
-      const fileInput = page.locator('input[type="file"]').first();
-      const inputExists = await fileInput.count() > 0;
-      if (!inputExists) throw new Error('No input[type="file"] found in DOM');
+      // The file input is hidden (1x1px), accepts image/png, image/jpeg, video/mp4
+      const fileInput = await page.$('input[type="file"]');
+      if (!fileInput) {
+        throw new Error('File input not found in creation form');
+      }
 
-      const inputInfo = await page.evaluate(() => {
-        const input = document.querySelector('input[type="file"]');
-        if (!input) return null;
-        return { accept: input.accept, multiple: input.multiple, className: input.className };
-      });
-      this.log(`File input: accept="${inputInfo?.accept}", multiple=${inputInfo?.multiple}`);
+      await fileInput.setInputFiles(imagePaths);
+      this.log(`setInputFiles completed for ${imagePaths.length} file(s)`);
 
-      // Set files via Playwright's API
-      await fileInput.setInputFiles(imagePaths, { timeout: 10000 });
-      this.log('setInputFiles completed');
-      await page.waitForTimeout(1000);
-
-      // Trigger React's onChange using the native value setter trick.
-      // React overrides the input's value setter — we need to call the
-      // NATIVE HTMLInputElement setter to make React detect the change.
+      // Trigger React onChange via multiple methods
       await page.evaluate(() => {
         const input = document.querySelector('input[type="file"]');
         if (!input) return;
 
-        // Method 1: Standard events (works for vanilla JS handlers)
+        // Method 1: Standard DOM events
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // Method 2: React synthetic event trigger
-        // React 16+ uses a custom event system. We need to trigger the
-        // internal fiber's onChange. The most reliable way is to find
-        // React's internal handler key and call it directly.
-        const reactKey = Object.keys(input).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        // Method 2: React fiber walk to find onChange handler
+        const reactKey = Object.keys(input).find(k =>
+          k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
         if (reactKey) {
           let fiber = input[reactKey];
-          // Walk up the fiber tree to find an onChange handler
           while (fiber) {
             if (fiber.memoizedProps && fiber.memoizedProps.onChange) {
               try {
@@ -707,7 +616,7 @@ class HiggsfieldElements {
           }
         }
 
-        // Method 3: React event props key
+        // Method 3: React props key
         const propsKey = Object.keys(input).find(k => k.startsWith('__reactProps$'));
         if (propsKey && input[propsKey]?.onChange) {
           try {
@@ -719,15 +628,14 @@ class HiggsfieldElements {
       await page.waitForTimeout(2000);
 
     } catch (e) {
+      // Try to close the form before bailing
+      await this._closeCreationForm(page);
       throw new Error(`Image upload failed: ${e.message}`);
     }
 
     // ── Wait for upload to be processed (Save button enabled) ──
-    // The ONLY reliable signal is the Save button becoming enabled.
-    // Preview counting was picking up page-wide images (33 thumbnails),
-    // not form-scoped ones. Focus solely on Save button state.
-    const UPLOAD_POLL_MAX = 25;   // 25 polls
-    const UPLOAD_POLL_MS = 2000;  // 2s each = 50s max patience
+    const UPLOAD_POLL_MAX = 25;
+    const UPLOAD_POLL_MS = 2000;
     this.log(`Waiting up to ${(UPLOAD_POLL_MAX * UPLOAD_POLL_MS) / 1000}s for Save to enable...`);
 
     let uploadProcessed = false;
@@ -735,7 +643,6 @@ class HiggsfieldElements {
       await page.waitForTimeout(UPLOAD_POLL_MS);
 
       const state = await page.evaluate(() => {
-        // Check Save button state
         const saveBtn = [...document.querySelectorAll('button')].find(b =>
           b.textContent?.trim() === 'Save');
         if (!saveBtn) return { saveState: 'not-found' };
@@ -745,13 +652,11 @@ class HiggsfieldElements {
           getComputedStyle(saveBtn).opacity < 0.6 ||
           getComputedStyle(saveBtn).pointerEvents === 'none';
 
-        // Also check if "Upload images" placeholder is still showing
-        // Scope to the form area — look near the file input, not page-wide
         const fileInput = document.querySelector('input[type="file"]');
         let uploadZoneHasText = false;
         if (fileInput) {
           let container = fileInput;
-          for (let i = 0; i < 4; i++) { // Only 4 levels up — tight scope
+          for (let i = 0; i < 4; i++) {
             container = container.parentElement;
             if (!container) break;
           }
@@ -779,7 +684,6 @@ class HiggsfieldElements {
     }
 
     if (!uploadProcessed) {
-      // Diagnosis: check if files are on the input
       const diagnosis = await page.evaluate(() => {
         const input = document.querySelector('input[type="file"]');
         return {
@@ -792,7 +696,6 @@ class HiggsfieldElements {
       this.log('Warn: Save not enabled after 50s — images may not have been processed');
     }
 
-    // Settle time
     await page.waitForTimeout(2000);
 
     // ── Step 4: Fill element name ──
@@ -803,32 +706,30 @@ class HiggsfieldElements {
       await nameInput.fill(normalized, { timeout: 3000 });
       this.log(`Element name set to "${normalized}"`);
     } catch (e) {
-      // Fallback: any text input in the form area
       try {
         const fallbackInput = page.locator('input[type="text"]').first();
         await fallbackInput.click({ timeout: 3000 });
         await fallbackInput.fill(normalized, { timeout: 3000 });
-        this.log(`Element name set via fallback input`);
+        this.log('Element name set via fallback input');
       } catch (e2) {
+        await this._closeCreationForm(page);
         throw new Error(`Could not fill element name: ${e2.message}`);
       }
     }
-    await page.waitForTimeout(1500); // Wait after name fill
+    await page.waitForTimeout(1500);
 
     // ── Step 5: Set category via combobox ──
     this.log(`Step 5: Setting category to "${uiCategory}"...`);
     if (uiCategory !== 'Auto') {
       try {
-        // Click the combobox to open dropdown
         const combobox = page.locator('[role="combobox"]').first();
         await combobox.click({ timeout: 3000 });
-        await page.waitForTimeout(1000); // Wait for dropdown to open
+        await page.waitForTimeout(1000);
 
-        // Click the matching option
         const option = page.locator(`[role="option"]:has-text("${uiCategory}")`).first();
         await option.click({ timeout: 3000 });
         this.log(`Category set to "${uiCategory}"`);
-        await page.waitForTimeout(1000); // Wait after category set
+        await page.waitForTimeout(1000);
       } catch (e) {
         this.log(`Warn: couldn't set category to "${uiCategory}" — ${e.message.split('\n')[0]}`);
         await page.keyboard.press('Escape').catch(() => {});
@@ -840,7 +741,6 @@ class HiggsfieldElements {
     if (description) {
       this.log('Step 6: Expanding Advanced settings and filling description...');
       try {
-        // Click "Advanced settings" to expand
         await page.evaluate(() => {
           const btns = document.querySelectorAll('button');
           for (const b of btns) {
@@ -851,21 +751,18 @@ class HiggsfieldElements {
           }
           return false;
         });
-        await page.waitForTimeout(1000); // Wait for section to expand
+        await page.waitForTimeout(1000);
 
-        // Fill description textarea
         const textarea = page.locator('textarea').first();
         await textarea.fill(description.slice(0, 500), { timeout: 3000 });
         this.log('Description filled');
-        await page.waitForTimeout(1000); // Wait after description
+        await page.waitForTimeout(1000);
       } catch (e) {
         this.log(`Warn: couldn't fill description — ${e.message.split('\n')[0]}`);
       }
     }
 
-    // ── Step 7: Wait for Save button to become enabled, then click ──
-    // Save stays disabled until images are fully processed by Higgsfield.
-    // Poll for up to ~45s (15 attempts × 3s) since image processing can be slow.
+    // ── Step 7: Click Save ──
     let saveClicked = false;
     const MAX_SAVE_ATTEMPTS = 15;
     const SAVE_POLL_INTERVAL = 3000;
@@ -904,16 +801,14 @@ class HiggsfieldElements {
     }
 
     if (!saveClicked) {
-      // Check WHY Save is disabled — are images missing?
       const diagnosis = await page.evaluate(() => {
-        const formContainer = document.querySelector('[data-element-form="true"]') || document.body;
-        const imgs = formContainer.querySelectorAll('img, video');
+        const imgs = document.querySelectorAll('img, video');
         let previewCount = 0;
         for (const el of imgs) {
           const r = el.getBoundingClientRect();
           if (r.width > 20 && r.height > 20) previewCount++;
         }
-        const hasUploadText = formContainer.innerText?.includes('Upload images');
+        const hasUploadText = (document.body.innerText || '').includes('Upload images');
         const saveBtn = [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Save');
         return {
           previewCount,
@@ -922,7 +817,7 @@ class HiggsfieldElements {
           saveCursor: saveBtn ? getComputedStyle(saveBtn).cursor : null,
         };
       }).catch(() => ({}));
-      this.log(`Save diagnosis: previews=${diagnosis.previewCount}, uploadText=${diagnosis.hasUploadText}, disabled=${diagnosis.saveDisabled}, cursor=${diagnosis.saveCursor}`);
+      this.log(`Save diagnosis: previews=${diagnosis.previewCount}, uploadText=${diagnosis.hasUploadText}, disabled=${diagnosis.saveDisabled}`);
 
       // Last resort: force-click
       try {
@@ -931,23 +826,21 @@ class HiggsfieldElements {
         saveClicked = true;
         this.log('Save button force-clicked via role selector');
       } catch (e) {
+        await this._closeCreationForm(page);
         throw new Error(`"Save" button could not be clicked after ${MAX_SAVE_ATTEMPTS} attempts: ${e.message}`);
       }
     }
 
-    // Wait for the element to be processed by Higgsfield
+    // Wait for element to be processed
     await page.waitForTimeout(4000);
 
-    // ── Step 8: Check for error messages / form still open ──
-    // If Save failed (validation error, server error), the form may still
-    // be visible with an error toast or the form fields still populated.
+    // ── Step 8: Check if form is still open (save may have failed) ──
     const checkFormOpen = async () => {
       return page.evaluate(() => {
         const nameInput = document.querySelector('input[placeholder="reference-name"]');
         if (nameInput && nameInput.getBoundingClientRect().width > 0) return 'form-still-open';
-        // Check for "Upload images" text which means form is still showing
         const allText = document.body.innerText || '';
-        if (allText.includes('Upload images') && allText.includes('Save')) return 'form-still-open';
+        if (allText.includes('Upload images') && allText.includes('Save') && allText.includes('Cancel')) return 'form-still-open';
         return false;
       }).catch(() => false);
     };
@@ -958,7 +851,6 @@ class HiggsfieldElements {
       this.log('Warn: creation form still open after Save — waiting 5s then retrying Save click');
       await page.waitForTimeout(5000);
 
-      // Retry Save click
       try {
         await page.evaluate(() => {
           const btns = document.querySelectorAll('button');
@@ -974,26 +866,25 @@ class HiggsfieldElements {
         await page.waitForTimeout(5000);
       } catch (_) {}
 
-      // Re-check if form closed
       formStillOpen = await checkFormOpen();
     }
 
-    // ── Step 9: If form still open, CLOSE IT before throwing ──
-    // This is critical — if we leave the form open, the next element creation
-    // will fail because "Create Element" button is hidden behind the form.
+    // ── Step 9: If form still open, close it before throwing ──
     if (formStillOpen === 'form-still-open') {
       this.log('Form still open after retries — closing form before continuing');
       await this._closeCreationForm(page);
       throw new Error(`Element @${normalized} creation failed — form still open after Save retries`);
     }
 
-    // Wait for element to be processed
     await page.waitForTimeout(3000);
 
+    // ── Step 10: Verify element was created ──
+    // CRITICAL: After Save, the back button closes the entire modal.
+    // We must re-open the @ modal to verify the element exists.
     this.invalidateCache();
     const verified = await this.elementExists(normalized);
     if (verified) {
-      this.log(`Verified: @${normalized} exists in elements panel`);
+      this.log(`Verified: @${normalized} exists in elements modal`);
     } else {
       this.log(`Warn: @${normalized} not found by scraper — but Save succeeded, trusting creation`);
     }
@@ -1004,29 +895,23 @@ class HiggsfieldElements {
 
   /**
    * Close the element creation form if it's still open.
-   * Tries Cancel button, X button, Escape key, clicking outside.
+   * In the new modal UI, the form is a dialog inside the modal overlay.
+   *
+   * Strategy order:
+   *   1. Cancel button (available in new UI)
+   *   2. X close button on modal
+   *   3. Escape key
+   *   4. Click outside modal
    */
   async _closeCreationForm(page) {
-    // The creation form replaces the right panel content. It has NO Cancel
-    // or Close button. To close it, we re-click the "Elements" tab which
-    // resets the right panel back to the "Share elements" + "Create Element" view.
-    //
-    // Strategies in order:
-    //   1. Click "Elements" tab (top center) to reset the panel
-    //   2. Click "Generations" tab to switch away entirely
-    //   3. Press Escape + click outside as fallback
-    //   4. Navigate away from the page
-
-    // Strategy 1: Re-click Elements tab
+    // Strategy 1: Click Cancel button
     let closed = await page.evaluate(() => {
       const btns = document.querySelectorAll('button');
-      // First try "Generations" to fully exit
       for (const b of btns) {
         const text = b.textContent?.trim();
-        const r = b.getBoundingClientRect();
-        if (text === 'Generations' && r.y < window.innerHeight * 0.15 && r.width > 0) {
+        if (text === 'Cancel' && b.getBoundingClientRect().width > 0) {
           b.click();
-          return 'Generations tab';
+          return 'Cancel';
         }
       }
       return false;
@@ -1035,53 +920,59 @@ class HiggsfieldElements {
     if (closed) {
       this.log(`Closed form via: ${closed}`);
       await page.waitForTimeout(2000);
-
-      // Re-open Elements tab to get back to element list
-      await page.evaluate(() => {
-        const btns = document.querySelectorAll('button');
-        for (const b of btns) {
-          const text = b.textContent?.trim();
-          const r = b.getBoundingClientRect();
-          if (text === 'Elements' && r.y < window.innerHeight * 0.15 && r.width > 0) {
-            b.click();
-            return true;
-          }
-        }
-        return false;
-      }).catch(() => false);
-      await page.waitForTimeout(2000);
-    } else {
-      // Fallback: press Escape, click left panel area
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(1000);
-
-      // Click the left panel (element list area) to deselect
-      await page.mouse.click(200, 300);
-      await page.waitForTimeout(1000);
-      this.log('Pressed Escape + clicked left panel');
+      // Cancel may return to the elements list inside the modal, or close the modal.
+      // Either way, close the modal if it's still open.
+      const modalOpen = await this._isElementsModalOpen(page);
+      if (modalOpen) {
+        await this._closeElementsModal();
+      }
+      return;
     }
 
-    // Verify the form is closed
+    // Strategy 2: X close button
+    closed = await page.evaluate(() => {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        const text = btn.textContent?.trim() || '';
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const isClose = text === '×' || text === '✕' || text === 'x' ||
+          ariaLabel.includes('close') || ariaLabel.includes('dismiss');
+        if (isClose && btn.getBoundingClientRect().width > 0 && btn.getBoundingClientRect().width <= 60) {
+          btn.click();
+          return 'X button';
+        }
+      }
+      return false;
+    }).catch(() => false);
+
+    if (closed) {
+      this.log(`Closed form via: ${closed}`);
+      await page.waitForTimeout(2000);
+      return;
+    }
+
+    // Strategy 3: Escape
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(1500);
+    this.log('Pressed Escape to close form');
+
+    // Verify closure
     const stillOpen = await page.evaluate(() => {
       const nameInput = document.querySelector('input[placeholder="reference-name"]');
       return nameInput && nameInput.getBoundingClientRect().width > 0;
     }).catch(() => false);
 
     if (stillOpen) {
-      this.log('Form still open after close attempt — navigating to reset');
-      // Last resort: reload the page
-      await page.evaluate(() => {
-        const btns = document.querySelectorAll('button');
-        for (const b of btns) {
-          if (b.textContent?.trim() === 'Elements' && b.getBoundingClientRect().y < window.innerHeight * 0.2) {
-            b.click();
-            return;
-          }
-        }
-      }).catch(() => {});
-      await page.waitForTimeout(2000);
+      // Strategy 4: click outside
+      await page.mouse.click(50, 50);
+      await page.waitForTimeout(1500);
+      this.log('Clicked outside to close form');
     }
   }
+
+  // ───────────────────────────────────────────────────────────────────
+  //  Public wrapper methods — preserved signatures exactly
+  // ───────────────────────────────────────────────────────────────────
 
   /**
    * Create a character element. Uses portrait + grid as reference images.
@@ -1097,7 +988,6 @@ class HiggsfieldElements {
    * @deprecated Locations are NOT Higgsfield elements — they are reference images
    * attached via the + button at scene-gen time. This method is retained for
    * potential future use but is NOT called from the orchestrator pipeline.
-   * See orchestrator.js Phase 3 comment block for full rationale.
    */
   async createLocationElement({ name, locationImagePath, description }) {
     if (!locationImagePath) throw new Error('createLocationElement: locationImagePath required');
@@ -1146,7 +1036,7 @@ class HiggsfieldElements {
     lines.push('Steps (per element):');
     lines.push('  1. Open Cinema Studio 3.5 (top nav)');
     lines.push('  2. Select your project in the left sidebar');
-    lines.push('  3. Click the @ button in the bottom toolbar');
+    lines.push('  3. Click the @ button in the bottom toolbar (next to 1x1)');
     lines.push('  4. Click "Create new" card (+ icon in the elements grid)');
     lines.push('  5. Upload images (portrait + grid for characters)');
     lines.push('  6. Enter the element name (exactly as listed above, without @)');
@@ -1161,3 +1051,4 @@ class HiggsfieldElements {
 }
 
 module.exports = { HiggsfieldElements };
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
