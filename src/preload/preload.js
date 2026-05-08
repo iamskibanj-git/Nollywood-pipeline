@@ -50,7 +50,6 @@ contextBridge.exposeInMainWorld('api', {
   approveClips: () => ipcRenderer.invoke('approve-clips'),
   approveClipReview: (decision) => ipcRenderer.invoke('approve-clip-review', decision),
   approvePromptPreview: (decision) => ipcRenderer.invoke('approve-prompt-preview', decision),
-  approvePromptPreviewBatch: (decision) => ipcRenderer.invoke('approve-prompt-preview-batch', decision),
   flagAsset: (type, index) => ipcRenderer.invoke('flag-asset', type, index),
 
   // Clip verification (post-MVP verify stage)

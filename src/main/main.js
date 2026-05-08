@@ -232,7 +232,6 @@ ipcMain.handle('approve-scenes', () => pipeline.approveScenes());
 ipcMain.handle('approve-clips', () => pipeline.approveClips());
 ipcMain.handle('approve-clip-review', (_, decision) => pipeline.approveClipReview(decision));
 ipcMain.handle('approve-prompt-preview', (_, decision) => pipeline.approvePromptPreview(decision));
-ipcMain.handle('approve-prompt-preview-batch', (_, decision) => pipeline.approvePromptPreviewBatch(decision));
 ipcMain.handle('flag-asset', (_, type, index) => pipeline.flagAsset(type, index));
 
 // Clip verification (post-MVP verify stage)

@@ -436,33 +436,6 @@
               <button class="btn" style="background:#dc2626;color:#fff;" onclick="approvePromptPreview('stop')">Stop — Don't Generate</button>
             </div>
           </div>
-          <!-- Batch prompt-preview panel (M4 mitigation). Reviews all clip prompts at once. -->
-          <div id="batch-preview-panel" style="display:none; margin-top:16px; padding:16px; border:1px solid #8b5cf6; border-radius:8px; background:rgba(139,92,246,0.08);">
-            <p style="margin:0 0 4px; font-size:13px; color:#8b5cf6; font-weight:600;">
-              Batch Prompt Review — <span id="batch-preview-count"></span>
-            </p>
-            <p style="margin:0 0 8px; font-size:11px; color:var(--muted);">
-              Review all clip prompts before generation starts. Toggle clips to reject, then Approve to generate only selected clips.
-            </p>
-            <!-- Pagination controls -->
-            <div id="batch-preview-pagination" style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-              <button class="btn" style="padding:4px 10px; font-size:11px;" onclick="batchPreviewPage(-1)">◀ Prev</button>
-              <span id="batch-preview-page-label" style="font-size:11px; color:var(--muted);"></span>
-              <button class="btn" style="padding:4px 10px; font-size:11px;" onclick="batchPreviewPage(1)">Next ▶</button>
-              <span style="flex:1;"></span>
-              <button class="btn" style="padding:4px 10px; font-size:11px; background:#065f46; color:#6ee7b7;" onclick="batchPreviewSelectAll(true)">Select All</button>
-              <button class="btn" style="padding:4px 10px; font-size:11px; background:#7f1d1d; color:#fca5a5;" onclick="batchPreviewSelectAll(false)">Deselect All</button>
-            </div>
-            <!-- Clip grid -->
-            <div id="batch-preview-grid" style="display:grid; grid-template-columns:1fr; gap:8px; max-height:500px; overflow-y:auto; padding-right:4px;"></div>
-            <!-- Action buttons -->
-            <div class="btn-group" style="gap:8px; margin-top:12px;">
-              <button class="btn btn-success" onclick="approveBatchPreview('approve')">
-                Approve Selected (<span id="batch-preview-approved-count">0</span>)
-              </button>
-              <button class="btn" style="background:#dc2626;color:#fff;" onclick="approveBatchPreview('stop')">Stop — Cancel Run</button>
-            </div>
-          </div>
           <!-- TEMPORARY — remove when full production starts. Per-clip approval gate. -->
           <div id="clip-review-panel" style="display:none; margin-top:16px; padding:16px; border:1px solid #eab308; border-radius:8px; background:rgba(234,179,8,0.08);">
             <p style="margin:0 0 8px; font-size:13px; color:#eab308; font-weight:600;">
@@ -1620,110 +1593,6 @@
       document.getElementById('prompt-preview-panel').style.display = 'none';
       addLog(`Prompt preview: ${decision}`);
       await window.api.approvePromptPreview(decision);
-    }
-
-    // ── BATCH PROMPT-PREVIEW (M4) ──
-    // State for the paginated batch review panel.
-    let _batchClips = [];          // full array from gate event
-    let _batchSelected = {};       // clipId → true/false
-    let _batchPage = 0;
-    const BATCH_PAGE_SIZE = 20;
-
-    function _renderBatchPage() {
-      const grid = document.getElementById('batch-preview-grid');
-      grid.innerHTML = '';
-      const start = _batchPage * BATCH_PAGE_SIZE;
-      const end = Math.min(start + BATCH_PAGE_SIZE, _batchClips.length);
-      const totalPages = Math.ceil(_batchClips.length / BATCH_PAGE_SIZE);
-
-      document.getElementById('batch-preview-page-label').textContent =
-        `Page ${_batchPage + 1}/${totalPages} (${start + 1}–${end} of ${_batchClips.length})`;
-
-      for (let idx = start; idx < end; idx++) {
-        const clip = _batchClips[idx];
-        const selected = _batchSelected[clip.clipId] !== false;
-        const card = document.createElement('div');
-        card.style.cssText = `padding:10px; border:1px solid ${selected ? '#8b5cf6' : '#4a4a4a'}; border-radius:6px; background:${selected ? 'rgba(139,92,246,0.12)' : 'rgba(0,0,0,0.2)'}; cursor:pointer; transition:all 0.15s;`;
-        card.dataset.clipId = clip.clipId;
-        card.onclick = () => {
-          _batchSelected[clip.clipId] = !selected;
-          _renderBatchPage();
-          _updateBatchCount();
-        };
-
-        const header = document.createElement('div');
-        header.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:6px;';
-        header.innerHTML = `
-          <span style="font-size:16px;">${selected ? '☑' : '☐'}</span>
-          <span style="font-size:12px; font-weight:600; color:${selected ? '#c4b5fd' : '#888'};">${clip.clipLabel || clip.clipId}</span>
-          <span style="font-size:11px; color:var(--muted); margin-left:auto;">${clip.durationSeconds || '?'}s</span>
-        `;
-        card.appendChild(header);
-
-        // Start frame thumbnail (small)
-        if (clip.startFramePath) {
-          const img = document.createElement('img');
-          img.src = 'file://' + clip.startFramePath;
-          img.style.cssText = 'max-width:100%; max-height:100px; border-radius:4px; background:#000; margin-bottom:6px; display:block;';
-          card.appendChild(img);
-        }
-
-        // Prompt preview (truncated, expandable on click of prompt area)
-        const promptEl = document.createElement('pre');
-        const promptText = clip.prompt || '(no prompt)';
-        promptEl.textContent = promptText.length > 200 ? promptText.slice(0, 200) + '…' : promptText;
-        promptEl.style.cssText = 'margin:0; padding:6px; background:rgba(0,0,0,0.3); border-radius:4px; font-size:10px; line-height:1.4; color:#cbd5e1; white-space:pre-wrap; word-wrap:break-word; max-height:80px; overflow:hidden; cursor:pointer;';
-        promptEl.title = 'Click to expand/collapse';
-        promptEl.onclick = (e) => {
-          e.stopPropagation();
-          if (promptEl.style.maxHeight === '80px') {
-            promptEl.textContent = promptText;
-            promptEl.style.maxHeight = '400px';
-            promptEl.style.overflowY = 'auto';
-          } else {
-            promptEl.textContent = promptText.length > 200 ? promptText.slice(0, 200) + '…' : promptText;
-            promptEl.style.maxHeight = '80px';
-            promptEl.style.overflowY = 'hidden';
-          }
-        };
-        card.appendChild(promptEl);
-        grid.appendChild(card);
-      }
-    }
-
-    function _updateBatchCount() {
-      const approvedCount = _batchClips.filter(c => _batchSelected[c.clipId] !== false).length;
-      document.getElementById('batch-preview-approved-count').textContent = approvedCount;
-      document.getElementById('batch-preview-count').textContent =
-        `${approvedCount}/${_batchClips.length} clips selected`;
-    }
-
-    function batchPreviewPage(delta) {
-      const totalPages = Math.ceil(_batchClips.length / BATCH_PAGE_SIZE);
-      _batchPage = Math.max(0, Math.min(totalPages - 1, _batchPage + delta));
-      _renderBatchPage();
-    }
-
-    function batchPreviewSelectAll(selected) {
-      for (const clip of _batchClips) {
-        _batchSelected[clip.clipId] = selected;
-      }
-      _renderBatchPage();
-      _updateBatchCount();
-    }
-
-    async function approveBatchPreview(action) {
-      document.getElementById('batch-preview-panel').style.display = 'none';
-      if (action === 'stop') {
-        addLog('Batch prompt review: STOPPED — no clips will be generated');
-        await window.api.approvePromptPreviewBatch('stop');
-      } else {
-        const approved = _batchClips
-          .filter(c => _batchSelected[c.clipId] !== false)
-          .map(c => c.clipId);
-        addLog(`Batch prompt review: ${approved.length}/${_batchClips.length} clips approved`);
-        await window.api.approvePromptPreviewBatch({ approved });
-      }
     }
 
     // ── TEMPORARY — remove when full production starts ──
@@ -3636,26 +3505,6 @@
             document.getElementById('clip-review-panel').style.display = 'none';
             panel.style.display = 'block';
             panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-          if (event.gate === 'prompt-preview-batch') {
-            // M4: Batch prompt-preview — show all clip prompts for review at once
-            showGenerationView('Generating Video Clips (Kling 3.0)...', 'clips');
-            updateStepper('video', 'running');
-            // Hide per-clip panels
-            document.getElementById('prompt-preview-panel').style.display = 'none';
-            document.getElementById('clip-review-panel').style.display = 'none';
-            // Initialize batch state
-            _batchClips = event.clips || [];
-            _batchSelected = {};
-            _batchPage = 0;
-            for (const c of _batchClips) _batchSelected[c.clipId] = true; // all selected by default
-            // Render
-            _renderBatchPage();
-            _updateBatchCount();
-            const batchPanel = document.getElementById('batch-preview-panel');
-            batchPanel.style.display = 'block';
-            batchPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            addLog(`Batch prompt review: ${_batchClips.length} clips ready (${event.skippedClips || 0} skipped)`);
           }
           if (event.gate === 'clip-review') {
             // TEMPORARY — remove when full production starts.
