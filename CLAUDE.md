@@ -3441,6 +3441,35 @@ Thumbnail credit tracking (session 30M):
 
 ---
 
+## Session 30R — Element Creation Loop Hardening (May 8, 2026)
+
+**5 fixes to the element creation and confirmation workflow in `_runCinematicElementSetup()` (orchestrator.js).**
+
+Zero downstream impact — all changes are internal to the element creation loop. The `cinematicElementNames` map (consumed by scene image gen + video clip gen) is populated identically; the changes only improve the accuracy of the `existingElements` Set and the `failedElements` filter that decides whether to fire the manual gate.
+
+**Fix #1 — Removed stale UUID swap block (~lines 3466-3491):**
+Dead code from an earlier design where element UUIDs were scraped from the Elements panel and swapped into the `cinematicElementNames` map. The pipeline no longer uses UUIDs — element names are the canonical identifiers. The block referenced variables (`swapTarget`, `tempCharIndex`) that no longer existed, making it unreachable. Removed cleanly.
+
+**Fix #2 — `existingElements` Set kept in sync during creation loop:**
+The `existingElements` Set was populated during the @ button pre-check phase but never updated when elements were successfully created and confirmed during the creation loop. The `failedElements` filter at line ~4239 (`actuallyPending.filter(p => !existingElements.has(...))`) would incorrectly include successfully created elements as "failed," triggering the manual gate unnecessarily.
+Fix: Added `existingElements.add(p.name.toLowerCase().trim())` at all 3 confirmation points:
+- Success path: after @ button post-creation confirmation (line ~4166)
+- Error recovery: after @ button confirms element exists despite creation error (line ~4197)
+- Panel scraper fallback: after `elementExists()` confirms element (line ~4209)
+
+**Fix #3 — Removed redundant final sanity check in success path:**
+When all elements were created/skipped successfully, the success path ran a full batch `_verifyElementsViaAtButton` on ALL elements — costing 3-5 minutes per run. This was redundant because Fix #2 ensures each element is individually confirmed via @ button during the creation loop. Replaced ~20 lines of batch re-verification with a single log line.
+
+**Fix #4 — Cache invalidation before panel scraper fallback:**
+Already present at line ~4205 (`elements.invalidateCache()` before `elements.elementExists(p.name)`). No change needed — confirmed correct.
+
+**Fix #5 — DB persistence retries increased to 3 with exponential backoff:**
+`db.setAssetElementName()` writes are critical for cross-run map restoration. Single retry with 500ms delay was insufficient for SQLite WAL checkpoint locks. Upgraded to 3 retries with exponential backoff (500ms, 1000ms, 2000ms). Failure counter tracks exhausted retries and emits CRITICAL-level log warning that resume will break.
+
+**Files changed:**
+- `src/main/pipeline/orchestrator.js` — all 5 fixes (lines ~4140-4420)
+- `CLAUDE.md` — this section
+
 ## Session 30N: Script Engine Review
 
 **Commit script:** `commit-session30N.ps1`

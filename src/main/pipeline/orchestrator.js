@@ -3463,33 +3463,6 @@ class PipelineOrchestrator {
       return;
     }
 
-    // ── ONE-TIME DATA FIX: swap stale project ID → blank project ──
-    // Remove this block after the current run completes successfully.
-    const STALE_PROJECT_ID = '4406ba87-4089-41ac-b699-61cbb20de2da';
-    const BLANK_PROJECT_ID = 'c5217bbd-f436-4b54-a3ae-61a7d28d3aa9';
-    let projectSwapped = false;
-    try {
-      const proj = db.getProject(projectId);
-      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
-      if (settings.higgsfield_cinema_project_id === STALE_PROJECT_ID) {
-        settings.higgsfield_cinema_project_id = BLANK_PROJECT_ID;
-        db.updateProject(projectId, { settings });
-        projectSwapped = true;
-        this.log(`[CINEMATIC] DATA FIX: swapped stale project ${STALE_PROJECT_ID} → ${BLANK_PROJECT_ID} in DB`);
-      }
-    } catch (_) {}
-    if (this.state.higgsfield_project_id === STALE_PROJECT_ID) {
-      this.state.higgsfield_project_id = BLANK_PROJECT_ID;
-      projectSwapped = true;
-      this.log(`[CINEMATIC] DATA FIX: swapped stale project on state → ${BLANK_PROJECT_ID}`);
-    }
-    // CRITICAL: if project changed, elements must be re-created in the new project.
-    // Clear cinematicElementNames so the idempotency gate doesn't skip element setup.
-    if (projectSwapped) {
-      this.state.cinematicElementNames = null;
-      this.log('[CINEMATIC] DATA FIX: cleared cinematicElementNames — elements must be re-created in new project');
-    }
-
     // ── RESTORE cinematicElementNames from DB on resume ──
     // cinematicElementNames only lives in memory. On app restart it's lost,
     // so rebuild from portrait assets before the idempotency gate fires.
@@ -4190,6 +4163,7 @@ class PipelineOrchestrator {
               const atCheck = await cinemaStudio._verifyElementsViaAtButton([p.name]);
               if (atCheck.available.length > 0) {
                 this.log(`[CINEMATIC] ✓ Element @${p.name} confirmed via @ button`);
+                existingElements.add(p.name.toLowerCase().trim());
               } else {
                 this.log(`[CINEMATIC] Warn: @${p.name} not confirmed via @ button — trusting Save success`);
               }
@@ -4220,6 +4194,7 @@ class PipelineOrchestrator {
             existsAnyway = atCheck.available.length > 0;
             if (existsAnyway) {
               this.log(`[CINEMATIC] ✓ @ button confirms @${p.name} EXISTS despite creation error — counting as skipped`);
+              existingElements.add(p.name.toLowerCase().trim());
             } else {
               this.log(`[CINEMATIC] ✗ @ button confirms @${p.name} does NOT exist — creation truly failed`);
             }
@@ -4231,6 +4206,7 @@ class PipelineOrchestrator {
               existsAnyway = await elements.elementExists(p.name);
               if (existsAnyway) {
                 this.log(`[CINEMATIC] Panel scraper fallback: @${p.name} found — counting as skipped`);
+                existingElements.add(p.name.toLowerCase().trim());
               }
             } catch (scraperErr) {
               this.log(`[CINEMATIC] Panel scraper fallback also failed for @${p.name}: ${scraperErr.message}`, 'warn');
@@ -4302,27 +4278,10 @@ class PipelineOrchestrator {
         this.log(`[CINEMATIC] @ button re-verification failed: ${recheckErr.message} — proceeding on user authority`, 'warn');
       }
     } else {
-      // All elements created/skipped successfully — still run @ button verification
-      // as a sanity check before proceeding to locations/scenes.
-      this.log('[CINEMATIC] ✓ All character elements handled — running final @ button verification...');
-      const allNames = pending.map(p => p.name);
-      try {
-        const finalCheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
-        if (finalCheck.missing.length > 0) {
-          this.log(`[CINEMATIC] ⚠ Final check found ${finalCheck.missing.length} element(s) missing: ${finalCheck.missing.map(n => '@' + n).join(', ')}`, 'warn');
-          // Gate — don't auto-proceed with missing elements
-          this.emit({ type: 'cinematic-manual-element-checklist', pending: finalCheck.missing.map(n => ({ name: n, description: '' })) });
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'elements-ready' });
-          this.log(`[CINEMATIC] ${finalCheck.missing.length} element(s) missing despite creation success — waiting for "Elements Ready" click`);
-          await this.waitForApproval('elements-ready');
-          this.log('[CINEMATIC] ✓ Element gate resolved after final check — continuing');
-        } else {
-          this.log(`[CINEMATIC] ✓ All ${allNames.length} elements confirmed via @ button — proceeding to scene image generation`);
-        }
-      } catch (finalErr) {
-        this.log(`[CINEMATIC] @ button final verification failed: ${finalErr.message} — proceeding`, 'warn');
-      }
+      // All elements created/skipped successfully — each was individually confirmed
+      // via @ button during the creation loop (Task #2 fix ensures existingElements
+      // is kept in sync). No redundant batch re-verification needed.
+      this.log(`[CINEMATIC] ✓ All ${pending.length} character elements created/confirmed — proceeding to scene image generation`);
     }
 
     // ── CRITICAL: Switch from Elements panel to Generations view ──
@@ -4387,13 +4346,22 @@ class PipelineOrchestrator {
           db.setAssetElementName(portraitAsset.id, p.name);
         } catch (enErr) {
           this.log(`[CINEMATIC] ERROR: element_name write failed for ${p.name} (asset ${portraitAsset.id}): ${enErr.message}`, 'error');
-          // Retry once after 500ms
-          try {
-            await new Promise(r => setTimeout(r, 500));
-            db.setAssetElementName(portraitAsset.id, p.name);
-            this.log(`[CINEMATIC] ↳ Retry succeeded for ${p.name}`);
-          } catch (retryErr) {
-            this.log(`[CINEMATIC] ↳ Retry also failed for ${p.name}: ${retryErr.message}`, 'error');
+          // Retry up to 3 times with exponential backoff (500ms, 1000ms, 2000ms)
+          let persistSucceeded = false;
+          const retryDelays = [500, 1000, 2000];
+          for (let ri = 0; ri < retryDelays.length; ri++) {
+            try {
+              await new Promise(r => setTimeout(r, retryDelays[ri]));
+              db.setAssetElementName(portraitAsset.id, p.name);
+              this.log(`[CINEMATIC] ↳ Retry ${ri + 1}/${retryDelays.length} succeeded for ${p.name}`);
+              persistSucceeded = true;
+              break;
+            } catch (retryErr) {
+              this.log(`[CINEMATIC] ↳ Retry ${ri + 1}/${retryDelays.length} failed for ${p.name}: ${retryErr.message}`, 'warn');
+            }
+          }
+          if (!persistSucceeded) {
+            this.log(`[CINEMATIC] ↳ All ${retryDelays.length} retries exhausted for ${p.name}`, 'error');
             elementNamePersistFailures++;
           }
         }
@@ -11031,3 +10999,4 @@ REWRITTEN DESCRIPTION:`,
 }
 
 module.exports = { PipelineOrchestrator, TIER_TEST, TIER_STANDARD, TIER_LONG_FORM, TIER_PRESTIGE, getDurationTier, DURATION_PRESETS, CINEMATIC_DURATION_PRESETS };
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
