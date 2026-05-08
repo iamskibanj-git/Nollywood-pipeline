@@ -443,8 +443,8 @@ Cinematic mode uses a **credit-first, story-driven** approach. The clip is the a
 - Completion view shows mode + aspect + duration as a rounded badge below the success message. Lets the user confirm at the end of a 30-min long-form run that they got cinematic output as intended.
 
 **Cinematic backlog (priority-ordered):**
-- 🟢 **RESOLVED (Session 9, updated May 2026) — Element creation automation works.** ~~Old issue: Elements panel → Generations view transition stuck state. Fixed by Generations tab click + stuck-guard.~~ **May 2026:** Elements tab removed entirely. Element creation now uses @ toolbar button modal overlay. The old panel→Generations transition issue no longer exists. `_ensureGenerationsView()` Elements-panel detection is a legacy no-op.
-- 🔴 **HIGH — Scene image generation end-to-end verification needed.** The toolbar setup sequence (Generations → Image → Cinematic Cameras → 1/4 → aspect → 2K → 1x1) is coded but needs live validation. ~~Model selector guards against Elements panel misclicks (OBSOLETE May 2026 — Elements panel removed).~~ execCommand prompt typing proven to work.
+- 🟢 **RESOLVED (Session 9) — Element creation automation works.** Elements are detected and created correctly. The blocking issue was the **Elements panel → Generations view transition**: after element setup, the UI stayed on the Elements panel, and scene generation couldn't find the toolbar. Fixed by: (a) orchestrator clicks Generations tab after element setup, (b) `_ensureGenerationsView()` detects Elements panel via "Add to Project" button count, (c) `_setupToolbarSequence()` has stuck-guard that clicks Generations on any 5s hang.
+- 🔴 **HIGH — Scene image generation end-to-end verification needed.** The toolbar setup sequence (Generations → Image → Cinematic Cameras → 1/4 → aspect → 2K → 1x1) is coded but needs live validation. Model selector guards against Elements panel misclicks. execCommand prompt typing proven to work.
 - 🟡 Element name generation: `${char.id.replace(/^character_/, '')}_${titleInitials}` produces ugly identifiers like `@1_matmw` (from `character_1` + `Mass production - Nollywood`). Should derive from `character.description_label` (slugified) instead — would yield `@mama_blessing_matmw`.
 - `kling-history-recovery.js` — parallel to existing Veo `higgsfield-history.js`. Scrapes Higgsfield Kling assets to reclaim orphans when a local download fails after server-side generation succeeded. Same scoring + tier infrastructure can be reused. Estimated 3-4 hours.
 - Voice-tone binding automation in element creation flow — currently elements are created voice-less. User must manually bind Nigerian English voice tone in Higgsfield UI for best Kling lip-sync. Phase 2 fallback step the user opts into per-character.
@@ -483,7 +483,7 @@ Research → Title → Script (cinematic schema with blocking + kling_clips)
 | `migrations/012-cinematic-video.sql` | 4 | `kling_clip_id`, `line_refs` columns + index |
 | `prompts/script-prompt.txt` | 1 | `{{CINEMATIC_SCAFFOLDING}}` placeholder |
 | `prompts/structure-review-prompt.txt` | 1 | `{{CINEMATIC_RUBRIC_EXTENSION}}` placeholder |
-| `src/main/automation/higgsfield-elements.js` | 2, 3 | Element creation (chars + locations + props), @ toolbar button modal automation (May 2026 rewrite — old Elements tab removed) |
+| `src/main/automation/higgsfield-elements.js` | 2, 3 | Element creation (chars + locations + props), 7-click UI path automation |
 | `src/main/automation/cinema-studio-automation.js` | 3 | Cinema Studio 2.0 scene image generation with @-element resolution |
 | `src/main/automation/kling-automation.js` | 4 | Kling 3.0 multi-shot video gen with start-frame + native audio + parsePromptSegments helper |
 | `src/main/verify/clipVerifier.js` | 5 | `verifyCinematicClip()` + per-line greedy matching |
@@ -517,7 +517,7 @@ Research → Title → Script (cinematic schema with blocking + kling_clips)
 
 **Phase 3 (Migration 011, asset types: `location_image`, `scene_image_cinematic`):**
 - Extended `HiggsfieldElements` with `createLocationElement()` + `createPropElement()` (refactored common path into `_createElement({category})` helper)
-- New automation module: `src/main/automation/cinema-studio-automation.js` — `CinemaStudioAutomation` class with `_ensureCinemaStudioActive`, `_setupToolbarSequence` (master 7-step setup: Generations→Image→CinematicCameras→1/4→aspect→2K→1x1), `_clickGenerationsReset` (stuck recovery), `_runStepWithStuckGuard` (5s timeout per step), `_ensureImageMode` (aria-selected on leftmost dual tabs), `_ensureCinematicCamerasModel` (model dropdown; ~~Elements-panel guard OBSOLETE May 2026~~), `_setImageCount`, `_setResolution2K`, `_setGrid1x1`, `_attachLocationReference`, `_setAspectRatio`, `_typeBlockingPrompt` (execCommand for Lexical + keyboard.type for @mentions), `_ensureGenerationsView` (~~Elements panel detection~~ legacy no-op since May 2026), `generateSceneImage`, `_waitAndDownload` (polls images.higgs.ai gallery), `_readToolbarState` (mode/model/aspect/cost from aria-selected + button text)
+- New automation module: `src/main/automation/cinema-studio-automation.js` — `CinemaStudioAutomation` class with `_ensureCinemaStudioActive`, `_setupToolbarSequence` (master 7-step setup: Generations→Image→CinematicCameras→1/4→aspect→2K→1x1), `_clickGenerationsReset` (stuck recovery), `_runStepWithStuckGuard` (5s timeout per step), `_ensureImageMode` (aria-selected on leftmost dual tabs), `_ensureCinematicCamerasModel` (model dropdown with Elements-panel guard), `_setImageCount`, `_setResolution2K`, `_setGrid1x1`, `_attachLocationReference`, `_setAspectRatio`, `_typeBlockingPrompt` (execCommand for Lexical + keyboard.type for @mentions), `_ensureGenerationsView` (Elements panel detection + Generations click), `generateSceneImage`, `_waitAndDownload` (polls images.higgs.ai gallery), `_readToolbarState` (mode/model/aspect/cost from aria-selected + button text)
 - Orchestrator: new `_runCinematicLocationSetup()` (extracts unique `location_element_hint` values from script, generates empty location images as reference images for scene gen) + `_runCinematicSceneImageStage()` (per scene: resolves @location + @character refs, builds blocking, generates via Cinema Studio 2.0)
 - Element-setup stage now runs character element creation + location image generation in sequence
 - Stage 3B forks based on `generatorMode`: cinematic → `_runCinematicSceneImageStage`, staged → existing Nano Banana per-line generation (unchanged)
@@ -554,14 +554,14 @@ Research → Title → Script (with cinematic fields)
 **What Phase 2 added (on top of Phase 1):**
 - Migration 010: `project_assets.higgsfield_element_id TEXT` + `project_assets.element_name TEXT` + two indexes. Schema ready to track which Higgsfield element each asset maps to.
 - New asset type: `character_grid` — 4-column reference sheet (front / left profile / right profile / back view, each with full-body + close-up) generated via Nano Banana Pro using the character's portrait as the reference image. Grid prompt from IMPROVEMENT-CINEMATIC-WORKFLOW.md's character-grid section.
-- New automation module: `src/main/automation/higgsfield-elements.js`. Class `HiggsfieldElements` with methods: `_openElementsModal`, `listExistingElements`, `elementExists(name)`, `createCharacterElement({name, portraitPath, gridPath, description})`, static `buildManualChecklist(pending)`. ~~Old flow: 7-click UI path through Elements tab.~~ **May 2026 rewrite:** Opens @ toolbar button modal overlay → clicks "Create new" card → fills form (upload images, name, category, description) → Save → re-opens modal to verify. Idempotent — checks existing elements by name before creating. Graceful fallback: per-element failures are collected, catastrophic failures surface the manual checklist via orchestrator event.
+- New automation module: `src/main/automation/higgsfield-elements.js`. Class `HiggsfieldElements` with methods: `_openElementsPanel`, `listExistingElements`, `elementExists(name)`, `createCharacterElement({name, portraitPath, gridPath, description})`, static `buildManualChecklist(pending)`. Navigates the 7-click UI path Higgsfield → Cinema Studio → 2.5 toggle → Image tab → Cinema 2.0 → @ button → + Create new → form. Idempotent — checks existing elements by name before creating. Graceful fallback: per-element failures are collected, catastrophic failures surface the manual checklist via orchestrator event.
 - New orchestrator stage: `_runCinematicElementSetup(projectId, projectDir)`. Gated behind `generatorMode === 'cinematic'` — staged mode is a no-op passthrough. Runs between `portraits-done` and scene generation (Stage 3A.5). Generates grids for every character, then creates character elements. On automation failure, emits `cinematic-manual-element-checklist` event and pauses at new `elements-ready` approval gate until user confirms elements are ready.
 - Element naming convention: `@{char-id-suffix}_{title-initials}` (e.g. `@claire_thp` for Claire in "The Heir's Probation"). `_titleInitials()` helper derives initials from the project title.
 - New IPC: `approve-elements-ready` routes to `orchestrator.approveElementsReady()`.
 - New renderer view: `#view-cinematic-elements` with pending-elements list + manual-creation steps (collapsible) + "Elements Ready — Continue" button. Shown when `event.gate === 'elements-ready'` OR `cinematic-manual-element-checklist` event received.
 
 **Phase 2 known limitations (honest):**
-- ~~The 7-click UI path automation is best-effort.~~ **May 2026:** Higgsfield removed the Elements tab entirely. Element creation now uses the @ toolbar button modal overlay (click @ → "Create new" card → form → Save). The automation is best-effort — selectors may need refinement as Higgsfield's UI evolves. The fallback is MANDATORY, not optional — treat automation as a convenience that reduces clicks, not a guarantee.
+- The 7-click UI path automation is best-effort. Selectors may need refinement against a fresh Higgsfield UI pass (Session 8 DevTools inspection covered the path conceptually but specific role/aria attributes weren't all captured). The fallback is MANDATORY, not optional — treat automation as a convenience that reduces clicks, not a guarantee.
 - Voice tone binding is NOT automated. Character elements are created voice-less. For the best Kling lip-sync output, the user should manually bind a Nigerian English voice tone to each element via Higgsfield's UI after creation. Phase 2 doesn't block on this — voice tone can be bound before or during Phase 4 (Kling video generation).
 - Location elements + prop elements are NOT in Phase 2. Locations are Phase 3 (paired with location image generation). Props emerge from `scene.props_in_scene` during Phase 3 or later.
 - Native file picker for uploading portrait + grid images to the element form — this is the one OS-level dialog we CAN'T automate through Playwright, so the automation uses Playwright's `page.waitForEvent('filechooser')` + `fileChooser.setFiles()` pattern. If that interception fails (ad popup covers the click, filechooser doesn't fire in time), the automation fails and we fall back to manual.
@@ -584,7 +584,7 @@ Research → Title → Script (with cinematic fields)
 - Test: migration 009 verified against fresh DB; cinematic scaffolding substitution verified via integration test.
 
 **What Phase 1 deliberately does NOT do (deferred to Phases 2-6):**
-- No element-creation automation (Phase 2; ~~old: 7-8 click UI path~~ now @ toolbar button modal since May 2026)
+- No element-creation automation (UI path is 7-8 clicks deep; Phase 2)
 - No location generation stage (Phase 3)
 - No Cinema Studio 2.0 scene image automation (Phase 3)
 - No Kling 3.0 video generation automation (Phase 4)
@@ -606,7 +606,7 @@ Cinematic mode projects created today will generate cinematic-format script JSON
 **Why it exists:** Current staged output feels "stagey" because of the Conversation Lock rule in `script-prompt.txt` — every clip is a wide-group shot with one character's mouth moving. The fix isn't prompt-tuning (Veo generates single-shot 8s clips, no cuts within a generation). The fix is switching to Kling 3.0 which plans multi-shot coverage inside one generation, producing real cinematic rhythm with character consistency across cuts.
 
 **Key architectural pieces:**
-- **Higgsfield @ toolbar button modal** is load-bearing for Characters and Props (`@claire`, `@flashlight`) with voice tones baked into character elements. ~~Old: Elements tab/panel.~~ **May 2026:** Elements tab removed; the @ toolbar button in the bottom toolbar is now the sole entry point for element creation and browsing (opens a modal overlay with element grid + "Create new" card). **Locations are NOT elements** — they're plain reference images attached via the `+` button → "Image Generations" tab when Cinema Studio 2.0 generates a scene image. Earlier Phase 3 design tried creating Location elements; removed mid-build after user confirmed locations are reference images, never @-referenced in prompts.
+- **Higgsfield Elements panel** is load-bearing for Characters and Props (`@claire`, `@flashlight`) with voice tones baked into character elements. **Locations are NOT elements** — they're plain reference images attached via the `+` button → "Image Generations" tab when Cinema Studio 2.0 generates a scene image. Earlier Phase 3 design tried creating Location elements; removed mid-build after user confirmed locations are reference images, never @-referenced in prompts.
 - **Pre-production:** portraits + character grids (4-angle reference sheets) → character elements with voice tones.
 - **Production (images):** Nano Banana empty locations → Cinema Studio 2.0 scene images using `@element` refs + explicit blocking (frame-left/center/right).
 - **Cinematography (video):** Kling 3.0 multi-shot (up to 6 shots per 10-12s clip) with dialogue in Kling's bracketed syntax: `[@claire, speaking in a strained Nigerian English accent]: "..."`.
@@ -614,7 +614,7 @@ Cinematic mode projects created today will generate cinematic-format script JSON
 
 **What's shared with staged:** research stage, script generation + structural review, title approval, project DB, history recovery, Verify Clip (with adapted scope — grades shot groups not individual lines), assembly, publish.
 
-**What's new:** element creation automation (@ toolbar button modal overlay — ~~old: 7-8 click deep UI path, removed May 2026~~), location generation stage, Cinema Studio 2.0 automation surface, Kling 3.0 automation surface, `blocking` + `kling_clips` fields in script schema, generator_mode flag + migration 009.
+**What's new:** element creation automation (7-8 click deep UI path), location generation stage, Cinema Studio 2.0 automation surface, Kling 3.0 automation surface, `blocking` + `kling_clips` fields in script schema, generator_mode flag + migration 009.
 
 **Phase 0 validation (Session 8):** end-to-end test run confirmed Nano Banana → Cinema Studio 2.0 (with `@claire` + `@richard` element refs + 16:9 cinematic + kitchen location) → Kling 3.0 (multi-shot Auto mode, 15s, 720p, start frame from Cinema Studio, Nigerian English dialogue per character). Cost: ~32 credits. User has production-tested Kling 3.0 since January 2026; Nigerian accent renders correctly, character consistency holds across cuts, lip-sync switches per character.
 
@@ -727,27 +727,24 @@ Key differences between image and video pages:
 - Image model defaults to **`"Soul Cinema"`** (not "Cinematic Cameras" or "Nano Banana Pro"). Must be in image indicator list.
 - GENERATE button text can be `"GENERATE0.125"` or `"Generate26.25"` (no space/symbol between text and cost). Regex `/([\d,.]+)\s*$/` handles all variants.
 
-**Elements Panel — REMOVED (May 2026):**
-- As of May 2026, Higgsfield removed the Elements tab/panel entirely from the Cinema Studio UI. There is no longer a "Generations" / "Elements" tab pair at the top of the page. The stuck-state issue documented below is OBSOLETE.
-- **Old behavior (pre-May 2026):** Elements panel showed "Project elements", "Personal elements", "Add to Project" buttons, "Delete"/"Save" buttons, "Advanced settings", "Create Element". It had no Image/Video tabs, GENERATE button, or prompt textbox. The only exit was clicking the "Generations" tab.
-- **New behavior (May 2026+):** The **@ toolbar button** in the bottom toolbar (next to the 1x1 grid button) is now the SOLE entry point for both browsing existing elements AND creating new ones. Clicking it opens a **modal overlay** with: "Elements" heading, search bar, X close button, category sidebar (All/Pinned/Characters/Locations/Props), a "Create new" card (first position with + icon), and a scrollable grid of existing element cards with thumbnails.
-- **Element creation flow (new):** Click @ toolbar button → modal opens → click "Create new" card → form appears inside a dialog with: image upload zone (hidden 1x1 file input, accepts png/jpeg/mp4), element name input (placeholder "reference-name"), category combobox (Auto/Character/Location/Prop), Advanced settings toggle → description textarea + workspace combobox, Cancel + Save buttons.
-- **CRITICAL — Back button behavior:** The `<` back arrow from the "New element" form closes the ENTIRE modal and returns to the Generations view — it does NOT go back to the elements list. After saving an element, the automation must re-open the @ modal to verify the element was created.
-- **Detection signals (new):** Modal is open = "Elements" heading present + "Create new" text visible + dialog/overlay container in DOM. No more "Add to Project" or "Project elements" signals.
-- **Guards updated:** Model selector no longer needs to check for "Add to Project" buttons (Elements panel doesn't exist). The `_ensureGenerationsView()` Elements-panel detection in `cinema-studio-automation.js` is now a legacy no-op — Elements panel can't appear.
+**Elements Panel — CRITICAL Stuck State:**
+- After element creation/checking, the UI stays on the Elements panel (shows "Project elements", "Personal elements", "Add to Project" buttons, "Delete"/"Save" buttons, "Advanced settings", "Create Element").
+- The Elements panel does NOT have Image/Video tabs, GENERATE button, or prompt textbox. All toolbar detection fails.
+- **The ONLY way out is clicking the "Generations" tab** (top of page, next to "Elements" tab). Going home does NOT dismiss it — the panel persists across navigation.
+- Detection signals: `"Add to Project"` button count ≥ 2, `"Delete"` + `"Save"` buttons present, `"Advanced settings"` text, `"Project elements"` heading, NO GENERATE button.
 
 **Model Selector:**
 - The model button is in the bottom toolbar (y > 65% of viewport). Shows the model name text: "Cinematic Cameras", "Cinema Studio 3.5", "Nano Banana Pro", etc.
 - **DUAL TOOLBAR BUG (CRITICAL):** The bottom toolbar renders TWO duplicate sets at slightly different x positions (e.g. x:373 vs x:378). Each set has its own model button showing DIFFERENT model names. The controlling set is the LEFTMOST (minimum x). The duplicate set at higher x shows stale/wrong model (e.g. "Nano Banana Pro" when the controlling set shows "Cinematic Cameras"). **ALL model reads and clicks MUST filter to the leftmost set** — collect all model-name buttons, find minX, only use buttons within 10px of minX. Reading from the wrong set causes infinite switch loops.
 - **Dropdown dismissal on reset:** When a stuck guard fires during model selection, the dropdown stays open and contaminates subsequent toolbar scans. `_clickGenerationsReset()` now presses Escape twice before resetting to dismiss any open dropdowns/popovers.
 - Model dropdown (verified live): Cinematic section (Cinematic Characters, Cinematic Locations, Soul Cinema, Cinematic Cameras), All models section (Auto, Higgsfield Soul, Google, ByteDance, Grok, Z-Image).
-- **GUARD against Elements panel**: ~~OBSOLETE (May 2026) — Elements panel removed from UI.~~ Previously needed to check for "Add to Project" buttons. No longer necessary.
+- **GUARD against Elements panel**: When on Elements panel, element rows (e.g. "mama_agbadoA 48-year-old Nigerian...") are wide buttons (526px) in the same y zone. The model selector must check for "Add to Project" buttons and skip fallback matching if detected.
 - "Style:Auto" and "Camera:Auto" are style/camera pickers, NOT model selectors. Do not match "Auto" as a model name — it's too ambiguous.
 - Default model for new projects: "Nano Banana Pro" (not Cinematic Cameras). Must explicitly switch.
 - **If controlling set already shows "Cinematic Cameras", do NOT click it** — clicking an already-selected model opens an "All models" dropdown where "Cinematic Cameras" is not listed, creating a stuck loop.
 
 **Toolbar Setup Sequence (the correct order):**
-1. ~~Click **Generations** tab (exit Elements panel)~~ — OBSOLETE (May 2026): Elements panel removed. Step 1 is now a no-op; if toolbar isn't visible, nuke context.
+1. Click **Generations** tab (exit Elements panel)
 2. Click **Image** tab (not Video)
 3. Select **Cinematic Cameras** model
 4. Set **1/4** image count (decrement button)
@@ -755,10 +752,7 @@ Key differences between image and video pages:
 6. Set **2K** resolution
 7. Set **1x1** grid
 8. Attach **reference image** (+ button → Uploads tab → fileChooser upload → click tile → verify thumbnail)
-8b. **Verify elements via @ button** — **TWO DIFFERENT @ MECHANISMS exist (CRITICAL distinction as of May 2026):**
-   - **Mechanism A — @ toolbar button click (element creation/browsing):** Clicking the @ toolbar button (small no-text SVG button, next to 1x1 grid) opens a **modal overlay** for browsing and creating elements. Used by `higgsfield-elements.js` (`_openElementsModal()`). This is the element management UI — the SOLE replacement for the removed Elements tab. The modal has its own close button (X), search bar, category sidebar, and element grid.
-   - **Mechanism B — typing `@` into the prompt textbox (element verification):** Typing the `@` character into the Lexical prompt textbox triggers an **autocomplete dropdown** listing available elements. Used by `cinema-studio-automation.js` (`_verifyElementsViaAtButton()`). This verifies elements exist in the Higgsfield project at scene generation time. This mechanism is UNCHANGED — it types `@` into the prompt, reads the dropdown, then cleans up. This MUST ONLY run when mode = Image AND model = Cinematic Cameras.
-   - **Root cause of past failures (April 2026):** After a page nuke (`resetFormForNextGeneration()`), the page lands on the base Cinema Studio URL which defaults to Video mode. The toolbar takes seconds to render. **Fix:** (1) `_setupToolbarSequence()` has a PRE-STEP that waits up to 15s for the toolbar to render. (2) Image mode verification no longer falls back to `ok: true` on ambiguous states. (3) Phase 1b DOM smoke check throws `SAFETY STOP` if video indicators persist after setup. **If Mechanism B runs in the wrong mode, it injects `@@@@` into the textbox which contaminates the prompt and can trigger a 96-credit video generation.**
+8b. **Verify elements via @ button** — The @ element check types `@` into the prompt to verify character elements exist in the Higgsfield project. This MUST ONLY run when mode = Image AND model = Cinematic Cameras. **Root cause of past failures (April 2026):** After a page nuke (`resetFormForNextGeneration()`), the page lands on the base Cinema Studio URL which defaults to Video mode. The toolbar takes seconds to render. The old toolbar setup had a `no-video-guns-fallback` that returned success when it found NO indicators at all (neither video nor image) — treating an empty/loading toolbar as "probably Image mode". This let the pipeline proceed, and by the time the @ check ran, the toolbar had loaded into Video mode. **Fix:** (1) `_setupToolbarSequence()` now has a PRE-STEP that waits up to 15s for the toolbar to render at least one concrete indicator (video OR image) before starting any steps. (2) The Step 2 (Image mode) verification no longer falls back to `ok: true` on ambiguous/empty states — if it can't positively confirm Image mode, it returns failure and triggers a restart. (3) Phase 1b in `generateSceneImage()` runs a final DOM smoke check — if video indicators are STILL present after setup "passed", it throws `SAFETY STOP` instead of silently skipping. The @ button is the RIGHTMOST small no-text SVG button in the toolbar (after 1x1 grid). Click → read dropdown → confirm characters exist → Escape to dismiss. Must happen AFTER toolbar setup, BEFORE reference attachment. **If the @ check runs in the wrong mode, it injects `@@@@` into the textbox which contaminates the prompt and can trigger a 96-credit video generation.**
 8c. **@ button cleanup (CRITICAL — April 2026):** Clicking the @ button inserts an `@` character (and potentially partial mention state) into the Lexical textbox. After dismissing the dropdown with Escape, `_verifyElementsViaAtButton()` runs a 3-attempt cleanup loop: `Ctrl+A → Backspace` + `execCommand('delete')` fallback, verifying the textbox is empty after each attempt. If 3 attempts fail, a nuclear fallback clicks away from textbox → Escape → re-focus → `Ctrl+A → Delete → Backspace`. This ensures no residual `@` text contaminates the prompt in Phase 3. Without this cleanup, the subsequent `_typeBlockingPrompt()` clear may fail to remove Lexical mention nodes, producing malformed generations with `@@` prefixes.
 9. Attach **reference image** (+ button → Uploads tab → local file → click tile → wait for thumbnail)
 10. Paste prompt (execCommand) with @mentions for characters
@@ -3457,4 +3451,30 @@ Zero downstream impact — all changes are internal to the element creation loop
 Dead code from an earlier design where element UUIDs were scraped from the Elements panel and swapped into the `cinematicElementNames` map. The pipeline no longer uses UUIDs — element names are the canonical identifiers. The block referenced variables (`swapTarget`, `tempCharIndex`) that no longer existed, making it unreachable. Removed cleanly.
 
 **Fix #2 — `existingElements` Set kept in sync during creation loop:**
-The `existingElements` Set was populated during the @ button pre-check phase but never updated when elements were successfully created and confirmed during the creation loop. The `failedElements` filter a
+The `existingElements` Set was populated during the @ button pre-check phase but never updated when elements were successfully created and confirmed during the creation loop. The `failedElements` filter at line ~4239 (`actuallyPending.filter(p => !existingElements.has(...))`) would incorrectly include successfully created elements as "failed," triggering the manual gate unnecessarily.
+Fix: Added `existingElements.add(p.name.toLowerCase().trim())` at all 3 confirmation points:
+- Success path: after @ button post-creation confirmation (line ~4166)
+- Error recovery: after @ button confirms element exists despite creation error (line ~4197)
+- Panel scraper fallback: after `elementExists()` confirms element (line ~4209)
+
+**Fix #3 — Removed redundant final sanity check in success path:**
+When all elements were created/skipped successfully, the success path ran a full batch `_verifyElementsViaAtButton` on ALL elements — costing 3-5 minutes per run. This was redundant because Fix #2 ensures each element is individually confirmed via @ button during the creation loop. Replaced ~20 lines of batch re-verification with a single log line.
+
+**Fix #4 — Cache invalidation before panel scraper fallback:**
+Already present at line ~4205 (`elements.invalidateCache()` before `elements.elementExists(p.name)`). No change needed — confirmed correct.
+
+**Fix #5 — DB persistence retries increased to 3 with exponential backoff:**
+`db.setAssetElementName()` writes are critical for cross-run map restoration. Single retry with 500ms delay was insufficient for SQLite WAL checkpoint locks. Upgraded to 3 retries with exponential backoff (500ms, 1000ms, 2000ms). Failure counter tracks exhausted retries and emits CRITICAL-level log warning that resume will break.
+
+**Files changed:**
+- `src/main/pipeline/orchestrator.js` — all 5 fixes (lines ~4140-4420)
+- `CLAUDE.md` — this section
+
+## Session 30N: Script Engine Review
+
+**Commit script:** `commit-session30N.ps1`
+
+**Task:** Thorough review of `src/main/pipeline/script-engine.js` — the Claude API integration
+that generates titles and screenplays. Review scope: prompt quality, JSON parsing resilience,
+error handling, structural grading, cinematic vs staged mode divergence, duration preset
+compliance, and any bugs or improvement opportunities discovered during review.
