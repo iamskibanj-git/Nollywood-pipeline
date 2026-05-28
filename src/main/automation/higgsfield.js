@@ -464,6 +464,15 @@ class HiggsFieldAutomation {
   // IMAGE GENERATION — Nano Banana Pro
   // ══════════════════════════════════════════════════════════
 
+  _isRetryableReferenceUploadError(err) {
+    const message = err?.message || '';
+    return (
+      message.includes('REFERENCE_UPLOAD_UNCONFIRMED') ||
+      message.includes('did not register on backend') ||
+      (message.includes('No successful upload response') && message.includes('no CDN URL swap'))
+    );
+  }
+
   async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null }) {
     // Reset per-call state — _lastDetectedUrl must NOT bleed across calls.
     // Without this, a previous portrait's CDN URL would be attached to the
@@ -485,6 +494,8 @@ class HiggsFieldAutomation {
     // fresh context + re-navigation before giving up.
     const MAX_SERVER_RETRIES = 2;
     let serverRetries = 0;
+    const MAX_REFERENCE_UPLOAD_RETRIES = 2;
+    let referenceUploadRetries = 0;
 
     while (true) { // eslint-disable-line no-constant-condition
 
@@ -1083,6 +1094,25 @@ class HiggsFieldAutomation {
       if (err.nsfwRejected) {
         console.error(`[IMG] NSFW rejection — character description must be rewritten before retrying`);
         throw err;
+      }
+
+      // Reference upload registration failures happen before Generate is clicked:
+      // the native chooser accepted the file, but Higgsfield never registered it
+      // on the backend. No credits have been spent, so retry from a clean context.
+      if (
+        references.length > 0 &&
+        !this._lastDetectedUrl &&
+        this._isRetryableReferenceUploadError(err) &&
+        referenceUploadRetries < MAX_REFERENCE_UPLOAD_RETRIES
+      ) {
+        referenceUploadRetries++;
+        console.warn(`[IMG] Reference upload did not register - fresh-context retry ${referenceUploadRetries}/${MAX_REFERENCE_UPLOAD_RETRIES}`);
+        try {
+          await this.recreateContext();
+        } catch (ctxErr) {
+          console.warn(`[IMG] Context recreate failed after reference upload issue: ${ctxErr.message}`);
+        }
+        continue; // re-enter full image setup/upload flow without submitting a generation
       }
 
       // ── SERVER-SIDE FAILURE: auto-retry (credits refunded) ──

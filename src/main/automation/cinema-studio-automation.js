@@ -59,6 +59,7 @@ class CinemaStudioAutomation {
     this._projectName = null;
     this._projectId = projectId || null; // UUID from URL: cinematic-project-id=
     this._abortRequested = false;  // Set when user closes browser — stops cascade
+    this._lastSceneReferenceProof = null;
   }
 
   /**
@@ -2253,6 +2254,97 @@ class CinemaStudioAutomation {
     }
   }
 
+  _normalizeElementOptionText(text) {
+    return String(text || '').trim().toLowerCase().replace(/^@+/, '');
+  }
+
+  _optionMatchesElementName(optionText, cleanName) {
+    const target = this._normalizeElementOptionText(cleanName);
+    const normalized = this._normalizeElementOptionText(optionText);
+    if (!target || !normalized) return false;
+    if (normalized === target) return true;
+    const tokens = normalized.split(/[^a-z0-9_-]+/).filter(Boolean);
+    return tokens.includes(target);
+  }
+
+  _isStartFrameProofValid(uploadProof, refCheck) {
+    return !!(
+      uploadProof &&
+      (uploadProof.finalizeOk || (uploadProof.batchOk && uploadProof.putOk)) &&
+      refCheck &&
+      refCheck.attached
+    );
+  }
+
+  async _checkSceneReferenceAttached() {
+    const page = this._ensurePageAlive();
+    return page.evaluate(() => {
+      const vh = window.innerHeight;
+      const tb = document.querySelector('[role="textbox"]');
+      if (!tb) return { attached: false, debug: 'no textbox' };
+      const tbRect = tb.getBoundingClientRect();
+      const tbLeftEdge = tbRect.x + 10;
+
+      for (const b of document.querySelectorAll('button')) {
+        const r = b.getBoundingClientRect();
+        if (r.y > vh * 0.55 && r.width > 0 && r.width <= 60 && r.height <= 60 && r.x <= tbLeftEdge) {
+          if (b.querySelector('img')) return { attached: true, method: 'plus-has-img' };
+        }
+      }
+
+      const nearImgs = [...document.querySelectorAll('img')].filter(i => {
+        const r = i.getBoundingClientRect();
+        return r.width > 25 && r.width <= 80 && r.height > 25 && r.height <= 80 &&
+               r.y > vh * 0.55 && r.x <= tbLeftEdge;
+      });
+      if (nearImgs.length > 0) return { attached: true, method: 'img-left-of-textbox' };
+
+      return { attached: false, debug: 'no thumbnail found near + button' };
+    }).catch(e => ({ attached: false, debug: e.message || 'error' }));
+  }
+
+  async _selectExactMentionOption(cleanName) {
+    const page = this._ensurePageAlive();
+    const match = await page.evaluate((target) => {
+      const normalize = (text) => String(text || '').trim().toLowerCase().replace(/^@+/, '');
+      const matches = (text) => {
+        const wanted = normalize(target);
+        const normalized = normalize(text);
+        if (!wanted || !normalized) return false;
+        if (normalized === wanted) return true;
+        return normalized.split(/[^a-z0-9_-]+/).filter(Boolean).includes(wanted);
+      };
+      const visible = [...document.querySelectorAll('[role="option"]')]
+        .filter(o => {
+          const r = o.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        })
+        .map((o, index) => {
+          const r = o.getBoundingClientRect();
+          return {
+            index,
+            text: (o.textContent || '').trim(),
+            x: r.x + r.width / 2,
+            y: r.y + r.height / 2,
+          };
+        });
+      const exact = visible.find(o => matches(o.text));
+      return {
+        found: !!exact,
+        option: exact || null,
+        options: visible.slice(0, 8).map(o => o.text.slice(0, 80)),
+      };
+    }, cleanName).catch(e => ({ found: false, options: [], error: e.message }));
+
+    if (!match.found || !match.option) {
+      return match;
+    }
+
+    await page.mouse.click(match.option.x, match.option.y);
+    await page.waitForTimeout(500);
+    return match;
+  }
+
   async _attachLocationReference(locationImagePath) {
     const page = this._ensurePageAlive();
     await this._dismissOverlays();
@@ -2290,6 +2382,36 @@ class CinemaStudioAutomation {
     }
 
     // ══════════════════════════════════════════════════════════════════════
+    const uploadProof = {
+      batchOk: false,
+      putOk: false,
+      finalizeOk: false,
+      responses: [],
+    };
+    const onUploadResponse = (response) => {
+      try {
+        const url = response.url();
+        const status = response.status();
+        const method = response.request()?.method?.() || '';
+        const success = status >= 200 && status < 300;
+        const isBatch = /\/media\/batch\b/i.test(url);
+        const isFinalize = /\/media\/[^/]+\/upload\b/i.test(url);
+        const isRemotePut = method === 'PUT' && /cloudfront|amazonaws|\/user_/i.test(url);
+        if (!isBatch && !isFinalize && !isRemotePut) return;
+        const entry = { method, status, kind: isBatch ? 'batch' : isFinalize ? 'finalize' : 'put' };
+        uploadProof.responses.push(entry);
+        if (!success) return;
+        if (isBatch) uploadProof.batchOk = true;
+        if (isRemotePut) uploadProof.putOk = true;
+        if (isFinalize) uploadProof.finalizeOk = true;
+        this.log(`[REF] Upload network proof: ${entry.kind} ${status}`);
+      } catch (_) {}
+    };
+    page.on('response', onUploadResponse);
+    const detachUploadListener = () => {
+      try { page.off('response', onUploadResponse); } catch (_) {}
+    };
+
     // REFERENCE IMAGE UPLOAD — + button click → Uploads tab → fileChooser
     //
     // The + button (reference picker) renders when Cinematic Cameras model
@@ -2498,14 +2620,18 @@ class CinemaStudioAutomation {
       }).catch(() => ({ error: 'evaluate failed' }));
       this.log(`[REF] Upload FAILED — page state: ${JSON.stringify(failState)}`);
       await page.keyboard.press('Escape').catch(() => {});
+      detachUploadListener();
       throw new Error(`HARD STOP: Upload failed — ${e.message.split('\n')[0]}`);
     }
 
     // ── Step 5: Wait for upload to process ────────────────────────────
-    this.log('[REF] Waiting for upload to process (Higgsfield auto-selects)...');
+    this.log('[REF] Waiting for upload to process (hard gate — backend proof required)...');
     let uploadReady = false;
     const uploadStart = Date.now();
-    while (Date.now() - uploadStart < 20000) {
+    const uploadMaxWaitMs = 240000;
+    let lastStatusLog = '';
+    let lastProgressLogAt = 0;
+    while (Date.now() - uploadStart < uploadMaxWaitMs) {
       const status = await page.evaluate(() => {
         const hasSpinner = [...document.querySelectorAll('*')].some(el => {
           const t = el.textContent?.trim();
@@ -2519,17 +2645,25 @@ class CinemaStudioAutomation {
         return imgs.length > 0 ? 'ready' : 'waiting';
       }).catch(() => 'error');
 
-      if (status === 'ready') {
+      const backendReady = uploadProof.finalizeOk || (uploadProof.batchOk && uploadProof.putOk);
+      if (status === 'ready' && backendReady) {
         uploadReady = true;
-        this.log('[REF] Upload processed — image should be auto-selected');
+        this.log(`[REF] Upload processed — backend confirmed (${uploadProof.responses.map(r => `${r.kind}:${r.status}`).join(', ')})`);
         break;
       }
-      this.log(`[REF] Upload status: ${status}...`);
+      const proofSummary = `batch=${uploadProof.batchOk}, put=${uploadProof.putOk}, finalize=${uploadProof.finalizeOk}`;
+      const logLine = `${status} (${proofSummary})`;
+      if (logLine !== lastStatusLog || Date.now() - lastProgressLogAt > 30000) {
+        this.log(`[REF] Upload status: ${logLine}...`);
+        lastStatusLog = logLine;
+        lastProgressLogAt = Date.now();
+      }
       await page.waitForTimeout(2000);
     }
 
     if (!uploadReady) {
-      this.log('[REF] WARN: Upload may not have finished — attempting to dismiss anyway');
+      detachUploadListener();
+      throw new Error(`START_FRAME_UPLOAD_NOT_SETTLED: reference upload did not finish within ${Math.round(uploadMaxWaitMs / 1000)}s (proof: ${JSON.stringify(uploadProof.responses.slice(-8))})`);
     }
 
     // Extra settle time for auto-selection
@@ -2575,9 +2709,17 @@ class CinemaStudioAutomation {
     }
 
     if (!refOk) {
+      detachUploadListener();
       throw new Error('HARD STOP: Upload — reference thumbnail not confirmed after dismiss');
     }
-    this.log('[REF] ✓ Reference image attached via + button upload');
+    const finalRefCheck = await this._checkSceneReferenceAttached();
+    const proofOk = this._isStartFrameProofValid(uploadProof, finalRefCheck);
+    detachUploadListener();
+    if (!proofOk) {
+      throw new Error(`START_FRAME_UPLOAD_UNCONFIRMED: thumbnail=${JSON.stringify(finalRefCheck)}, proof=${JSON.stringify(uploadProof.responses.slice(-8))}`);
+    }
+    this._lastSceneReferenceProof = { ...uploadProof, attached: true, attachedMethod: finalRefCheck.method };
+    this.log('[REF] ✓ Reference image attached via + button upload and backend-confirmed');
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -2897,35 +3039,11 @@ class CinemaStudioAutomation {
         this.log(`[PROMPT] @mention dropdown: ${JSON.stringify(dropdownState)}`);
 
         if (dropdownState.optionCount > 0 || dropdownState.hasListbox || dropdownState.hasRadixPop) {
-          // ── VERIFY the first option matches our target element ──
-          // Prevents selecting a wrong element from a prior project that
-          // shares a name prefix (e.g. @adanna_ms resolved instead of @adaora_hhb).
-          const firstOpt = (dropdownState.firstOptionText || '').toLowerCase();
-          const matchesTarget = firstOpt.includes(cleanName) || cleanName.includes(firstOpt.replace(/[^a-z0-9_]/g, '').slice(0, cleanName.length));
-
-          if (!matchesTarget && dropdownState.optionCount > 1) {
-            this.log(`[PROMPT] @mention mismatch: wanted "${cleanName}" but first option is "${firstOpt}" — scanning dropdown`);
-            let found = false;
-            for (let i = 1; i < Math.min(dropdownState.optionCount, 5); i++) {
-              const opt = (dropdownState.allOptions[i] || '');
-              if (opt.includes(cleanName)) {
-                for (let a = 0; a < i; a++) {
-                  await page.keyboard.press('ArrowDown');
-                  await page.waitForTimeout(150);
-                }
-                found = true;
-                this.log(`[PROMPT] @mention: found "${cleanName}" at dropdown position ${i}`);
-                break;
-              }
-            }
-            if (!found) {
-              this.log(`[PROMPT] WARN: @mention "${cleanName}" not found in dropdown: [${dropdownState.allOptions.join(', ')}] — selecting first`);
-            }
+          const exactSelection = await this._selectExactMentionOption(cleanName);
+          if (!exactSelection.found) {
+            throw new Error(`[PRE-GEN] HARD GATE: Exact @mention option not found for @${cleanName}. Options: ${JSON.stringify(exactSelection.options || dropdownState.allOptions || [])}`);
           }
-
-          await page.waitForTimeout(500); // let dropdown fully settle
-          await page.keyboard.press('Enter');
-          this.log(`[PROMPT] @mention resolved: @${cleanName} → "${dropdownState.firstOptionText}"`);
+          this.log(`[PROMPT] @mention resolved exactly: @${cleanName} → "${exactSelection.option.text}"`);
         } else {
           // Retry: backspace everything, try with extra wait
           this.log(`[PROMPT] No dropdown for "@${cleanName}" — retrying with longer wait`);
@@ -2941,17 +3059,21 @@ class CinemaStudioAutomation {
           const retryDropdown = await page.evaluate(() => {
             const opts = document.querySelectorAll('[role="option"]');
             const visible = [...opts].filter(o => o.getBoundingClientRect().width > 0);
-            return { count: visible.length, first: visible[0]?.textContent?.trim()?.slice(0, 50) || '' };
+            return {
+              count: visible.length,
+              first: visible[0]?.textContent?.trim()?.slice(0, 50) || '',
+              options: visible.slice(0, 8).map(o => (o.textContent || '').trim().slice(0, 80)),
+            };
           }).catch(() => ({ count: 0 }));
 
           if (retryDropdown.count > 0) {
-            await page.waitForTimeout(500);
-            await page.keyboard.press('Enter');
-            this.log(`[PROMPT] @mention resolved on retry: @${cleanName} → "${retryDropdown.first}"`);
+            const retryExactSelection = await this._selectExactMentionOption(cleanName);
+            if (!retryExactSelection.found) {
+              throw new Error(`[PRE-GEN] HARD GATE: Exact @mention option not found on retry for @${cleanName}. Options: ${JSON.stringify(retryExactSelection.options || retryDropdown.options || [])}`);
+            }
+            this.log(`[PROMPT] @mention resolved exactly on retry: @${cleanName} → "${retryExactSelection.option.text}"`);
           } else {
-            // Last resort: press Enter anyway (may insert as plain text)
-            await page.keyboard.press('Enter');
-            this.log(`[PROMPT] WARN: @mention unresolved: @${cleanName} — inserted as plain text`);
+            throw new Error(`[PRE-GEN] HARD GATE: @mention unresolved for @${cleanName} — refusing to insert plain text`);
           }
         }
         await page.waitForTimeout(1000); // post-selection settle — let Lexical update its state
@@ -3087,6 +3209,7 @@ class CinemaStudioAutomation {
     // The location was already generated in Cinema Studio.
     // Clear stale references first, then pick from the gallery.
     await this._clearAttachedReferences();
+    this._lastSceneReferenceProof = null;
 
     this.log('[PHASE1c] Attaching location reference from Image Generations gallery');
     await this._attachLocationReference(locationImagePath);
@@ -3152,37 +3275,15 @@ class CinemaStudioAutomation {
     }
 
     // Gate 7: Reference image MUST be attached (+ button shows thumbnail, not + icon)
-    const refCheck = await page.evaluate(() => {
-      const vh = window.innerHeight;
-      const tb = document.querySelector('[role="textbox"]');
-      if (!tb) return { attached: false, debug: 'no textbox' };
-      const tbRect = tb.getBoundingClientRect();
-
-      // Look for the + button area: small button at/left of textbox in bottom zone
-      const tbLeftEdge = tbRect.x + 10; // tolerance for shared x-coordinate
-      const btns = document.querySelectorAll('button');
-      for (const b of btns) {
-        const r = b.getBoundingClientRect();
-        if (r.y > vh * 0.55 && r.width > 0 && r.width <= 60 && r.height <= 60 && r.x <= tbLeftEdge) {
-          const hasImg = !!b.querySelector('img');
-          if (hasImg) return { attached: true, method: 'plus-has-img' };
-        }
-      }
-
-      // Also check for thumbnail img near textbox (may be sibling, not inside button)
-      const nearImgs = [...document.querySelectorAll('img')].filter(i => {
-        const r = i.getBoundingClientRect();
-        return r.width > 25 && r.width <= 80 && r.height > 25 && r.height <= 80 &&
-               r.y > vh * 0.55 && r.x <= tbLeftEdge;
-      });
-      if (nearImgs.length > 0) return { attached: true, method: 'img-left-of-textbox' };
-
-      return { attached: false, debug: 'no thumbnail found near + button' };
-    }).catch(() => ({ attached: false, debug: 'error' }));
+    const refCheck = await this._checkSceneReferenceAttached();
+    const startFrameProofOk = this._isStartFrameProofValid(this._lastSceneReferenceProof, refCheck);
 
     this.log(`[PHASE2] Reference check: ${JSON.stringify(refCheck)}`);
     if (!refCheck.attached) {
       gateFailures.push(`NO REFERENCE IMAGE (${refCheck.debug || 'no thumbnail on + button'})`);
+    }
+    if (!startFrameProofOk) {
+      gateFailures.push(`START FRAME UPLOAD NOT CONFIRMED (proof=${JSON.stringify(this._lastSceneReferenceProof?.responses?.slice?.(-8) || [])})`);
     }
 
     // ── HARD GATE VERDICT ──
@@ -3382,25 +3483,15 @@ class CinemaStudioAutomation {
     // ── FINAL REFERENCE RE-CHECK (right before clicking GENERATE) ──
     // This is the LAST line of defense. If the reference somehow detached
     // (picker auto-closed, React state drift), we catch it here.
-    const finalRefCheck = await page.evaluate(() => {
-      const tb = document.querySelector('[role="textbox"]');
-      if (!tb) return false;
-      const tbRect = tb.getBoundingClientRect();
-      const tbLeftEdge = tbRect.x + 10; // tolerance for shared x-coordinate
-      const btns = document.querySelectorAll('button');
-      for (const b of btns) {
-        const r = b.getBoundingClientRect();
-        if (r.y > window.innerHeight * 0.55 && r.width > 0 && r.width <= 60 && r.height <= 60 && r.x <= tbLeftEdge) {
-          if (b.querySelector('img')) return true;
-        }
-      }
-      return false;
-    }).catch(() => false);
+    const finalRefCheck = await this._checkSceneReferenceAttached();
 
-    if (!finalRefCheck) {
+    if (!finalRefCheck.attached) {
       throw new Error('HARD GATE (PHASE3): Reference image NOT on + button right before GENERATE — refusing to click GENERATE without reference');
     }
-    this.log('[PHASE3] ✓ Reference still attached — proceeding to GENERATE');
+    if (!this._isStartFrameProofValid(this._lastSceneReferenceProof, finalRefCheck)) {
+      throw new Error(`HARD GATE (PHASE3): Start frame upload not backend-confirmed right before GENERATE — proof=${JSON.stringify(this._lastSceneReferenceProof?.responses?.slice?.(-8) || [])}`);
+    }
+    this.log('[PHASE3] ✓ Reference still attached and backend-confirmed — proceeding to GENERATE');
 
     // Scroll toolbar into view before clicking GENERATE
     await this._scrollToolbarIntoView();
