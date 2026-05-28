@@ -1,6 +1,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
+const db = require('../database/db');
 
 // Cinematic-mode-specific rubric items injected into the structural reviewer
 // prompt via {{CINEMATIC_RUBRIC_EXTENSION}}. Only applies when the project's
@@ -225,6 +226,8 @@ Standard cinematic widescreen composition. Wide establishing shots, two-shots, a
       .replace('{{STRUCTURAL_SCAFFOLDING}}', scaffolding)
       .replace('{{CINEMATIC_SCAFFOLDING}}', cinematicScaffolding)
       .replace('{{CINEMATIC_SCHEMA_ADDENDUM}}', schemaAddendum);
+
+    prompt += this._buildCharacterNameDiversityGuidance();
 
     // If we have research data, inject it as additional context
     let researchContext = '';
@@ -483,6 +486,7 @@ CRITICAL RULES:
 9. Each kling_clip MUST include "visual_beat": a single concrete visual action tied to story meaning. NOT complex choreography — one AI-safe action that the camera can reveal. Examples: "clutches the envelope tighter", "slowly removes her ring", "steps back from the table", "hides phone behind her back", "turns the framed photo face-down". This gives Kling something visual to render beyond talking heads. The visual_beat goes into the shot direction of the most dramatically appropriate shot (usually Shot 2 or 3).
 10. Honour the scene_purpose from the outline. A "reveal" scene must actually reveal something the audience didn't know. A "confrontation" must have characters in active opposition. A "setup" scene plants something for later. If the purpose doesn't match the content, the scene is mislabeled or broken.
 11. Each scene MUST include "character_outfits": a mapping of character_id → outfit_id from the character_bible. This tells the visual pipeline which element (portrait/outfit) to use. Copy it directly from the outline's scene_beats. If a character changes outfit within a scene, SPLIT into two scenes — a single scene cannot have one character in two outfits.
+12. Every kling_clip.line_refs array MUST contain 1-3 line numbers, never 4 or more. If a dramatic beat needs more than 3 dialogue lines, create another complete kling_clip with its own real multi_shot_prompt. Never rely on auto-splitting or placeholder prompts.
 
 === STRICT RULES ===
 - Dialogue Only: Only character speech. No narration, SFX, or descriptions.
@@ -1397,6 +1401,8 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
       if (totalClips < expectedClips * 0.5) {
         // Hard fail: less than 50% of target clips is a malformed script
         throw new Error(`Script generation failed: only ${totalClips} clips produced (target ~${expectedClips}, minimum 50% = ${Math.floor(expectedClips * 0.5)}). Script is too incomplete to proceed.`);
+      } else if (expectedClips >= 100 && totalClips < expectedClips * 0.8) {
+        throw new Error(`Script generation failed: only ${totalClips} clips produced (target ~${expectedClips}, minimum 80% = ${Math.floor(expectedClips * 0.8)}). Regenerate the script before asset creation.`);
       } else if (totalClips < expectedClips * 0.8) {
         console.warn(`[SCRIPT] Clip count LOW: ${totalClips} clips (target ~${expectedClips}, 80% threshold = ${Math.floor(expectedClips * 0.8)})`);
       } else if (totalClips > expectedClips * 1.2) {
@@ -1421,77 +1427,38 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
         );
       }
 
-      // ── OVERSIZED CLIP AUTO-SPLIT ──
-      // Hard rule: max 3 lines per clip. If Claude packed 4+ lines into one clip,
-      // split it into multiple clips of 3 (with a possible remainder of 1-2).
-      // The multi_shot_prompt can't be auto-split (would need re-prompting), so
-      // we fix line_refs only and flag the prompt as needing regeneration.
-      let oversizedFixed = 0;
+      // ── CINEMATIC CLIP STRUCTURE HARD FAILS ──
+      // Story-driven clips are too expensive to patch with placeholder prompts.
+      // If Claude packs 4+ lines into one clip, regenerate instead of auto-splitting.
+      const oversizedClipIds = [];
+      const autoSplitClipIds = [];
       for (const ch of (script.chapters || [])) {
         for (const sc of (ch.scenes || [])) {
           const clips = sc.kling_clips || [];
-          const newClips = [];
           for (const clip of clips) {
             const refs = clip.line_refs || [];
-            if (refs.length <= 3) {
-              newClips.push(clip);
-              continue;
+            if (refs.length > 3) {
+              oversizedClipIds.push(`${clip.clip_id || `Ch${ch.chapter_number} S${sc.scene_number || '?'}`} (${refs.length} line_refs)`);
             }
-            // Split oversized clip into chunks of 3
-            console.warn(`[SCRIPT] ⚠ OVERSIZED CLIP: ${clip.clip_id} has ${refs.length} line_refs (max 3) — auto-splitting`);
-            oversizedFixed++;
-            for (let i = 0; i < refs.length; i += 3) {
-              const chunkRefs = refs.slice(i, i + 3);
-              const chunkIdx = Math.floor(i / 3) + 1;
-              const baseId = clip.clip_id.replace(/_c(\d+)$/, '');
-              // Recompute clip_id: find highest existing cN index in this scene
-              const existingIds = [...clips, ...newClips].map(c => c.clip_id);
-              const scenePrefix = baseId; // e.g. "ch7_sc5"
-              let maxCN = 0;
-              for (const eid of existingIds) {
-                const m = eid.match(new RegExp(`^${scenePrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_c(\\d+)$`));
-                if (m) maxCN = Math.max(maxCN, parseInt(m[1], 10));
-              }
-              const newClipId = i === 0 ? clip.clip_id : `${scenePrefix}_c${maxCN + chunkIdx}`;
-
-              newClips.push({
-                clip_id: newClipId,
-                duration_seconds: 15,
-                line_refs: chunkRefs,
-                multi_shot_prompt: i === 0
-                  ? clip.multi_shot_prompt  // first chunk keeps original prompt (best effort)
-                  : `[AUTO-SPLIT from ${clip.clip_id} — prompt needs regeneration for lines ${chunkRefs.join(',')}]`,
-              });
+            if (clip.multi_shot_prompt && clip.multi_shot_prompt.startsWith('[AUTO-SPLIT')) {
+              autoSplitClipIds.push(clip.clip_id || `Ch${ch.chapter_number} S${sc.scene_number || '?'}`);
             }
-          }
-          if (newClips.length !== clips.length) {
-            sc.kling_clips = newClips;
           }
         }
       }
-      if (oversizedFixed > 0) {
-        console.warn(`[SCRIPT] Auto-split ${oversizedFixed} oversized clip(s).`);
-        // Update total clip count after splits
-        totalClips = 0;
-        const autoSplitClipIds = [];
-        for (const ch of (script.chapters || [])) {
-          for (const sc of (ch.scenes || [])) {
-            for (const clip of (sc.kling_clips || [])) {
-              totalClips++;
-              if (clip.multi_shot_prompt && clip.multi_shot_prompt.startsWith('[AUTO-SPLIT')) {
-                autoSplitClipIds.push(clip.clip_id);
-              }
-            }
-          }
-        }
-        console.log(`[SCRIPT] Adjusted clip count after splits: ${totalClips}`);
-        if (autoSplitClipIds.length > 0) {
-          throw new Error(
-            `${autoSplitClipIds.length} clip(s) have [AUTO-SPLIT] placeholder prompts that would waste Kling credits: ` +
-            `${autoSplitClipIds.slice(0, 5).join(', ')}${autoSplitClipIds.length > 5 ? '...' : ''}. ` +
-            `Regenerate the script to fix oversized clips at the source.`
-          );
-        }
+      if (oversizedClipIds.length > 0) {
+        throw new Error(
+          `${oversizedClipIds.length} cinematic clip(s) exceed the 3-line limit: ` +
+          `${oversizedClipIds.slice(0, 5).join(', ')}${oversizedClipIds.length > 5 ? '...' : ''}. ` +
+          `Regenerate the script so each kling_clip has its own real multi_shot_prompt.`
+        );
+      }
+      if (autoSplitClipIds.length > 0) {
+        throw new Error(
+          `${autoSplitClipIds.length} clip(s) have [AUTO-SPLIT] placeholder prompts that would waste video credits: ` +
+          `${autoSplitClipIds.slice(0, 5).join(', ')}${autoSplitClipIds.length > 5 ? '...' : ''}. ` +
+          `Regenerate the script to fix oversized clips at the source.`
+        );
       }
 
       const totalCharacters = (script.character_bible || []).length;
@@ -2304,6 +2271,7 @@ STORY-DRIVEN STRUCTURE (CINEMATIC ONLY):
 - CHARACTERS PER SCENE: MAX 3. This is a hard Kling constraint — more than 3 characters in a scene degrades lip-sync and positioning quality. If 4+ characters need to interact, split into separate scenes or have characters enter/exit.
 - TARGET CLIPS: ~${storyBrief.targetClips || 50} total across the entire script. Each clip = 10-12 seconds of footage. Distribute clips across chapters based on dramatic weight — a climactic chapter might get more clips than a transitional one.
 - APPROXIMATE CLIPS PER CHAPTER: ~${Math.ceil((storyBrief.targetClips || 50) / (storyBrief.chapters || 10))} (this is guidance, not a hard rule — distribute based on story needs).
+- HARD LINE-REF RULE: every kling_clip.line_refs array must contain 1-3 line numbers, never 4+. If a beat needs more dialogue, create a second complete kling_clip with its own real multi_shot_prompt.
 ` : ''}
 AI-SAFE VISUAL STORYTELLING (visual_beat per clip):
 Cinema is not only dialogue. Each kling_clip MUST include a "visual_beat" field — ONE concrete, simple physical action that carries story meaning and that Kling can reliably render. This prevents "talking heads" syndrome and gives the camera something to reveal.
@@ -2565,88 +2533,7 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
       .replace('{{GENERATOR_MODE}}', generatorMode)
       .replace('{{CINEMATIC_RUBRIC_EXTENSION}}', generatorMode === 'cinematic' ? CINEMATIC_RUBRIC_EXTENSION : '');
 
-    // Summarise the script into something the grader can efficiently read. We
-    // don't need image_prompts / animation_prompts for structural review — just
-    // the narrative skeleton. Story-driven scripts are MUCH larger (64+ scenes,
-    // 448+ lines, 150+ clips) so we aggressively trim: no kling_clips at all
-    // (clip coherence can be checked computationally), and blocking as summary only.
-    const isStoryDriven = storyBrief.storyDriven;
-    const skeleton = {
-      title: script.title,
-      character_bible: (script.character_bible || []).map(c => ({
-        id: c.id,
-        label: c.description_label,
-        role_inferred: null, // grader will deduce from dialogue
-      })),
-      chapters: (script.chapters || []).map(ch => ({
-        chapter_number: ch.chapter_number,
-        chapter_title: ch.chapter_title,
-        scenes: (ch.scenes || []).map(sc => {
-          const base = {
-            scene_number: sc.scene_number,
-            location: sc.location,
-            ...(tier !== 'prestige' && sc.location_details ? { location_details: sc.location_details } : {}),  // R2: strip location_details for prestige
-            characters_present: sc.characters_present || [],
-            lines: (sc.lines || []).map(ln => {
-              const base = {
-                line_number: ln.line_number,
-                speaker: ln.speaker_id,
-                dialogue: tier === 'prestige'
-                  ? (ln.dialogue || '').split(/\s+/).slice(0, 6).join(' ')  // R2: truncate to 6 words for prestige skeleton compression
-                  : ln.dialogue,
-              };
-              // R2: strip tone and animation_prompt for prestige to reduce skeleton size
-              if (tier !== 'prestige') base.tone = ln.tone;
-              return base;
-            }),
-          };
-          if (generatorMode === 'cinematic') {
-            base.location_element_hint = sc.location_element_hint || null;
-            base.props_in_scene = sc.props_in_scene || [];
-            if (isStoryDriven) {
-              // Story-driven: minimal cinematic metadata — grader focuses on narrative
-              // Clip coherence (line coverage, duration, shot count) checked computationally
-              base.blocking_summary = sc.blocking
-                ? [sc.blocking.frame_left, sc.blocking.frame_center, sc.blocking.frame_right].filter(Boolean).join(' | ')
-                : null;
-              base.clip_count = (sc.kling_clips || []).length;
-            } else {
-              // Fixed-grid cinematic: full blocking + kling_clips with prompts
-              base.blocking = sc.blocking || null;
-              base.kling_clips = (sc.kling_clips || []).map(c => ({
-                clip_id: c.clip_id,
-                duration_seconds: c.duration_seconds,
-                line_refs: c.line_refs,
-                multi_shot_prompt_length: (c.multi_shot_prompt || '').length,
-                multi_shot_prompt: c.multi_shot_prompt || '',
-              }));
-            }
-          }
-          return base;
-        }),
-      })),
-    };
-
-    // For story-driven, append computed cinematic stats so the grader has them
-    // without needing the full kling_clips array
-    if (isStoryDriven) {
-      let totalClips = 0, totalLines = 0, maxCharsPerScene = 0;
-      for (const ch of script.chapters || []) {
-        for (const sc of ch.scenes || []) {
-          totalClips += (sc.kling_clips || []).length;
-          totalLines += (sc.lines || []).length;
-          const chars = (sc.characters_present || []).length;
-          if (chars > maxCharsPerScene) maxCharsPerScene = chars;
-        }
-      }
-      skeleton.cinematic_stats = {
-        total_clips: totalClips,
-        target_clips: storyBrief.targetClips || 50,
-        total_lines: totalLines,
-        total_scenes: skeleton.chapters.reduce((s, ch) => s + ch.scenes.length, 0),
-        max_characters_in_any_scene: maxCharsPerScene,
-      };
-    }
+    const skeleton = this._buildStructuralReviewSkeleton(script, tier, storyBrief, generatorMode);
 
     const userMessage = `TIER: ${tier}\nGENERATOR_MODE: ${generatorMode}\nEXPECTED CHAPTERS: ${storyBrief.chapters}\n\nSCRIPT SKELETON:\n${JSON.stringify(skeleton, null, 2)}\n\nGrade this script per the rubric. Return JSON only.`;
 
@@ -2691,6 +2578,115 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
       console.error('[REVIEW] Parse error:', e);
       return { score: 0, pass: false, tier, threshold: 0, issues: [{ severity: 'critical', category: 'grader_error', description: `Structural grader response failed to parse: ${e.message}. Cannot verify script quality.` }], strengths: [], summary: `Grader parse error: ${e.message}. Script blocked until re-review or manual override.` };
     }
+  }
+
+  /**
+   * Build the compact script skeleton sent to the structural reviewer.
+   * Story-driven cinematic scripts still include compact kling_clips evidence so
+   * the grader can verify clip existence, line coverage, shot count, and Shot 1
+   * dialogue without the full 2K+ prompt text for every clip.
+   */
+  _buildStructuralReviewSkeleton(script, tier, storyBrief, generatorMode) {
+    const isStoryDriven = storyBrief.storyDriven;
+    const skeleton = {
+      title: script.title,
+      character_bible: (script.character_bible || []).map(c => ({
+        id: c.id,
+        label: c.description_label,
+        role_inferred: c.role_inferred || c.role || null,
+      })),
+      chapters: (script.chapters || []).map(ch => ({
+        chapter_number: ch.chapter_number,
+        chapter_title: ch.chapter_title,
+        scenes: (ch.scenes || []).map(sc => {
+          const base = {
+            scene_number: sc.scene_number,
+            location: sc.location,
+            ...(tier !== 'prestige' && sc.location_details ? { location_details: sc.location_details } : {}),
+            characters_present: sc.characters_present || [],
+            lines: (sc.lines || []).map(ln => {
+              const line = {
+                line_number: ln.line_number,
+                speaker: ln.speaker_id,
+                dialogue: tier === 'prestige'
+                  ? (ln.dialogue || '').split(/\s+/).slice(0, 6).join(' ')
+                  : ln.dialogue,
+              };
+              if (tier !== 'prestige') line.tone = ln.tone;
+              return line;
+            }),
+          };
+
+          if (generatorMode === 'cinematic') {
+            base.location_element_hint = sc.location_element_hint || null;
+            base.props_in_scene = sc.props_in_scene || [];
+            base.blocking = this._compactReviewBlocking(sc.blocking);
+            base.clip_count = (sc.kling_clips || []).length;
+            base.kling_clips = (sc.kling_clips || []).map(c => this._compactReviewClip(c, isStoryDriven));
+          }
+
+          return base;
+        }),
+      })),
+    };
+
+    if (isStoryDriven && generatorMode === 'cinematic') {
+      let totalClips = 0, totalLines = 0, maxCharsPerScene = 0;
+      for (const ch of script.chapters || []) {
+        for (const sc of ch.scenes || []) {
+          totalClips += (sc.kling_clips || []).length;
+          totalLines += (sc.lines || []).length;
+          maxCharsPerScene = Math.max(maxCharsPerScene, (sc.characters_present || []).length);
+        }
+      }
+      skeleton.cinematic_stats = {
+        total_clips: totalClips,
+        target_clips: storyBrief.targetClips || 50,
+        total_lines: totalLines,
+        total_scenes: skeleton.chapters.reduce((sum, ch) => sum + ch.scenes.length, 0),
+        max_characters_in_any_scene: maxCharsPerScene,
+      };
+    }
+
+    return skeleton;
+  }
+
+  _compactReviewBlocking(blocking) {
+    if (!blocking) return null;
+    return {
+      frame_left: blocking.frame_left || null,
+      frame_center: blocking.frame_center || null,
+      frame_right: blocking.frame_right || null,
+      notes: blocking.notes || blocking.blocking_summary || null,
+    };
+  }
+
+  _compactReviewClip(clip, isStoryDriven) {
+    const prompt = clip.multi_shot_prompt || '';
+    const shotMatches = prompt.match(/\bShot\s*\d+\b/gi) || [];
+    const shot1Text = this._extractShotText(prompt, 1);
+    const compact = {
+      clip_id: clip.clip_id,
+      duration_seconds: clip.duration_seconds,
+      line_refs: clip.line_refs || [],
+      multi_shot_prompt_length: prompt.length,
+      shot_count: shotMatches.length,
+      shot1_has_dialogue: /\[[^\]]+\]\s*:\s*"/.test(shot1Text),
+      prompt_preview: prompt.slice(0, isStoryDriven ? 500 : 1200),
+    };
+    if (!isStoryDriven) compact.multi_shot_prompt = prompt;
+    return compact;
+  }
+
+  _extractShotText(prompt, shotNumber) {
+    if (!prompt) return '';
+    const startRe = new RegExp(`\\bShot\\s*${shotNumber}\\b`, 'i');
+    const start = prompt.search(startRe);
+    if (start < 0) return '';
+    const nextRe = new RegExp(`\\bShot\\s*${shotNumber + 1}\\b`, 'i');
+    const rest = prompt.slice(start + 1);
+    const next = rest.search(nextRe);
+    return next >= 0 ? prompt.slice(start, start + 1 + next) : prompt.slice(start);
   }
 
   /**
@@ -2875,6 +2871,65 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
     ];
 
     return narrativePatterns.some(p => p.test(text));
+  }
+
+  /**
+   * Build prompt guidance that pushes Claude away from the small default
+   * Nollywood name pool it tends to overuse across projects.
+   *
+   * The DB helper reads prior scripts and returns names/element hints already
+   * used in recent projects. We include those as a soft ban list, then provide
+   * broader regional name palettes so the model has somewhere better to go.
+   */
+  _buildCharacterNameDiversityGuidance() {
+    let recentNames = [];
+    try {
+      if (typeof db.getRecentCharacterNames === 'function') {
+        recentNames = db.getRecentCharacterNames(100);
+      }
+    } catch (e) {
+      console.warn(`[SCRIPT] Character-name history unavailable: ${e.message}`);
+    }
+
+    const staleDefaults = [
+      'ada', 'adaeze', 'adanna', 'adaora',
+      'emeka', 'chidi', 'chukwuemeka',
+      'ngozi', 'okafor', 'eze',
+      'tunde', 'mama ada', 'mama adaeze',
+    ];
+
+    const bannedNames = [...new Set([...recentNames, ...staleDefaults])]
+      .map(n => String(n || '').trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 120);
+
+    const bannedText = bannedNames.length
+      ? `\nRECENT / OVERUSED NAMES TO AVOID IN THIS SCRIPT:\n${bannedNames.map(n => `- ${n}`).join('\n')}`
+      : '';
+
+    return `
+
+=== CHARACTER NAME DIVERSITY (ANTI-RECYCLING RULE) ===
+Do not fall back to the same small name pool. Avoid recycling Ada, Adaeze, Emeka, Ngozi, Chidi, Okafor, or near variants unless the story absolutely requires them.
+
+${bannedText}
+
+NAME GENERATION REQUIREMENTS:
+- Every major character needs a fresh, culturally plausible Nigerian name that has not appeared in the avoid list above.
+- Vary ethnic and regional origins when the story supports it: Igbo, Yoruba, Hausa/Fulani, Edo, Delta, Ibibio, Efik, Tiv, Nupe, Ijaw, Idoma, etc.
+- Use full human names where useful: first name + surname, title + name, or culturally natural honorifics such as Mama, Papa, Chief, Pastor, Barrister, Alhaji, Alhaja, Madam.
+- Do not give unrelated characters the same first name, surname, or element_name_hint stem inside one script.
+- Derive element_name_hint from the chosen human name in snake_case. If the human name is "Morenike Balogun", use "morenike_balogun", not a generic tag like "mother" or "character_1".
+- If two characters are relatives, shared surname is allowed, but their first names must still be distinct.
+
+UNDERUSED NAME PALETTES TO DRAW FROM (examples, not a fixed list):
+- Yoruba: Morenike, Folashade, Yetunde, Ronke, Bimpe, Tinuade, Sewa, Damilola, Bamidele, Segun, Wale, Jide, Akinwale, Rotimi.
+- Igbo: Nnenna, Oluchi, Uchechi, Ifunanya, Kamsiyochukwu, Amarachi, Ikenna, Nonso, Obinna, Somto, Tochukwu, Nduka, Arinze.
+- Hausa/Fulani: Hauwa, Hadiza, Nafisa, Bilkisu, Zainab, Jamila, Aminu, Kabiru, Yakubu, Bello, Sani, Lawal, Garba.
+- Edo/Delta/Ijaw/South-South: Osas, Itohan, Eseosa, Kevwe, Oghenekaro, Tare, Tari, Tamuno, Preye, Fiyin, Ebi, Oritse, Efe.
+
+Freshness matters: character names are part of channel variety, and repeated names make separate films feel like the same recycled script.
+`;
   }
 
   /**

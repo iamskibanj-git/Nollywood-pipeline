@@ -1,0 +1,1973 @@
+/**
+ * cinema-video-automation.js - Phase 4 alternative cinematic video engine.
+ *
+ * Uses Higgsfield Cinema Studio 3.5 for video generation while keeping the
+ * orchestrator-facing contract identical to KlingAutomation:
+ *   generateClip({ startFramePath, multiShotPrompt, durationSeconds, outputPath, validElements, onGenClicked })
+ *   recoverTimedOutClip(submittedPrompt, outputPath, opts)
+ *
+ * Scene/start-frame images come from local project files. The + picker is the
+ * only scene-upload path. The @ button is only used for element eligibility.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const { KlingAutomation } = require('./kling-automation');
+
+class CinemaEligibilityError extends Error {
+  constructor(message, failedAssets = []) {
+    super(message);
+    this.name = 'CinemaEligibilityError';
+    this.code = 'CINEMA_ELIGIBILITY_FAILED';
+    this.failedAssets = failedAssets;
+  }
+}
+
+class CinemaVideoAutomation extends KlingAutomation {
+  constructor({ automation, logger, projectId }) {
+    super({ automation, logger: logger || ((msg) => console.log(`[CINEMA-VIDEO] ${msg}`)) });
+    this.modelName = 'cinema-studio-3.5';
+    this.creditLedgerModelRe = /cinema\s*studio\s*3\.5/i;
+    this._projectId = projectId || null;
+    this._elementEligibilityCache = new Map();
+    this._lastClipElementEligibility = { required: [], eligible: [] };
+  }
+
+  async generateClip({ startFramePath, multiShotPrompt, durationSeconds = 15, outputPath, validElements, aspectRatio = '16:9', onGenClicked }) {
+    if (!startFramePath) throw new Error('generateClip: startFramePath required');
+    if (!fs.existsSync(startFramePath)) throw new Error(`[PRE-GEN] Start frame file not found: ${startFramePath}`);
+    if (!multiShotPrompt) throw new Error('generateClip: multiShotPrompt required');
+    if (multiShotPrompt.length > 2500) {
+      throw new Error(`[PRE-GEN] Prompt exceeds 2500-char Cinema Studio limit (${multiShotPrompt.length} chars)`);
+    }
+
+    try {
+      await this.automation.ensureBrowser();
+      await this._ensureCinemaStudio35VideoActive(aspectRatio);
+      await this._attachStartFrameFromLocalUpload(startFramePath);
+      await this._ensureElementEligibility(validElements);
+      await this._armGenerateNetworkKillSwitch();
+      await this._setGenerateSafetyLock(true);
+      await this._typeMultiShotPrompt(multiShotPrompt, validElements);
+      await this._setGenerateSafetyLock(true);
+      await this.automation.page.waitForTimeout(800);
+    } catch (setupErr) {
+      await this._disarmGenerateNetworkKillSwitch().catch(() => {});
+      await this._setGenerateSafetyLock(false).catch(() => {});
+      if (setupErr.code === 'CINEMA_ELIGIBILITY_FAILED') throw setupErr;
+      if (setupErr.message && setupErr.message.includes('SESSION_EXPIRED')) throw setupErr;
+      throw new Error(`[PRE-GEN] ${setupErr.message}`);
+    }
+
+    try {
+      const result = await this._generateAndDownload(outputPath, durationSeconds, onGenClicked);
+      return { ...result, model: this.modelName };
+    } catch (err) {
+      await this._disarmGenerateNetworkKillSwitch().catch(() => {});
+      await this._setGenerateSafetyLock(false).catch(() => {});
+      throw err;
+    }
+  }
+
+  async _setGenerateSafetyLock(locked) {
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) return;
+    await page.evaluate((shouldLock) => {
+      const lockKey = '__cinemaGenerateSafetyLockInstalled';
+      const shieldId = 'cinema-generate-safety-shield';
+      const findGenerateButtons = () => [...document.querySelectorAll('button[type="submit"], button')]
+        .filter((b) => /generate/i.test(b.textContent || '') && b.getBoundingClientRect().width > 0);
+      const isAllowedNow = () => Date.now() < (window.__cinemaGenerateSafetyAllowUntil || 0);
+      const prevent = (event, reason) => {
+        if (!window.__cinemaGenerateSafetyLocked || isAllowedNow()) return false;
+        event?.preventDefault?.();
+        event?.stopImmediatePropagation?.();
+        console.warn(`[CINEMA-SAFETY] Blocked Generate ${reason} while safety lock is active`);
+        return true;
+      };
+      const isGenerateButton = (el) => {
+        const button = el?.closest?.('button');
+        return button && /generate/i.test(button.textContent || '') ? button : null;
+      };
+      const updateShield = () => {
+        const buttons = findGenerateButtons();
+        let shield = document.getElementById(shieldId);
+        if (!window.__cinemaGenerateSafetyLocked || isAllowedNow() || buttons.length === 0) {
+          if (shield) shield.remove();
+          return;
+        }
+        const rects = buttons.map(b => b.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0);
+        if (rects.length === 0) {
+          if (shield) shield.remove();
+          return;
+        }
+        const left = Math.min(...rects.map(r => r.left));
+        const top = Math.min(...rects.map(r => r.top));
+        const right = Math.max(...rects.map(r => r.right));
+        const bottom = Math.max(...rects.map(r => r.bottom));
+        if (!shield) {
+          shield = document.createElement('div');
+          shield.id = shieldId;
+          shield.setAttribute('data-cinema-generate-shield', 'true');
+          shield.addEventListener('click', (event) => prevent(event, 'shield click'), true);
+          shield.addEventListener('pointerdown', (event) => prevent(event, 'shield pointer'), true);
+          document.documentElement.appendChild(shield);
+        }
+        Object.assign(shield.style, {
+          position: 'fixed',
+          left: `${Math.max(0, left - 8)}px`,
+          top: `${Math.max(0, top - 8)}px`,
+          width: `${Math.max(1, right - left + 16)}px`,
+          height: `${Math.max(1, bottom - top + 16)}px`,
+          zIndex: '2147483647',
+          pointerEvents: 'auto',
+          background: 'transparent',
+          cursor: 'not-allowed',
+        });
+      };
+      const applyButtonLock = () => {
+        for (const b of findGenerateButtons()) {
+          if (window.__cinemaGenerateSafetyLocked && !isAllowedNow()) {
+            if (!b.hasAttribute('data-cinema-old-tabindex')) {
+              b.setAttribute('data-cinema-old-tabindex', b.getAttribute('tabindex') ?? '');
+            }
+            b.setAttribute('data-cinema-generate-locked', 'true');
+            b.setAttribute('aria-disabled', 'true');
+            b.setAttribute('tabindex', '-1');
+            b.style.pointerEvents = 'none';
+            b.style.filter = 'grayscale(0.65) brightness(0.8)';
+            b.style.cursor = 'not-allowed';
+            if (document.activeElement === b) b.blur();
+          } else {
+            const oldTabIndex = b.getAttribute('data-cinema-old-tabindex');
+            if (oldTabIndex !== null) {
+              if (oldTabIndex === '') b.removeAttribute('tabindex');
+              else b.setAttribute('tabindex', oldTabIndex);
+              b.removeAttribute('data-cinema-old-tabindex');
+            }
+            b.removeAttribute('data-cinema-generate-locked');
+            b.removeAttribute('aria-disabled');
+            b.style.pointerEvents = '';
+            b.style.filter = '';
+            b.style.cursor = '';
+          }
+        }
+        updateShield();
+      };
+      if (!window[lockKey]) {
+        window.__cinemaGenerateSafetyLocked = false;
+        window.__cinemaGenerateSafetyAllowOnce = false;
+        window.__cinemaGenerateSafetyAllowUntil = 0;
+        window.__cinemaGenerateSafetyHandler = (event) => {
+          const target = isGenerateButton(event.target);
+          if (!target) return;
+          prevent(event, event.type);
+        };
+        window.__cinemaGenerateSafetyKeyHandler = (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          const target = isGenerateButton(event.target) || isGenerateButton(document.activeElement);
+          if (!target) return;
+          prevent(event, `key ${event.key}`);
+        };
+        window.__cinemaGenerateSafetyFocusHandler = (event) => {
+          const target = isGenerateButton(event.target);
+          if (!target || !window.__cinemaGenerateSafetyLocked || isAllowedNow()) return;
+          target.blur();
+        };
+        document.addEventListener('click', window.__cinemaGenerateSafetyHandler, true);
+        document.addEventListener('pointerdown', window.__cinemaGenerateSafetyHandler, true);
+        document.addEventListener('keydown', window.__cinemaGenerateSafetyKeyHandler, true);
+        document.addEventListener('focusin', window.__cinemaGenerateSafetyFocusHandler, true);
+        window.__cinemaGenerateSafetyOriginalButtonClick = HTMLButtonElement.prototype.click;
+        HTMLButtonElement.prototype.click = function(...args) {
+          if (isGenerateButton(this) && window.__cinemaGenerateSafetyLocked && !isAllowedNow()) {
+            console.warn('[CINEMA-SAFETY] Blocked Generate programmatic click while safety lock is active');
+            return undefined;
+          }
+          return window.__cinemaGenerateSafetyOriginalButtonClick.apply(this, args);
+        };
+        window.__cinemaGenerateSafetyObserver = new MutationObserver(() => applyButtonLock());
+        window.__cinemaGenerateSafetyObserver.observe(document.documentElement, { childList: true, subtree: true });
+        window.__cinemaGenerateSafetyInterval = window.setInterval(applyButtonLock, 150);
+        window[lockKey] = true;
+      }
+      window.__cinemaGenerateSafetyLocked = Boolean(shouldLock);
+      window.__cinemaGenerateSafetyAllowOnce = false;
+      if (!shouldLock) window.__cinemaGenerateSafetyAllowUntil = Date.now() + 15000;
+      applyButtonLock();
+    }, Boolean(locked)).catch(() => {});
+  }
+
+  async _allowNextGenerateClick() {
+    await this._disarmGenerateNetworkKillSwitch();
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) return;
+    await page.evaluate(() => {
+      window.__cinemaGenerateSafetyLocked = false;
+      window.__cinemaGenerateSafetyAllowOnce = true;
+      window.__cinemaGenerateSafetyAllowUntil = Date.now() + 15000;
+      document.getElementById('cinema-generate-safety-shield')?.remove();
+      for (const b of [...document.querySelectorAll('button[type="submit"], button')]) {
+        if (!/generate/i.test(b.textContent || '')) continue;
+        const oldTabIndex = b.getAttribute('data-cinema-old-tabindex');
+        if (oldTabIndex !== null) {
+          if (oldTabIndex === '') b.removeAttribute('tabindex');
+          else b.setAttribute('tabindex', oldTabIndex);
+          b.removeAttribute('data-cinema-old-tabindex');
+        }
+        b.removeAttribute('data-cinema-generate-locked');
+        b.removeAttribute('aria-disabled');
+        b.style.pointerEvents = '';
+        b.style.filter = '';
+        b.style.cursor = '';
+      }
+    }).catch(() => {});
+  }
+
+  async _armGenerateNetworkKillSwitch() {
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) return;
+    await this._disarmGenerateNetworkKillSwitch();
+    const shouldBlock = (request) => {
+      const method = String(request.method() || 'GET').toUpperCase();
+      if (method === 'GET' || method === 'OPTIONS' || method === 'HEAD') return false;
+      const url = String(request.url() || '').toLowerCase();
+      const body = String(request.postData() || '').toLowerCase();
+      const haystack = `${url} ${body}`;
+      if (/clerk\.higgsfield\.ai\/v1\/client\/sessions\/[^/]+\/tokens/.test(haystack)
+          || /eligib|credit|ledger|history|autocomplete|mention|search|analytics|telemetry|sentry|segment|amplitude|mixpanel|posthog/.test(haystack)) {
+        return false;
+      }
+      // Uploads/eligibility are complete before this guard is armed. During
+      // prompt typing/autocomplete, any remaining write request is too risky:
+      // Higgsfield's Generate submit endpoint has changed names more than once.
+      return true;
+    };
+    this._generateNetworkKillSwitchHandler = async (route, request) => {
+      if (shouldBlock(request)) {
+        this.log(`[CINEMA-SAFETY] Aborted accidental generation request while typing: ${request.method()} ${request.url()}`, 'warn');
+        await route.abort('blockedbyclient').catch(() => {});
+        return;
+      }
+      await route.continue().catch(() => {});
+    };
+    await page.route('**/*', this._generateNetworkKillSwitchHandler);
+    this.log('[CINEMA-SAFETY] Generation network kill switch armed for prompt typing');
+  }
+
+  async _disarmGenerateNetworkKillSwitch() {
+    const page = this.automation.page;
+    if (!page || page.isClosed?.() || !this._generateNetworkKillSwitchHandler) return;
+    const handler = this._generateNetworkKillSwitchHandler;
+    this._generateNetworkKillSwitchHandler = null;
+    await page.unroute('**/*', handler).catch(() => {});
+    this.log('[CINEMA-SAFETY] Generation network kill switch disarmed for intentional Generate click');
+  }
+
+  async _ensureCinemaStudio35VideoActive(aspectRatio = '16:9') {
+    const page = this.automation.page;
+    if (!page) throw new Error('Playwright page not ready');
+    const targetAspect = aspectRatio === '9:16' ? '9:16' : '16:9';
+    this._targetAspect = targetAspect;
+
+    if (this._projectId && !page.url().includes(this._projectId)) {
+      this.log(`Navigating to Cinema Studio project ${this._projectId}...`);
+      await page.goto(`https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } else if (!page.url().includes('/cinema-studio')) {
+      this.log('Navigating to Cinema Studio...');
+      await page.goto('https://higgsfield.ai/cinema-studio', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+    await this._dismissAdsWithPatience('[CINEMA-VIDEO]');
+    await page.waitForTimeout(2500);
+
+    await this._ensureVideoMode();
+    await this._selectCinemaStudio35Model();
+    await this._dumpCinemaToolbarDiagnostics('before setup controls');
+    await this._ensureGenreGeneral();
+    await this._ensureStyleAuto();
+    await this._ensureCameraAuto();
+    await this._setDuration15s();
+    await this._setResolution480p();
+    await this._setAspectRatio(targetAspect);
+    await this._ensureAudioOn();
+
+    const expectedDuration = this._selectedDuration || '15s';
+    const expectedResolution = this._selectedResolution || '480p';
+    const ready = await page.evaluate(({ duration, resolution }) => {
+      const text = document.body?.innerText || '';
+      const toolbarText = (() => {
+        for (const el of document.querySelectorAll('div, section, form')) {
+          const r = el.getBoundingClientRect();
+          const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (r.width > 250 && r.height > 20 && r.y > window.innerHeight * 0.50 && /Cinema Studio 3\.5/i.test(t) && !/Nano Banana/i.test(t)) {
+            return t;
+          }
+        }
+        return '';
+      })();
+      const hasModel = /Cinema Studio 3\.5/i.test(text);
+      const hasVideoGuns = toolbarText.includes(duration) && toolbarText.includes(resolution);
+      const hasTopDefaults = /Genre:\s*General/i.test(text) && /Style:\s*Auto/i.test(text) && /Camera:\s*Auto/i.test(text);
+      const hasGenerate = [...document.querySelectorAll('button')].some(b => /generate/i.test(b.textContent || '') && b.getBoundingClientRect().width > 0);
+      return { ok: hasModel && hasVideoGuns && hasGenerate, hasModel, hasVideoGuns, hasTopDefaults, hasGenerate, toolbarText };
+    }, { duration: expectedDuration, resolution: expectedResolution });
+    if (!ready.ok) {
+      await this._dumpCinemaToolbarDiagnostics('setup incomplete');
+      throw new Error(`Cinema Studio 3.5 video setup incomplete: ${JSON.stringify(ready)}`);
+    }
+    if (!ready.hasTopDefaults) {
+      this.log('[CINEMA-VIDEO] Optional top defaults not visible; continuing with current Cinema Studio defaults');
+    }
+    this.log(`Cinema Studio 3.5 video setup ready: ${expectedDuration}, ${expectedResolution}, ${targetAspect}, audio on`);
+  }
+
+  async _ensureVideoMode() {
+    const page = this.automation.page;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const state = await page.evaluate(() => {
+        const vh = window.innerHeight;
+        const buttons = [...document.querySelectorAll('button, [role="tab"]')];
+        const videoTabs = [];
+        let hasVideoIndicators = false;
+        for (const b of buttons) {
+          const text = (b.textContent || '').trim();
+          const r = b.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          if (r.y > vh * 0.55 && text === 'Video') {
+            videoTabs.push({
+              x: r.x, y: r.y, w: r.width, h: r.height,
+              selected: b.getAttribute('aria-selected') === 'true',
+            });
+          }
+          if (r.y > vh * 0.60 && (/Cinema Studio 3\.5/i.test(text) || /^(5s|8s|10s|15s|480p|720p|1080p)$/.test(text))) {
+            hasVideoIndicators = true;
+          }
+        }
+        if (hasVideoIndicators) return { status: 'already-video' };
+        videoTabs.sort((a, b) => a.x - b.x);
+        const target = videoTabs[0];
+        if (!target) return { status: 'no-video-tab' };
+        return { status: 'click', x: Math.round(target.x + target.w / 2), y: Math.round(target.y + target.h / 2) };
+      });
+      if (state.status === 'already-video') return;
+      if (state.status === 'click') {
+        await page.mouse.click(state.x, state.y);
+        await page.waitForTimeout(2500);
+      } else {
+        await page.waitForTimeout(1500);
+      }
+    }
+    throw new Error('Video mode switch failed');
+  }
+
+  async _selectCinemaStudio35Model() {
+    const page = this.automation.page;
+    const modelBtn = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const names = /Cinema Studio|Kling|Seedance|Hunyuan|Veo|Grok|HappyHorse/i;
+      const candidates = [];
+      for (const b of document.querySelectorAll('button')) {
+        const text = (b.textContent || '').trim();
+        const r = b.getBoundingClientRect();
+        if (r.width > 80 && r.height > 20 && r.y > vh * 0.60 && names.test(text)) {
+          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text });
+        }
+      }
+      candidates.sort((a, b) => a.x - b.x);
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), text: c.text } : null;
+    });
+    if (!modelBtn) throw new Error('Cinema Studio model selector not found');
+    if (/Cinema Studio 3\.5/i.test(modelBtn.text || '')) {
+      this.log('[CINEMA-VIDEO] Cinema Studio 3.5 already selected');
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+      return;
+    }
+
+    await page.mouse.click(modelBtn.x, modelBtn.y);
+    await page.waitForTimeout(1500);
+
+    const alreadySelected = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('button, [role="option"], [role="menuitem"], div')];
+      return rows.some((el) => {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/^Cinema Studio 3\.5\b/i.test(text)) return false;
+        const r = el.getBoundingClientRect();
+        const visible = r.width > 0 && r.height > 0;
+        const hasSelectedSignal =
+          el.getAttribute('aria-selected') === 'true' ||
+          el.getAttribute('data-state') === 'checked' ||
+          /✓|check/i.test(text) ||
+          !!el.querySelector('svg, [data-state="checked"], [aria-checked="true"]');
+        return visible && hasSelectedSignal;
+      });
+    }).catch(() => false);
+    if (alreadySelected) {
+      this.log('[CINEMA-VIDEO] Cinema Studio 3.5 dropdown row already selected');
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+      return;
+    }
+
+    const option = page.getByText('Cinema Studio 3.5', { exact: true }).first();
+    if (await option.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await option.click({ timeout: 5000 }).catch(async () => {
+        const box = await option.boundingBox().catch(() => null);
+        if (!box) throw new Error('Cinema Studio 3.5 option not clickable');
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      });
+      await page.waitForTimeout(2500);
+      const selected = await page.evaluate(() => /Cinema Studio 3\.5/i.test(document.body?.innerText || '')).catch(() => false);
+      if (selected) return;
+    }
+    throw new Error('Cinema Studio 3.5 model option not found');
+  }
+
+  async _openTopPill(label) {
+    const page = this.automation.page;
+    const trigger = await page.evaluate((pillLabel) => {
+      const vh = window.innerHeight;
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, [role="button"], div')) {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.y > vh * 0.50) continue;
+        if (!new RegExp(`^${pillLabel}\\s*:`, 'i').test(text)) continue;
+        candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text });
+      }
+      candidates.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), left: c.x, top: c.y, right: c.x + c.w, bottom: c.y + c.h, text: c.text } : null;
+    }, label);
+    if (!trigger) throw new Error(`${label} control not found`);
+
+    await page.mouse.click(trigger.x, trigger.y);
+    await page.waitForTimeout(700);
+    return trigger;
+  }
+
+  async _ensureGenreGeneral() {
+    const page = this.automation.page;
+    const trigger = await this._openTopPill('Genre').catch((err) => {
+      this.log(`[CINEMA-VIDEO] Optional Genre control unavailable (${err.message}); continuing`);
+      return null;
+    });
+    if (!trigger) return;
+    const selected = await this._clickVisibleTextOption('General', trigger);
+    if (!selected) {
+      const alreadySet = await this._topPillHasValue('Genre', 'General');
+      await page.keyboard.press('Escape').catch(() => {});
+      if (!alreadySet) throw new Error('Genre option General not found');
+    }
+
+    const verified = await this._topPillHasValue('Genre', 'General');
+    if (!verified) throw new Error('Genre did not settle to General');
+  }
+
+  async _ensureStyleAuto() {
+    const page = this.automation.page;
+    const trigger = await this._openTopPill('Style').catch((err) => {
+      this.log(`[CINEMA-VIDEO] Optional Style control unavailable (${err.message}); continuing`);
+      return null;
+    });
+    if (!trigger) return;
+    await page.waitForTimeout(500);
+
+    const state = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      const manualOff = /Manual Style\s*·\s*Off/i.test(text);
+      const hasPanel = /Style Settings/i.test(text);
+      const autoCount = (text.match(/\bAuto\b/g) || []).length;
+      return { ok: hasPanel && manualOff && autoCount >= 4, hasPanel, manualOff, autoCount };
+    });
+    await page.keyboard.press('Escape').catch(() => {});
+    if (!state.ok) throw new Error(`Style Auto state not confirmed: ${JSON.stringify(state)}`);
+
+    const verified = await this._topPillHasValue('Style', 'Auto');
+    if (!verified) throw new Error('Style did not settle to Auto');
+  }
+
+  async _ensureCameraAuto() {
+    const page = this.automation.page;
+    const trigger = await this._openTopPill('Camera').catch((err) => {
+      this.log(`[CINEMA-VIDEO] Optional Camera control unavailable (${err.message}); continuing`);
+      return null;
+    });
+    if (!trigger) return;
+    await page.waitForTimeout(500);
+
+    const state = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      const hasPanel = /Camera Settings/i.test(text);
+      const hasCameraAuto = /CAMERA[\s\S]{0,120}\bAuto\b/i.test(text);
+      const hasLensAuto = /LENS[\s\S]{0,120}\bAuto\b/i.test(text);
+      const hasApertureAuto = /APERTURE[\s\S]{0,120}\bAuto\b/i.test(text);
+      return { ok: hasPanel && hasCameraAuto && hasLensAuto && hasApertureAuto, hasPanel, hasCameraAuto, hasLensAuto, hasApertureAuto };
+    });
+    await page.keyboard.press('Escape').catch(() => {});
+    if (!state.ok) throw new Error(`Camera Auto state not confirmed: ${JSON.stringify(state)}`);
+
+    const verified = await this._topPillHasValue('Camera', 'Auto');
+    if (!verified) throw new Error('Camera did not settle to Auto');
+  }
+
+  async _setDuration15s() {
+    const page = this.automation.page;
+    const chip = await this._findBottomToolbarChip(/^\d+s$/i);
+    if (!chip) throw new Error('Duration control not found');
+
+    if (/^15s$/i.test(chip.text || '')) {
+      this.log('[CINEMA-VIDEO] Duration already 15s');
+      this._selectedDuration = '15s';
+      return;
+    }
+
+    await page.mouse.click(chip.x, chip.y);
+    await page.waitForTimeout(700);
+
+    if (await this._clickVisibleTextOption('15s', chip)) {
+      await page.waitForTimeout(900);
+      if (await this._bottomToolbarHasValue('15s')) {
+        this._selectedDuration = '15s';
+        return;
+      }
+    }
+
+    const slider = await page.evaluate(() => {
+      const candidates = [...document.querySelectorAll('[role="slider"], input[type="range"]')];
+      for (const el of candidates) {
+        const label = el.getAttribute('aria-label') || el.getAttribute('name') || '';
+        const groupLabel = el.closest('[aria-label]')?.getAttribute('aria-label') || '';
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && /duration/i.test(`${label} ${groupLabel}`)) {
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        }
+      }
+      return null;
+    });
+    if (!slider) {
+      const currentDuration = await this._getBottomToolbarValue(/^\d+s$/i);
+      await page.keyboard.press('Escape').catch(() => {});
+      if (/^(4s|5s|6s|7s|8s|9s|10s|11s|12s|13s|14s|15s)$/i.test(currentDuration || '')) {
+        this.log(`[CINEMA-VIDEO] Duration slider not found; keeping existing ${currentDuration}`);
+        this._selectedDuration = currentDuration;
+        return;
+      }
+      await this._dumpCinemaToolbarDiagnostics('duration control missing');
+      throw new Error('Duration slider not found');
+    }
+
+    const y = Math.round(slider.y + slider.h / 2);
+    await page.mouse.move(Math.round(slider.x + 4), y);
+    await page.mouse.down();
+    await page.mouse.move(Math.round(slider.x + slider.w - 4), y, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(900);
+    await page.keyboard.press('Escape').catch(() => {});
+
+    const verified = await this._bottomToolbarHasValue('15s');
+    if (!verified) throw new Error('Duration did not settle to 15s');
+    this._selectedDuration = '15s';
+  }
+
+  async _setResolution480p() {
+    const page = this.automation.page;
+    const chip = await this._findBottomToolbarChip(/^(480p|720p|1080p|4K)$/i);
+    if (!chip) {
+      await this._dumpCinemaToolbarDiagnostics('resolution control missing');
+      throw new Error('Resolution control not found');
+    }
+
+    if (/^480p$/i.test(chip.text || '')) {
+      this.log('[CINEMA-VIDEO] Resolution already 480p');
+      this._selectedResolution = '480p';
+      return;
+    }
+
+    await page.mouse.click(chip.x, chip.y);
+    await page.waitForTimeout(700);
+    if (!(await this._visibleTextExistsAwayFrom('480p', chip))) {
+      await page.mouse.click(chip.x, chip.y);
+      await page.waitForTimeout(900);
+    }
+
+    const selected = await this._clickVisibleTextOption('480p', chip);
+    if (!selected) {
+      const alreadySet = await this._bottomToolbarHasValue('480p');
+      await page.keyboard.press('Escape').catch(() => {});
+      if (!alreadySet) throw new Error('Resolution option 480p not found');
+    }
+    await page.waitForTimeout(800);
+    const verified = await this._bottomToolbarHasValue('480p');
+    if (!verified) throw new Error('Resolution did not settle to 480p');
+    this._selectedResolution = '480p';
+  }
+
+  async _setAspectRatio(targetAspect) {
+    await this._setToolbarChip(targetAspect, /^(Auto|1:1|3:4|9:16|4:3|16:9|21:9)$/i, [targetAspect]);
+  }
+
+  async _setToolbarChip(targetText, chipPattern, optionTexts) {
+    const page = this.automation.page;
+    const chip = await this._findBottomToolbarChip(chipPattern);
+    if (!chip) throw new Error(`Toolbar chip for ${targetText} not found`);
+    await page.mouse.click(chip.x, chip.y);
+    await page.waitForTimeout(700);
+
+    let selected = false;
+    for (const text of optionTexts) {
+      if (await this._clickVisibleTextOption(text, chip)) {
+        await page.waitForTimeout(1000);
+        selected = true;
+        break;
+      }
+    }
+    if (!selected) {
+      const alreadySet = await this._bottomToolbarHasValue(targetText);
+      await page.keyboard.press('Escape').catch(() => {});
+      if (!alreadySet) throw new Error(`Toolbar option ${targetText} not found`);
+    }
+
+    const verified = await this._bottomToolbarHasValue(targetText);
+    if (!verified) throw new Error(`Toolbar did not settle to ${targetText}`);
+  }
+
+  async _findBottomToolbarChip(chipPattern) {
+    return this.automation.page.evaluate((patternSource) => {
+      const pattern = new RegExp(patternSource, 'i');
+      const vh = window.innerHeight;
+      const vw = window.innerWidth;
+      const inCinemaToolbar = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 250 && r.height > 20
+            && r.y > vh * 0.50
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, [role="button"], [aria-haspopup], div')) {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        if (
+          r.width > 0 && r.height > 0
+          && r.y > vh * 0.60
+          && r.width < Math.min(360, vw * 0.35)
+          && r.height < 90
+          && pattern.test(text)
+          && inCinemaToolbar(el)
+        ) {
+          const exact = pattern.test(text) && text.length <= 30;
+          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text, exact });
+        }
+      }
+      candidates.sort((a, b) => Number(b.exact) - Number(a.exact) || a.x - b.x);
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), left: c.x, top: c.y, right: c.x + c.w, bottom: c.y + c.h, text: c.text } : null;
+    }, chipPattern.source).catch(() => null);
+  }
+
+  async _dumpCinemaToolbarDiagnostics(label = 'toolbar') {
+    const page = this.automation.page;
+    const diag = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const vw = window.innerWidth;
+      const items = [];
+      for (const el of document.querySelectorAll('button, [role="button"], [aria-haspopup], input, [role="slider"], div')) {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.y < vh * 0.52) continue;
+        const text = (el.textContent || el.getAttribute('aria-label') || el.getAttribute('name') || '').replace(/\s+/g, ' ').trim();
+        if (!text && el.tagName !== 'INPUT') continue;
+        if (r.width > vw * 0.85 || r.height > 220) continue;
+        items.push({
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute('role') || '',
+          aria: el.getAttribute('aria-label') || '',
+          text: text.slice(0, 90),
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+        });
+      }
+      items.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      const generate = [...document.querySelectorAll('button')]
+        .map((b) => ({ text: (b.textContent || '').replace(/\s+/g, ' ').trim(), rect: b.getBoundingClientRect() }))
+        .filter((b) => /generate/i.test(b.text) && b.rect.width > 0 && b.rect.height > 0)
+        .map((b) => ({ text: b.text, x: Math.round(b.rect.x), y: Math.round(b.rect.y), w: Math.round(b.rect.width), h: Math.round(b.rect.height) }));
+      return { url: location.href, viewport: { w: vw, h: vh }, items: items.slice(-80), generate };
+    }).catch((err) => ({ error: err.message }));
+    this.log(`[CINEMA-VIDEO] Toolbar diagnostics (${label}): ${JSON.stringify(diag)}`);
+  }
+
+  async _ensureAudioOn() {
+    const page = this.automation.page;
+    const state = await this._findBottomToolbarChip(/^(On|Off)$/i);
+    if (!state) throw new Error('Audio On/Off control not found');
+    if (/^Off$/i.test(state.text)) {
+      await page.mouse.click(state.x, state.y);
+      await page.waitForTimeout(700);
+    }
+    const on = await this._bottomToolbarHasValue('On');
+    if (!on) throw new Error('Audio control did not settle to On');
+  }
+
+  async _clickVisibleTextOption(targetText, trigger) {
+    const page = this.automation.page;
+    const option = await page.evaluate(({ target, triggerPoint }) => {
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, [role="option"], [role="menuitem"], div, span')) {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        if (text !== target || r.width <= 0 || r.height <= 0) continue;
+        if (
+          typeof triggerPoint.left === 'number'
+          && r.x < triggerPoint.right
+          && r.x + r.width > triggerPoint.left
+          && r.y < triggerPoint.bottom
+          && r.y + r.height > triggerPoint.top
+        ) continue;
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        const distance = Math.hypot(cx - triggerPoint.x, cy - triggerPoint.y);
+        if (distance < 12) continue;
+        candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, distance });
+      }
+      candidates.sort((a, b) => a.distance - b.distance);
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2) } : null;
+    }, { target: targetText, triggerPoint: trigger });
+    if (!option) return false;
+    await page.mouse.click(option.x, option.y);
+    return true;
+  }
+
+  async _visibleTextExistsAwayFrom(targetText, trigger) {
+    return this.automation.page.evaluate(({ target, triggerPoint }) => {
+      return [...document.querySelectorAll('button, [role="option"], [role="menuitem"], div, span')].some(el => {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        if (
+          typeof triggerPoint.left === 'number'
+          && r.x < triggerPoint.right
+          && r.x + r.width > triggerPoint.left
+          && r.y < triggerPoint.bottom
+          && r.y + r.height > triggerPoint.top
+        ) return false;
+        return text === target && r.width > 0 && r.height > 0;
+      });
+    }, { target: targetText, triggerPoint: trigger }).catch(() => false);
+  }
+
+  async _topPillHasValue(label, targetText) {
+    return this.automation.page.evaluate(({ pillLabel, target }) => {
+      const vh = window.innerHeight;
+      return [...document.querySelectorAll('button, [role="button"], div')].some(el => {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && r.y < vh * 0.50
+          && new RegExp(`^${pillLabel}\\s*:`, 'i').test(text)
+          && text.toLowerCase().includes(target.toLowerCase());
+      });
+    }, { pillLabel: label, target: targetText }).catch(() => false);
+  }
+
+  async _bottomToolbarHasValue(targetText) {
+    return this.automation.page.evaluate((target) => {
+      const vh = window.innerHeight;
+      const inCinemaToolbar = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 250 && r.height > 20
+            && r.y > vh * 0.50
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      return [...document.querySelectorAll('button, [role="button"], div')].some(el => {
+        const r = el.getBoundingClientRect();
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        return r.y > vh * 0.60 && r.width > 0 && r.height > 0 && text === target && inCinemaToolbar(el);
+      });
+    }, targetText).catch(() => false);
+  }
+
+  async _getBottomToolbarValue(pattern) {
+    return this.automation.page.evaluate((patternSource) => {
+      const pattern = new RegExp(patternSource, 'i');
+      const vh = window.innerHeight;
+      const inCinemaToolbar = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 250 && r.height > 20
+            && r.y > vh * 0.50
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, [role="button"], div')) {
+        const r = el.getBoundingClientRect();
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (r.y > vh * 0.60 && r.width > 0 && r.height > 0 && pattern.test(text) && inCinemaToolbar(el)) {
+          candidates.push({ x: r.x, text });
+        }
+      }
+      candidates.sort((a, b) => a.x - b.x);
+      return candidates[0]?.text || null;
+    }, pattern.source).catch(() => null);
+  }
+
+  async _attachStartFrameFromLocalUpload(localPath) {
+    const page = this.automation.page;
+    this.log(`Uploading start frame from local file: ${path.basename(localPath)}`);
+
+    const beforeSrcs = await this._visiblePickerImageSrcs();
+    await this._openSceneUploadPicker();
+    await this._clickPickerTab('Uploads');
+    const beforeAfterOpen = new Set([...(beforeSrcs || []), ...(await this._visiblePickerImageSrcs())]);
+
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser', { timeout: 20000 }),
+      this._clickUploadMediaControl(),
+    ]);
+    await chooser.setFiles(localPath);
+
+    const card = await this._waitForNewUploadCard(beforeAfterOpen, 180000);
+    const status = await this._waitForSceneEligibility(card, 420000);
+    if (status === 'not-eligible') {
+      throw new CinemaEligibilityError(`Scene image is Not eligible: ${path.basename(localPath)}`, [{
+        type: 'scene-image',
+        name: path.basename(localPath),
+        path: localPath,
+        status: 'Not eligible',
+      }]);
+    }
+
+    await this._selectEligibleSceneImageAndAttach(this._lastEligibleSceneUploadCard || card);
+    this.log(`Start frame uploaded and eligible (${Math.round(card.waitMs / 1000)}s upload/eligibility window)`);
+  }
+
+  async _openSceneUploadPicker() {
+    const page = this.automation.page;
+    const plus = await page.evaluate(() => {
+      const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"]');
+      if (!tb) return null;
+      const tbRect = tb.getBoundingClientRect();
+      const candidates = [];
+      for (const b of document.querySelectorAll('button')) {
+        const r = b.getBoundingClientRect();
+        if (r.width > 25 && r.width <= 80 && r.height > 25 && r.height <= 80 &&
+            r.x < tbRect.x && Math.abs((r.y + r.height / 2) - (tbRect.y + tbRect.height / 2)) < 90) {
+          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height });
+        }
+      }
+      candidates.sort((a, b) => b.w * b.h - a.w * a.h);
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2) } : null;
+    });
+    if (!plus) throw new Error('Scene upload + button not found');
+    await page.mouse.click(plus.x, plus.y);
+    await page.waitForTimeout(1500);
+  }
+
+  async _clickPickerTab(tabName) {
+    const page = this.automation.page;
+    const tab = page.getByText(tabName, { exact: true }).first();
+    if (await tab.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await tab.click({ timeout: 3000 });
+      await page.waitForTimeout(1000);
+      return;
+    }
+    throw new Error(`${tabName} tab not found in picker`);
+  }
+
+  async _clickUploadMediaControl() {
+    const page = this.automation.page;
+    const uploadCard = page.locator('div.cursor-pointer').filter({ hasText: 'Upload media' }).first();
+    await uploadCard.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    const box = await uploadCard.boundingBox().catch(() => null);
+    if (box) {
+      await uploadCard.click({ force: true, timeout: 5000 });
+      return;
+    }
+
+    const upload = await page.evaluate(() => {
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, div, label')) {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const r = el.getBoundingClientRect();
+        if (
+          r.width > 120 && r.width < 280
+          && r.height > 80 && r.height < 150
+          && /^Upload media\b/i.test(text)
+        ) {
+          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text });
+        }
+      }
+      candidates.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), text: c.text } : null;
+    });
+    if (!upload) throw new Error('Upload media control not found');
+    await page.mouse.click(upload.x, upload.y);
+  }
+
+  async _visiblePickerImageSrcs() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      return [...document.querySelectorAll('img')].filter(img => {
+        const r = img.getBoundingClientRect();
+        return r.width > 50 && r.height > 50 && r.y > 50 && r.y < window.innerHeight - 40;
+      }).map(img => img.currentSrc || img.src).filter(Boolean);
+    }).catch(() => []);
+  }
+
+  async _waitForNewUploadCard(beforeSrcs, timeoutMs) {
+    const page = this.automation.page;
+    const before = new Set(beforeSrcs || []);
+    const start = Date.now();
+    let deadline = start + timeoutMs;
+    const maxDeadline = start + Math.max(timeoutMs, 420000);
+    let extended = false;
+    let fallbackCard = null;
+    let lastPendingLogAt = 0;
+    while (Date.now() < deadline) {
+      const candidates = await page.evaluate((beforeList) => {
+        const beforeSet = new Set(beforeList);
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const makeCard = (img, cardEl) => {
+          const cr = cardEl.getBoundingClientRect();
+          const text = clean(cardEl.innerText || cardEl.textContent || '');
+          const checkEl = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
+            .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
+            .filter(({ r, text }) => r.width > 20 && r.height > 12 && /check eligibility/i.test(text))
+            .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height))[0];
+          const target = checkEl?.r || cr;
+          return {
+            src: img.currentSrc || img.src || '',
+            text,
+            x: Math.round(cr.x + cr.width / 2),
+            y: Math.round(cr.y + cr.height / 2),
+            checkX: Math.round(target.x + target.width / 2),
+            checkY: Math.round(target.y + target.height / 2),
+            rect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
+            statusReady: /check eligibility|eligible|checking/i.test(text),
+            waitMs: 0,
+          };
+        };
+        const statusCardForImage = (img) => {
+          let fallback = img;
+          for (let node = img; node; node = node.parentElement) {
+            const r = node.getBoundingClientRect();
+            const text = clean(node.innerText || node.textContent || '');
+            if (r.width >= 70 && r.width <= 280 && r.height >= 70 && r.height <= 280) {
+              fallback = node;
+              if (/check eligibility|eligible|checking/i.test(text)) return node;
+            }
+          }
+          return fallback;
+        };
+        const cards = [];
+        for (const img of document.querySelectorAll('img')) {
+          const src = img.currentSrc || img.src;
+          const r = img.getBoundingClientRect();
+          if (!src || beforeSet.has(src) || r.width < 60 || r.height < 60 || r.y < 50) continue;
+          const cardEl = statusCardForImage(img);
+          cards.push(makeCard(img, cardEl));
+        }
+        cards.sort((a, b) => Number(b.statusReady) - Number(a.statusReady) || (a.rect.y - b.rect.y) || (a.rect.x - b.rect.x));
+        return cards.slice(0, 6);
+      }, [...before]);
+
+      for (const candidate of candidates || []) {
+        candidate.waitMs = Date.now() - start;
+        fallbackCard = fallbackCard || candidate;
+        const statusResult = await this._readSceneCardStatus(candidate, { hoverMs: 700 });
+        if (statusResult.status !== 'pending') {
+          const card = statusResult.card || candidate;
+          card.waitMs = candidate.waitMs;
+          return card;
+        }
+      }
+
+      if (fallbackCard && Date.now() - lastPendingLogAt > 15000) {
+        this.log(`Uploaded scene image card visible, waiting for eligibility control (${Math.round((Date.now() - start) / 1000)}s)`);
+        lastPendingLogAt = Date.now();
+      }
+      if (!extended && fallbackCard && Date.now() > start + (timeoutMs * 0.90)) {
+        deadline = Math.min(maxDeadline, deadline + 180000);
+        extended = true;
+        this.log(`Scene image upload card wait extended; Higgsfield eligibility UI is still settling (${Math.round((Date.now() - start) / 1000)}s)`);
+      }
+      await page.waitForTimeout(1500);
+    }
+    throw new Error('Uploaded scene image card not found after upload');
+  }
+
+  async _reacquireSceneUploadCard(card) {
+    const page = this.automation.page;
+    if (!card?.src && !card?.rect) return card;
+    return page.evaluate((original) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const makeCard = (img, cardEl) => {
+        const cr = cardEl.getBoundingClientRect();
+        const text = clean(cardEl.innerText || cardEl.textContent || '');
+        const checkEl = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
+          .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
+          .filter(({ r, text }) => r.width > 20 && r.height > 12 && /check eligibility/i.test(text))
+          .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height))[0];
+        const target = checkEl?.r || cr;
+        return {
+          src: img.currentSrc || img.src || original.src || '',
+          text,
+          x: Math.round(cr.x + cr.width / 2),
+          y: Math.round(cr.y + cr.height / 2),
+          checkX: Math.round(target.x + target.width / 2),
+          checkY: Math.round(target.y + target.height / 2),
+          rect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
+        };
+      };
+      const statusCardForImage = (img) => {
+        let fallback = img;
+        for (let node = img; node; node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.innerText || node.textContent || '');
+          if (r.width >= 70 && r.width <= 280 && r.height >= 70 && r.height <= 280) {
+            fallback = node;
+            if (/check eligibility|eligible|checking/i.test(text)) return node;
+          }
+        }
+        return fallback;
+      };
+      let img = original.src ? [...document.querySelectorAll('img')].find(candidate => {
+        const current = candidate.currentSrc || candidate.src;
+        const r = candidate.getBoundingClientRect();
+        return current === original.src && r.width > 50 && r.height > 50;
+      }) : null;
+      if (!img && original.rect) {
+        const originalCx = original.x || (original.rect.x + original.rect.w / 2);
+        const originalCy = original.y || (original.rect.y + original.rect.h / 2);
+        const candidates = [...document.querySelectorAll('img')]
+          .map(candidate => {
+            const r = candidate.getBoundingClientRect();
+            const cx = r.x + r.width / 2;
+            const cy = r.y + r.height / 2;
+            return {
+              img: candidate,
+              r,
+              distance: Math.hypot(cx - originalCx, cy - originalCy),
+            };
+          })
+          .filter(o => o.r.width > 50 && o.r.height > 50 && o.r.y > 50 && o.distance < 90)
+          .sort((a, b) => a.distance - b.distance);
+        img = candidates[0]?.img || null;
+      }
+      if (!img) return null;
+      const cardEl = statusCardForImage(img);
+      return makeCard(img, cardEl);
+    }, card).catch(() => null);
+  }
+
+  _progressiveWaitMs(attempt, { min = 700, max = 5000, step = 450 } = {}) {
+    return Math.min(max, min + Math.max(0, attempt) * step);
+  }
+
+  async _hoverPoint(point, settleMs = 500) {
+    const page = this.automation.page;
+    if (!point?.x || !point?.y) return;
+    await page.mouse.move(point.x, point.y).catch(() => {});
+    await page.waitForTimeout(Math.max(150, Math.floor(settleMs / 2)));
+    await page.mouse.move(point.x + 2, point.y + 2).catch(() => {});
+    await page.waitForTimeout(Math.max(150, Math.ceil(settleMs / 2)));
+  }
+
+  async _readSceneCardStatus(card, { hoverMs = 500 } = {}) {
+    const page = this.automation.page;
+    const current = await this._reacquireSceneUploadCard(card) || card;
+    if (!current?.x || !current?.y) return { status: 'pending', card: current || card };
+
+    await this._hoverPoint(current, hoverMs);
+
+    const rawStatusResult = await page.evaluate(({ x, y, src }) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const makeCard = (img, cardEl) => {
+        const cr = cardEl.getBoundingClientRect();
+        const text = clean(cardEl.innerText || cardEl.textContent || '');
+        const checkEl = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
+          .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
+          .filter(({ r, text }) => r.width > 20 && r.height > 12 && /check eligibility/i.test(text))
+          .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height))[0];
+        const target = checkEl?.r || cr;
+        return {
+          src: img?.currentSrc || img?.src || src || '',
+          text,
+          x: Math.round(cr.x + cr.width / 2),
+          y: Math.round(cr.y + cr.height / 2),
+          checkX: Math.round(target.x + target.width / 2),
+          checkY: Math.round(target.y + target.height / 2),
+          rect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
+        };
+      };
+      const statusCardForImage = (img) => {
+        let fallback = img;
+        for (let node = img; node; node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.innerText || node.textContent || '');
+          if (r.width >= 70 && r.width <= 280 && r.height >= 70 && r.height <= 280) {
+            fallback = node;
+            if (/check eligibility|eligible|checking/i.test(text)) return node;
+          }
+        }
+        return fallback;
+      };
+      let img = null;
+      let cardEl = null;
+      if (src) {
+        img = [...document.querySelectorAll('img')].find(candidate => (candidate.currentSrc || candidate.src) === src);
+        cardEl = img ? statusCardForImage(img) : null;
+      }
+      if (!cardEl) {
+        const el = document.elementFromPoint(x, y);
+        cardEl = el?.closest('figure, [role="button"], button, div') || el;
+      }
+      const text = clean(cardEl?.innerText || cardEl?.textContent || '');
+      const card = cardEl ? makeCard(img, cardEl) : null;
+      if (/not eligible/i.test(text)) return { status: 'not-eligible', card };
+      if (/checking content|checking/i.test(text)) return { status: 'checking', card };
+      if (/check eligibility/i.test(text)) return { status: 'check', card };
+      if (/\beligible\b/i.test(text)) return { status: 'eligible', card };
+
+      return { status: 'pending', card };
+    }, current).catch(() => ({ status: 'pending', card: null }));
+
+    const statusResult = typeof rawStatusResult === 'string'
+      ? { status: rawStatusResult, card: null }
+      : (rawStatusResult || { status: 'pending', card: null });
+    return { status: statusResult.status || 'pending', card: statusResult.card || current };
+  }
+
+  async _waitForSceneEligibility(card, timeoutMs) {
+    const page = this.automation.page;
+    const start = Date.now();
+    let deadline = start + timeoutMs;
+    const maxDeadline = start + Math.max(timeoutMs, 600000);
+    let extended = false;
+    let sawChecking = false;
+    let lastStatus = null;
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      const waitMs = this._progressiveWaitMs(attempt, { min: 700, max: 4500, step: 350 });
+      const result = await this._readSceneCardStatus(card, { hoverMs: waitMs });
+      const status = result.status;
+      if (status === 'eligible') this._lastEligibleSceneUploadCard = result.card || card;
+      if (status !== lastStatus) {
+        this.log(`Scene image eligibility status: ${status} (${Math.round((Date.now() - start) / 1000)}s)`);
+        lastStatus = status;
+      }
+      if (status === 'checking') sawChecking = true;
+      if (status === 'eligible' || status === 'not-eligible') return status;
+      if (!extended && Date.now() > start + (timeoutMs * 0.90)) {
+        deadline = Math.min(maxDeadline, deadline + 180000);
+        extended = true;
+        this.log(`Scene image eligibility wait extended at 90%; current status is ${status}`);
+      }
+      await page.waitForTimeout(waitMs);
+      attempt++;
+    }
+    throw new Error(`Scene image eligibility did not settle before timeout${sawChecking ? ' (saw Checking)' : ''}`);
+  }
+
+  async _hasStartFrameAttached() {
+    return (await this._composerStartFrameAttachmentCount()) > 0;
+  }
+
+  async _composerStartFrameAttachmentCount() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > window.innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const textboxes = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea')]
+        .map(el => ({ el, r: el.getBoundingClientRect() }))
+        .filter(({ el, r }) => r.width > 100 && r.height > 20 && r.y > window.innerHeight * 0.45 && inCinemaComposer(el))
+        .sort((a, b) => a.r.y - b.r.y);
+      const tb = textboxes[0]?.el || null;
+      if (!tb) return 0;
+      const tbRect = tb.getBoundingClientRect();
+      return [...document.querySelectorAll('img')].filter(img => {
+        const r = img.getBoundingClientRect();
+        const centerY = r.y + r.height / 2;
+        const textboxCenterY = tbRect.y + tbRect.height / 2;
+        return r.width > 25 && r.width < 180 && r.height > 25 && r.height < 180 &&
+          r.x > tbRect.x - 150 && r.x < tbRect.x + 30 &&
+          Math.abs(centerY - textboxCenterY) < 120;
+      }).length;
+    }).catch(() => 0);
+  }
+
+  async _clickPromptTextbox() {
+    const page = this.automation.page;
+    const textbox = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > window.innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const boxes = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea')]
+        .map(el => ({ el, r: el.getBoundingClientRect() }))
+        .filter(({ el, r }) => r.width > 100 && r.height > 20 && r.y > window.innerHeight * 0.45 && inCinemaComposer(el))
+        .sort((a, b) => a.r.y - b.r.y);
+      const target = boxes[0];
+      if (!target) return null;
+      return {
+        x: Math.round(target.r.x + Math.min(120, target.r.width / 2)),
+        y: Math.round(target.r.y + Math.min(24, target.r.height / 2)),
+      };
+    });
+    if (!textbox) throw new Error('Cinema Studio prompt textbox not found for start-frame attach');
+    await page.mouse.click(textbox.x, textbox.y);
+  }
+
+  async _selectEligibleSceneImageAndAttach(card) {
+    const page = this.automation.page;
+    const beforeCount = await this._composerStartFrameAttachmentCount();
+    const statusResult = await this._readSceneCardStatus(card, { hoverMs: 1500 });
+    if (statusResult.status !== 'eligible') {
+      throw new Error(`Cannot select scene image; card status is ${statusResult.status}`);
+    }
+
+    const current = statusResult.card || card;
+    await page.mouse.click(current.x, current.y);
+    await page.waitForTimeout(2500);
+
+    await this._clickPromptTextbox();
+    await page.waitForTimeout(4000);
+
+    const attached = await this._hasStartFrameAttached();
+    const afterCount = await this._composerStartFrameAttachmentCount();
+    if (!attached) {
+      throw new Error(`Start frame thumbnail not detected after eligible image select (before=${beforeCount}, after=${afterCount})`);
+    }
+    if (afterCount <= beforeCount) {
+      this.log(`Start frame thumbnail already present after eligible image select (before=${beforeCount}, after=${afterCount})`);
+    }
+  }
+
+  async _ensureElementEligibility(validElements) {
+    const names = [...new Set([...(validElements || [])]
+      .filter(Boolean)
+      .map(name => String(name).trim().replace(/^@/, ''))
+      .filter(Boolean))];
+    this._lastClipElementEligibility = { required: names, eligible: [] };
+    if (names.length === 0) return;
+
+    const failed = [];
+    for (const name of names) {
+      const cacheKey = name.toLowerCase();
+      const cached = this._elementEligibilityCache.get(cacheKey);
+      if (cached === 'eligible') {
+        this._lastClipElementEligibility.eligible.push(name);
+        continue;
+      }
+      if (cached && cached !== 'eligible') {
+        failed.push({ type: 'element', name, status: cached });
+        continue;
+      }
+
+      const status = await this._checkOneElementEligibility(name);
+      this._elementEligibilityCache.set(cacheKey, status === 'eligible' ? 'eligible' : (status === 'not-eligible' ? 'Not eligible' : status));
+      if (status === 'eligible') {
+        this._lastClipElementEligibility.eligible.push(name);
+      } else {
+        failed.push({ type: 'element', name, status: status === 'not-eligible' ? 'Not eligible' : status });
+      }
+    }
+    if (failed.length > 0) {
+      throw new CinemaEligibilityError(`${failed.length} Cinema Studio element(s) are not eligible`, failed);
+    }
+  }
+
+  async _checkOneElementEligibility(name) {
+    const page = this.automation.page;
+    await this._closePickerAndReturnToComposer();
+    await this._openElementsPickerViaAtButton();
+    const card = await this._waitForElementCard(name, 60000);
+    if (!card) {
+      await this._closePickerAndReturnToComposer();
+      return 'missing';
+    }
+    let status = await this._waitForElementEligibility(card, 60000);
+    if (status === 'check') {
+      await page.mouse.click(card.checkX, card.checkY);
+      status = await this._waitForElementEligibility(card, 180000);
+    }
+    await this._closePickerAndReturnToComposer();
+    return status;
+  }
+
+  async _openElementsPickerViaAtButton() {
+    const page = this.automation.page;
+    const atButton = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > window.innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const buttons = [...document.querySelectorAll('button')];
+      const explicitAt = buttons.map(b => ({
+          b,
+          r: b.getBoundingClientRect(),
+          t: clean(b.textContent || b.getAttribute('aria-label') || ''),
+        }))
+        .filter(o => o.r.y > vh * 0.60 && o.r.width > 20 && o.r.width < 70 && o.r.height > 20 && o.r.height < 70
+          && /^@$/i.test(o.t) && inCinemaComposer(o.b))
+        .sort((a, b) => b.r.x - a.r.x)[0];
+      if (explicitAt) {
+        return {
+          x: Math.round(explicitAt.r.x + explicitAt.r.width / 2),
+          y: Math.round(explicitAt.r.y + explicitAt.r.height / 2),
+          text: explicitAt.t,
+        };
+      }
+      const sound = buttons.map(b => ({ b, r: b.getBoundingClientRect(), t: clean(b.textContent || '') }))
+        .filter(o => o.r.y > vh * 0.60 && /^(On|Off)$/i.test(o.t))
+        .sort((a, b) => a.r.x - b.r.x).pop();
+      if (!sound) return null;
+      const candidates = [];
+      for (const b of buttons) {
+        const r = b.getBoundingClientRect();
+        const t = clean(b.textContent || b.getAttribute('aria-label') || '');
+        if (r.y > vh * 0.60 && r.x > sound.r.x && r.x < sound.r.x + 140
+            && r.width > 15 && r.width < 70 && r.height > 15 && r.height < 70
+            && inCinemaComposer(b)) {
+          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text: t });
+        }
+      }
+      candidates.sort((a, b) => a.x - b.x);
+      const c = candidates[0];
+      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), text: c.text } : null;
+    });
+    if (!atButton) throw new Error('@ element button next to Sound/Audio control not found');
+    await page.mouse.click(atButton.x, atButton.y);
+    await page.waitForTimeout(1200);
+  }
+
+  async _closePickerAndReturnToComposer() {
+    const page = this.automation.page;
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(700);
+    await this._clickPromptTextbox().catch(() => {});
+    await page.waitForTimeout(500);
+  }
+
+  async _tryClickPickerTab(tabName) {
+    const page = this.automation.page;
+    const directTab = page.getByText(tabName, { exact: true }).first();
+    if (await directTab.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await directTab.click({ timeout: 3000 });
+      await page.waitForTimeout(1000);
+      return true;
+    }
+
+    const clicked = await page.evaluate((label) => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const candidates = [...document.querySelectorAll('button, [role="tab"], div, span')]
+        .filter(visible)
+        .map(el => ({ el, text: clean(el.innerText || el.textContent || ''), r: el.getBoundingClientRect() }))
+        .filter(o => o.text === label && o.r.y < innerHeight * 0.45);
+      candidates.sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x);
+      const target = candidates[0]?.el;
+      if (!target) return false;
+      target.click();
+      return true;
+    }, tabName).catch(() => false);
+
+    if (clicked) {
+      await page.waitForTimeout(1000);
+      return true;
+    }
+    return false;
+  }
+
+  async _findElementCard(name) {
+    const page = this.automation.page;
+    return page.evaluate((targetName) => {
+      const target = String(targetName || '').toLowerCase().replace(/^@/, '');
+      const parts = target.split('_');
+      const outfitIndex = parts.findIndex(part => /^o\d+$/i.test(part));
+      const matchPrefix = outfitIndex >= 2 ? parts.slice(0, outfitIndex + 1).join('_') : target;
+      const normalize = (value) => String(value || '').toLowerCase().replace(/^@/, '').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 20 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      const all = [...document.querySelectorAll('figure, [role="button"], button, div')];
+      const cards = [];
+      for (const el of all) {
+        if (!visible(el)) continue;
+        const text = textOf(el);
+        const lower = text.toLowerCase();
+        const r = el.getBoundingClientRect();
+        if (r.width < 80 || r.width > 260 || r.height < 80 || r.height > 280) continue;
+        const matchesTarget = lower.includes(`@${target}`)
+          || lower.includes(target)
+          || lower.includes(`@${matchPrefix}`)
+          || lower.includes(matchPrefix);
+        if (!matchesTarget) continue;
+        const nameMatch = text.match(/@[a-z0-9_.-]+/i);
+        if (nameMatch) {
+          const normalizedName = normalize(nameMatch[0]);
+          if (normalizedName !== target && !normalizedName.startsWith(matchPrefix)) continue;
+        }
+        const checkBtn = [...el.querySelectorAll('button, div, span')]
+          .filter(visible)
+          .find(child => /check eligibility/i.test(textOf(child)));
+        const cr = checkBtn ? checkBtn.getBoundingClientRect() : r;
+        const statusText = /not eligible/i.test(text) ? 'not-eligible'
+          : /checking content|checking/i.test(text) ? 'checking'
+          : /check eligibility/i.test(text) ? 'check'
+          : /\beligible\b/i.test(text) ? 'eligible'
+          : 'unknown';
+        cards.push({
+          x: Math.round(r.x + r.width / 2),
+          y: Math.round(r.y + r.height / 2),
+          text,
+          checkX: Math.round(cr.x + cr.width / 2),
+          checkY: Math.round(cr.y + cr.height / 2),
+          name: nameMatch ? nameMatch[0] : `@${target}`,
+          target,
+          matchPrefix,
+          status: statusText,
+          area: r.width * r.height,
+          hasCharacterLabel: /\bCharacter\b/i.test(text),
+        });
+      }
+      cards.sort((a, b) => {
+        if (a.hasCharacterLabel !== b.hasCharacterLabel) return a.hasCharacterLabel ? -1 : 1;
+        if (a.name !== b.name) return a.name.localeCompare(b.name);
+        return b.area - a.area || a.y - b.y || a.x - b.x;
+      });
+      return cards[0] || null;
+    }, name);
+  }
+
+  async _waitForElementCard(name, timeoutMs) {
+    const page = this.automation.page;
+    const start = Date.now();
+    let attempt = 0;
+    while (Date.now() - start < timeoutMs) {
+      const card = await this._findElementCard(name);
+      if (card) return card;
+      const waitMs = this._progressiveWaitMs(attempt, { min: 750, max: 4000, step: 400 });
+      if (attempt === 0 || attempt % 5 === 4) {
+        this.log(`Element @${String(name).replace(/^@/, '')} card not visible yet (${Math.round((Date.now() - start) / 1000)}s)`);
+      }
+      await page.waitForTimeout(waitMs);
+      attempt++;
+    }
+    return null;
+  }
+
+  async _waitForElementEligibility(card, timeoutMs) {
+    const page = this.automation.page;
+    const start = Date.now();
+    let attempt = 0;
+    let lastStatus = null;
+    while (Date.now() - start < timeoutMs) {
+      const waitMs = this._progressiveWaitMs(attempt, { min: 700, max: 4500, step: 350 });
+      const status = await this._readElementCardStatus(card, { hoverMs: waitMs });
+      const effectiveStatus = status === 'unknown' && card.status && card.status !== 'unknown' ? card.status : status;
+      if (effectiveStatus !== lastStatus) {
+        this.log(`Element ${card.name || ''} eligibility status: ${effectiveStatus} (${Math.round((Date.now() - start) / 1000)}s)`);
+        lastStatus = effectiveStatus;
+      }
+      if (effectiveStatus === 'eligible' || effectiveStatus === 'not-eligible' || effectiveStatus === 'check') return effectiveStatus;
+      await page.waitForTimeout(waitMs);
+      attempt++;
+    }
+    return 'timeout';
+  }
+
+  async _readElementCardStatus(card, { hoverMs = 500 } = {}) {
+    const page = this.automation.page;
+    await this._hoverPoint(card, hoverMs);
+    return page.evaluate(({ x, y, name, target, matchPrefix, status: fallbackStatus }) => {
+      const cardName = String(name || '').toLowerCase().replace(/^@/, '');
+      const fullTarget = String(target || cardName || '').toLowerCase().replace(/^@/, '');
+      const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
+      const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+      const el = document.elementFromPoint(x, y);
+      let cardEl = el;
+      for (let node = el; node; node = node.parentElement) {
+        const r = node.getBoundingClientRect();
+        const text = textOf(node);
+        const lower = text.toLowerCase();
+        const matchesTarget = !fullTarget || lower.includes(`@${fullTarget}`) || lower.includes(fullTarget)
+          || (prefix && (lower.includes(`@${prefix}`) || lower.includes(prefix)));
+        if (
+          r.width >= 80 && r.width <= 260
+          && r.height >= 80 && r.height <= 280
+          && matchesTarget
+          && /eligible|checking/i.test(text)
+        ) {
+          cardEl = node;
+          break;
+        }
+      }
+      const text = textOf(cardEl);
+      if (/not eligible/i.test(text)) return 'not-eligible';
+      if (/checking content|checking/i.test(text)) return 'checking';
+      if (/check eligibility/i.test(text)) return 'check';
+      if (/\beligible\b/i.test(text)) return 'eligible';
+      return fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
+    }, card).catch(() => 'unknown');
+  }
+
+  _parseCinemaCreditRowsFromText(text) {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const parseCost = (value) => {
+      const m = normalize(value).match(/([+-]?\s*\d+(?:[.,]\d+)?)\s+credits/i);
+      if (!m) return null;
+      const n = parseFloat(m[1].replace(/\s+/g, '').replace(/,/g, '.'));
+      return Number.isFinite(n) ? n : null;
+    };
+    const parseDateText = (value) => {
+      const normalized = normalize(value)
+        .replace(/(\d{4})(\d{1,2}:\d{2}\s*(?:AM|PM))/i, '$1 $2');
+      const m = normalized.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b/i);
+      return m ? m[0] : null;
+    };
+    const rows = [];
+    const wholeText = normalize(text);
+    const pattern = /([+-]?\s*\d+(?:[.,]\d+)?\s+credits)\s+(Cinematic\s+Studio\s+3\.5\s+Video|Cinema\s+Studio\s+3\.5\s+Video)\s+(Spent|Refunded)\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s*\d{1,2}:\d{2}\s*(?:AM|PM))/ig;
+    for (const match of wholeText.matchAll(pattern)) {
+      const action = normalize(match[3]);
+      if (!/^spent$/i.test(action)) continue;
+      const dateText = parseDateText(match[4]);
+      const rowText = normalize(match[0]);
+      rows.push({
+        text: rowText,
+        signature: rowText.toLowerCase(),
+        cost: parseCost(match[1]),
+        dateText,
+        source: 'text-scan',
+      });
+    }
+    return rows;
+  }
+
+  async _readCinemaCreditRows(ledgerPage) {
+    return ledgerPage.evaluate(() => {
+      const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+      const parseCost = (text) => {
+        const m = text.match(/([+-]?\s*\d+(?:[.,]\d+)?)\s+credits/i);
+        if (!m) return null;
+        const n = parseFloat(m[1].replace(/\s+/g, '').replace(/,/g, '.'));
+        return Number.isFinite(n) ? n : null;
+      };
+      const parseDateText = (text) => {
+        const normalized = normalize(text).replace(/(\d{4})(\d{1,2}:\d{2}\s*(?:AM|PM))/i, '$1 $2');
+        const m = normalized.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b/i);
+        return m ? m[0] : null;
+      };
+      const isCinemaFeature = (text) => /\bCinematic\s+Studio\s+3\.5\s+Video\b/i.test(text)
+        || /\bCinema\s+Studio\s+3\.5\s+Video\b/i.test(text);
+      const rows = [];
+      const seen = new Set();
+      const candidates = [
+        ...document.querySelectorAll('tr'),
+        ...document.querySelectorAll('[role="row"], tbody > *, [class*="row"], [class*="history"] > *'),
+      ];
+      for (const el of candidates) {
+        const text = normalize(el.innerText || el.textContent || '');
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        if (!isCinemaFeature(text) || !/\bspent\b/i.test(text) || !/credits/i.test(text)) continue;
+        const cells = [...el.querySelectorAll('td, [role="cell"], th')].map(cell => normalize(cell.innerText || cell.textContent || ''));
+        const rowText = cells.length >= 4 ? normalize(cells.slice(0, 4).join(' ')) : text;
+        const actionText = cells.length >= 3 ? cells[2] : text;
+        if (!/\bspent\b/i.test(actionText) || /\brefunded\b/i.test(actionText)) continue;
+        rows.push({
+          text: rowText,
+          signature: rowText.toLowerCase(),
+          cost: parseCost(cells[0] || text),
+          dateText: parseDateText(cells[3] || text),
+          source: cells.length >= 4 ? 'table-cells' : 'dom',
+        });
+      }
+      return rows;
+    });
+  }
+
+  async _readCinemaCreditLedger(context, waitMs = 15000) {
+    const ledgerPage = await context.newPage();
+    try {
+      await ledgerPage.goto('https://higgsfield.ai/me/settings/credits-usage', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await ledgerPage.waitForTimeout(waitMs);
+      await this._scrollCreditLedgerToHistory(ledgerPage);
+      await ledgerPage.waitForTimeout(5000);
+      let rows = await this._readCinemaCreditRows(ledgerPage);
+      if (!rows.length) {
+        const pageText = await ledgerPage.evaluate(() => document.body?.innerText || document.body?.textContent || '').catch(() => '');
+        rows = this._parseCinemaCreditRowsFromText(pageText);
+      }
+      const seen = new Set();
+      return rows.filter(row => {
+        if (!row || !row.signature || seen.has(row.signature)) return false;
+        seen.add(row.signature);
+        return true;
+      });
+    } finally {
+      await ledgerPage.close().catch(() => {});
+    }
+  }
+
+  async _detectCinemaGenerationInProgress(page) {
+    if (!page) return { active: false, evidence: null };
+    try {
+      return await page.evaluate(() => {
+        const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+            && r.top < window.innerHeight && r.bottom > 0 && r.left < window.innerWidth && r.right > 0;
+        };
+
+        const elements = [...document.querySelectorAll('button, [role="button"], [role="status"], [aria-live], div, span')];
+        for (const el of elements) {
+          if (!visible(el)) continue;
+          const text = normalize(el.innerText || el.textContent || '');
+          if (/^(processing|generating)$/i.test(text) || /\b(processing|generating)\b/i.test(text)) {
+            return { active: true, evidence: text.slice(0, 120) };
+          }
+        }
+        return { active: false, evidence: null };
+      });
+    } catch (err) {
+      return { active: false, evidence: `check failed: ${err.message}` };
+    }
+  }
+
+  async _waitForCinemaGenerationAccepted(page, timeoutMs = 90000) {
+    const started = Date.now();
+    let attempt = 0;
+    while (Date.now() - started < timeoutMs) {
+      const state = await this._detectCinemaGenerationInProgress(page);
+      if (state.active) {
+        this.log(`Cinema Studio generation accepted by UI state (${state.evidence || 'Processing'})`);
+        return state;
+      }
+      const waitMs = this._progressiveWaitMs(attempt, { min: 1200, max: 6000, step: 600 });
+      if (attempt === 0 || attempt % 5 === 4) {
+        this.log(`Waiting for Cinema Studio Processing/Generating state (${Math.round((Date.now() - started) / 1000)}s)`);
+      }
+      await page.waitForTimeout(waitMs);
+      attempt++;
+    }
+    return { active: false, evidence: null };
+  }
+
+  async _confirmCinemaCreditSpend({ expectedCost, clickedAt, timeoutMs = 90000, baselineSignatures = [], generationPage = null } = {}) {
+    const context = this.automation.page?.context();
+    if (!context) throw new Error('Browser context not ready for Cinema Studio credit ledger confirmation');
+
+    const baseline = new Set(baselineSignatures || []);
+    const expected = Number.isFinite(expectedCost) ? expectedCost : null;
+    const started = Date.now();
+    let uiAccepted = false;
+    let uiEvidence = null;
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const uiState = await this._detectCinemaGenerationInProgress(generationPage);
+        if (uiState.active && !uiAccepted) {
+          uiAccepted = true;
+          uiEvidence = uiState.evidence || 'Processing';
+          this.log(`Cinema Studio generation accepted by UI state (${uiEvidence}); waiting for matching credit ledger row`);
+        }
+
+        const rows = await this._readCinemaCreditLedger(context, 15000);
+        const rejectCounts = {};
+        const matchingRows = rows.filter(row => {
+          const reject = (reason) => {
+            rejectCounts[reason] = (rejectCounts[reason] || 0) + 1;
+            return false;
+          };
+          if (baseline.has(row.signature)) return reject('baseline');
+          if (!row.dateText) return reject('no-date');
+          if (expected !== null && row.cost !== null && Math.abs(row.cost - expected) > 0.02) return reject('cost');
+          const rowTime = this._parseCreditLedgerDate(row.dateText);
+          if (!Number.isFinite(rowTime)) return reject('date-parse');
+          const lowerBound = clickedAt.getTime() - (2 * 60 * 1000);
+          const upperBound = clickedAt.getTime() + (20 * 60 * 1000);
+          if (rowTime < lowerBound || rowTime > upperBound) return reject('time-window');
+          return true;
+        });
+
+        if (matchingRows.length > 0) {
+          const row = matchingRows[0];
+          this.log(`Credit ledger confirmed Cinema Studio spend: ${row.cost ?? 'unknown'} credits (${row.dateText}, ${row.source || 'dom'})`);
+          return { ok: true, accepted: uiAccepted, ledgerConfirmed: true, uiEvidence, row };
+        }
+
+        const newest = rows.find(row => !baseline.has(row.signature) && row.dateText) || rows.find(row => row.dateText);
+        const newestHint = newest ? `; newest=${newest.cost ?? '?'} @ ${newest.dateText} (${newest.source || 'dom'})` : '';
+        this.log(`Credit ledger not matched yet (${rows.length} Cinema Studio row(s), rejects=${JSON.stringify(rejectCounts)}${newestHint}) — polling...`);
+      } catch (ledgerErr) {
+        this.log(`Cinema Studio credit ledger check failed (${ledgerErr.message}) — polling...`, 'warn');
+      }
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    const finalUiState = await this._detectCinemaGenerationInProgress(generationPage);
+    if (finalUiState.active) {
+      uiAccepted = true;
+      uiEvidence = uiEvidence || finalUiState.evidence || 'Processing';
+      this.log(`Cinema Studio generation still visible in UI (${uiEvidence}), but no matching credit ledger row was found`);
+    }
+    return {
+      ok: false,
+      accepted: uiAccepted,
+      ledgerConfirmed: false,
+      uiEvidence,
+      reason: uiAccepted
+        ? `Processing/Generating appeared in UI (${uiEvidence}), but no matching Cinema Studio credit row appeared within ${Math.round(timeoutMs / 1000)}s`
+        : `No matching Cinema Studio credit row or Processing state appeared within ${Math.round(timeoutMs / 1000)}s`,
+    };
+  }
+
+  async _generateAndDownload(outputPath, durationSeconds, onGenClicked) {
+    const page = this.automation.page;
+    const initialFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null);
+    const expectedDuration = this._selectedDuration || '15s';
+    const expectedResolution = this._selectedResolution || '480p';
+    let audioValue = await this._getBottomToolbarValue(/^(On|Off)$/i);
+    if (/^Off$/i.test(audioValue || '')) {
+      this.log('[CINEMA-VIDEO] Audio drifted Off before Generate; switching back On');
+      await this._ensureAudioOn();
+      audioValue = await this._getBottomToolbarValue(/^(On|Off)$/i);
+    }
+    const preGenCheck = await page.evaluate(({ targetAspect, elementEligibility, expectedDuration, expectedResolution, audioValue }) => {
+      const issues = [];
+      const body = document.body?.innerText || '';
+      const toolbarText = (() => {
+        for (const el of document.querySelectorAll('div, section, form')) {
+          const r = el.getBoundingClientRect();
+          const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (r.width > 250 && r.height > 20 && r.y > window.innerHeight * 0.50 && /Cinema Studio 3\.5/i.test(t) && !/Nano Banana/i.test(t)) {
+            return t;
+          }
+        }
+        return '';
+      })();
+      const textbox = document.querySelector('[role="textbox"]');
+      const promptText = textbox ? (textbox.innerText || textbox.textContent || '').trim() : '';
+      if (!/Cinema Studio 3\.5/i.test(body)) issues.push('Cinema Studio 3.5 model not detected');
+      if (!toolbarText.includes(expectedDuration)) issues.push(`${expectedDuration} duration not detected`);
+      if (!toolbarText.includes(expectedResolution)) issues.push(`${expectedResolution} resolution not detected`);
+      if (!toolbarText.includes(targetAspect)) issues.push(`${targetAspect} aspect not detected`);
+      if (!/^On$/i.test(String(audioValue || ''))) issues.push(`Audio On not detected (current=${audioValue || 'unknown'})`);
+      if (promptText.length < 20) issues.push(`Prompt too short or empty (${promptText.length} chars)`);
+      const imgs = [...document.querySelectorAll('img')].filter(img => {
+        const r = img.getBoundingClientRect();
+        return r.width > 25 && r.width < 180 && r.height > 25 && r.height < 180 && r.y > window.innerHeight * 0.45;
+      });
+      if (imgs.length === 0) issues.push('Start frame not detected');
+      const requiredElements = elementEligibility?.required || [];
+      const eligibleElements = new Set((elementEligibility?.eligible || []).map(name => String(name).toLowerCase()));
+      const missingEligible = requiredElements.filter(name => !eligibleElements.has(String(name).toLowerCase()));
+      if (missingEligible.length > 0) {
+        issues.push(`Required element eligibility not confirmed: ${missingEligible.join(', ')}`);
+      }
+      return { ok: issues.length === 0, issues, promptLength: promptText.length };
+    }, {
+      targetAspect: this._targetAspect || '16:9',
+      elementEligibility: this._lastClipElementEligibility || { required: [], eligible: [] },
+      expectedDuration,
+      expectedResolution,
+      audioValue,
+    });
+    if (!preGenCheck.ok) {
+      throw new Error(`[PRE-GEN] Pre-generation check failed: ${preGenCheck.issues.join('; ')}`);
+    }
+
+    const genBtnBox = await page.evaluate(() => {
+      for (const b of document.querySelectorAll('button[type="submit"], button')) {
+        const text = b.textContent?.trim() || '';
+        if (/generate/i.test(text) && b.getBoundingClientRect().width > 0) {
+          const r = b.getBoundingClientRect();
+          const textParts = [];
+          const walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            const part = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+            if (part) textParts.push(part);
+          }
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2, text, textParts };
+        }
+      }
+      return null;
+    });
+    if (!genBtnBox) throw new Error('GENERATE button not found on page');
+
+    const creditCost = this._parseGenerateCreditCost(genBtnBox);
+    if (!Number.isFinite(creditCost)) {
+      throw new Error('[PRE-GEN] Generate button has no credit cost after setup');
+    }
+    if (creditCost > 70) {
+      throw new Error(`[PRE-GEN] Credit cost inflated: ${creditCost} credits for Cinema Studio 3.5 ${expectedResolution}/${expectedDuration} (expected <= 70)`);
+    }
+
+    let baselineLedgerSignatures = [];
+    try {
+      const baselineRows = await this._readCinemaCreditLedger(page.context(), 15000);
+      baselineLedgerSignatures = baselineRows.map(row => row.signature);
+      this.log(`Credit ledger baseline captured (${baselineLedgerSignatures.length} Cinema Studio row(s))`);
+    } catch (ledgerErr) {
+      this.log(`Warn: could not capture credit ledger baseline before click: ${ledgerErr.message}`, 'warn');
+    }
+
+    await this._allowNextGenerateClick();
+    const clickedAt = new Date();
+    await page.mouse.click(genBtnBox.x, genBtnBox.y);
+    await this._setGenerateSafetyLock(true);
+    this.log(`GENERATE clicked once at ${clickedAt.toLocaleTimeString()} - confirming Cinema Studio credit ledger`);
+
+    const acceptedState = await this._waitForCinemaGenerationAccepted(page, 90000);
+    const creditConfirmation = await this._confirmCinemaCreditSpend({
+      expectedCost: creditCost,
+      clickedAt,
+      timeoutMs: 120000,
+      baselineSignatures: baselineLedgerSignatures,
+      generationPage: page,
+    });
+    if (!creditConfirmation.ok) {
+      if (acceptedState.active || creditConfirmation.accepted) {
+        this.log(`Warn: Cinema Studio UI accepted generation but ledger spend was not confirmed (${creditConfirmation.reason}). Continuing without retry to avoid double-spend.`, 'warn');
+      } else {
+        throw new Error(`[PRE-GEN] Generate click was not confirmed in Cinema Studio credit history (${creditConfirmation.reason}) - no Processing state detected`);
+      }
+    }
+    if (creditConfirmation.ok && typeof onGenClicked === 'function') {
+      try { onGenClicked(creditCost); } catch (_) {}
+    }
+
+    const maxWaitMs = 12 * 60 * 1000;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < maxWaitMs) {
+      await page.waitForTimeout(3000);
+      const currentFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null);
+      if (currentFirstSrc && currentFirstSrc !== initialFirstSrc) {
+        const buffer = await page.evaluate(async (url) => {
+          const res = await fetch(url);
+          const blob = await res.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+          return Array.from(new Uint8Array(arrayBuffer));
+        }, currentFirstSrc);
+        fs.writeFileSync(outputPath, Buffer.from(buffer));
+        this.log(`Downloaded Cinema Studio clip to ${outputPath} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+        return {
+          path: outputPath,
+          sourceGenId: this._extractGenId(currentFirstSrc),
+          cdnUrl: currentFirstSrc,
+          sizeBytes: buffer.length,
+        };
+      }
+    }
+    throw new Error(`Timeout waiting for Cinema Studio 3.5 generation (${maxWaitMs / 1000}s)`);
+  }
+
+  _parseGenerateCreditCost(buttonInfo) {
+    const parts = Array.isArray(buttonInfo?.textParts) ? buttonInfo.textParts : [];
+    const partNumbers = [];
+    for (const part of parts) {
+      for (const match of String(part).matchAll(/\d+(?:[.,]\d+)?/g)) {
+        const value = Number(match[0].replace(',', '.'));
+        if (Number.isFinite(value)) partNumbers.push({ raw: match[0], value });
+      }
+    }
+
+    const decimalPart = [...partNumbers].reverse().find(n => /[.,]/.test(n.raw));
+    if (decimalPart) return decimalPart.value;
+
+    if (partNumbers.length >= 2) {
+      const [a, b] = partNumbers.slice(-2);
+      if (a.value >= 1 && a.value <= 999 && b.value >= 0 && b.value < 100 && String(b.raw).length <= 2) {
+        return Number(`${Math.trunc(a.value)}.${String(Math.trunc(b.value)).padStart(2, '0')}`);
+      }
+      return b.value;
+    }
+
+    if (partNumbers.length === 1) return partNumbers[0].value;
+
+    const text = String(buttonInfo?.text || '').replace(/\s+/g, ' ').trim();
+    const decimalMatches = [...text.matchAll(/\d+[.,]\d+/g)].map(m => Number(m[0].replace(',', '.')));
+    if (decimalMatches.length) return decimalMatches[decimalMatches.length - 1];
+
+    const tailMatch = text.match(/(\d{1,3})\s*$/);
+    return tailMatch ? Number(tailMatch[1]) : null;
+  }
+}
+
+module.exports = { CinemaVideoAutomation, CinemaEligibilityError };

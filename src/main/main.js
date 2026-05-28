@@ -230,6 +230,7 @@ ipcMain.handle('approve-dialogue-triage', (_, decisions) => {
 });
 ipcMain.handle('approve-scenes', () => pipeline.approveScenes());
 ipcMain.handle('approve-clips', () => pipeline.approveClips());
+ipcMain.handle('approve-cinema-eligibility-failed', () => pipeline.approveCinemaEligibilityFailed());
 ipcMain.handle('approve-clip-review', (_, decision) => pipeline.approveClipReview(decision));
 ipcMain.handle('approve-prompt-preview', (_, decision) => pipeline.approvePromptPreview(decision));
 ipcMain.handle('flag-asset', (_, type, index) => pipeline.flagAsset(type, index));
@@ -257,11 +258,11 @@ ipcMain.handle('get-publish-state', () => pipeline ? pipeline.getPublishState() 
 ipcMain.handle('get-publishable-projects', () => pipeline ? pipeline.getPublishableProjects() : []);
 ipcMain.handle('get-publish-state-for-project', (_, projectId) => pipeline ? pipeline.getPublishStateForProject(projectId) : null);
 ipcMain.handle('load-publish-project', (_, projectId) => pipeline ? pipeline.loadPublishProject(projectId) : null);
-ipcMain.handle('score-scene-thumbnails', () => pipeline ? pipeline.scoreSceneThumbnails() : []);
+ipcMain.handle('score-scene-thumbnails', (_, projectId) => pipeline ? pipeline.scoreSceneThumbnails(projectId) : []);
 ipcMain.handle('set-thumbnail-scene', (_, sceneAssetId) => pipeline ? pipeline.setThumbnailScene(sceneAssetId) : null);
 ipcMain.handle('generate-thumbnail', (_, options) => pipeline ? pipeline.generateThumbnail(options) : null);
 ipcMain.handle('generate-custom-thumbnail', (_, options) => pipeline ? pipeline.generateCustomThumbnail(options) : null);
-ipcMain.handle('get-publish-characters', () => pipeline ? pipeline.getPublishCharacters() : { characters: [], suggestedExpression: 'intense determined' });
+ipcMain.handle('get-publish-characters', (_, projectId) => pipeline ? pipeline.getPublishCharacters(projectId) : { characters: [], suggestedExpression: 'intense determined' });
 ipcMain.handle('generate-seo-metadata', () => pipeline ? pipeline.generateSEOMetadata() : null);
 ipcMain.handle('update-platform-metadata', (_, platform, fields) => pipeline ? pipeline.updatePlatformMetadata(platform, fields) : null);
 ipcMain.handle('approve-publish', () => pipeline ? pipeline.approvePublish() : null);
@@ -292,6 +293,30 @@ ipcMain.handle('shorts:getStatus', (_, projectId) => getShortsController().getSt
 ipcMain.handle('shorts:planCalendar', (_, projectId, options) => getShortsController().planCalendar(projectId, options));
 ipcMain.handle('shorts:assemble', (_, projectId) => getShortsController().assembleShorts(projectId));
 ipcMain.handle('shorts:uploadAll', (_, projectId) => getShortsController().uploadAll(projectId));
+
+// Social engagement posts tab
+const { SocialPostsController } = require('./social');
+let socialPostsController = null;
+function getSocialPostsController() {
+  if (!socialPostsController) {
+    socialPostsController = new SocialPostsController(db, {
+      apiKey: store.get('claudeApiKey', ''),
+      userDataDir: store.get('chromeUserDataDir', null),
+      log: (...args) => console.log('[SOCIAL]', ...args),
+      onProgress: (data) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('social-progress', data);
+        }
+      },
+    });
+  }
+  return socialPostsController;
+}
+ipcMain.handle('social:getProjects', () => getSocialPostsController().getProjects());
+ipcMain.handle('social:getStatus', (_, projectId) => getSocialPostsController().getStatus(projectId));
+ipcMain.handle('social:plan', (_, projectId, options) => getSocialPostsController().plan(projectId, options || {}));
+ipcMain.handle('social:generate', (_, projectId, options) => getSocialPostsController().generate(projectId, options || {}));
+ipcMain.handle('social:scheduleAll', (_, projectId, options) => getSocialPostsController().scheduleAll(projectId, options || {}));
 
 // API connectivity test — validates keys work before starting a pipeline run
 ipcMain.handle('test-api-keys', async () => {

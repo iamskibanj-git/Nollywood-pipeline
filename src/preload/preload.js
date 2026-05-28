@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('api', {
   approveScenes: () => ipcRenderer.invoke('approve-scenes'),
   approveDialogueTriage: (decisions) => ipcRenderer.invoke('approve-dialogue-triage', decisions),
   approveClips: () => ipcRenderer.invoke('approve-clips'),
+  approveCinemaEligibilityFailed: () => ipcRenderer.invoke('approve-cinema-eligibility-failed'),
   approveClipReview: (decision) => ipcRenderer.invoke('approve-clip-review', decision),
   approvePromptPreview: (decision) => ipcRenderer.invoke('approve-prompt-preview', decision),
   flagAsset: (type, index) => ipcRenderer.invoke('flag-asset', type, index),
@@ -66,11 +67,11 @@ contextBridge.exposeInMainWorld('api', {
   getPublishableProjects: () => ipcRenderer.invoke('get-publishable-projects'),
   getPublishStateForProject: (id) => ipcRenderer.invoke('get-publish-state-for-project', id),
   loadPublishProject: (id) => ipcRenderer.invoke('load-publish-project', id),
-  scoreSceneThumbnails: () => ipcRenderer.invoke('score-scene-thumbnails'),
+  scoreSceneThumbnails: (projectId) => ipcRenderer.invoke('score-scene-thumbnails', projectId),
   setThumbnailScene: (id) => ipcRenderer.invoke('set-thumbnail-scene', id),
   generateThumbnail: (options) => ipcRenderer.invoke('generate-thumbnail', options),
   generateCustomThumbnail: (options) => ipcRenderer.invoke('generate-custom-thumbnail', options),
-  getPublishCharacters: () => ipcRenderer.invoke('get-publish-characters'),
+  getPublishCharacters: (projectId) => ipcRenderer.invoke('get-publish-characters', projectId),
   generateSEOMetadata: () => ipcRenderer.invoke('generate-seo-metadata'),
   updatePlatformMetadata: (platform, fields) => ipcRenderer.invoke('update-platform-metadata', platform, fields),
   approvePublish: () => ipcRenderer.invoke('approve-publish'),
@@ -84,6 +85,13 @@ contextBridge.exposeInMainWorld('api', {
   planShortsCalendar: (projectId, options) => ipcRenderer.invoke('shorts:planCalendar', projectId, options),
   assembleShorts: (projectId) => ipcRenderer.invoke('shorts:assemble', projectId),
   uploadAllShorts: (projectId) => ipcRenderer.invoke('shorts:uploadAll', projectId),
+
+  // Social engagement posts tab
+  getSocialProjects: () => ipcRenderer.invoke('social:getProjects'),
+  getSocialStatus: (projectId) => ipcRenderer.invoke('social:getStatus', projectId),
+  planSocialPosts: (projectId, options) => ipcRenderer.invoke('social:plan', projectId, options || {}),
+  generateSocialPosts: (projectId, options) => ipcRenderer.invoke('social:generate', projectId, options || {}),
+  scheduleAllSocialPosts: (projectId, options) => ipcRenderer.invoke('social:scheduleAll', projectId, options || {}),
 
   // API connectivity test
   testApiKeys: () => ipcRenderer.invoke('test-api-keys'),
@@ -101,5 +109,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   onShortsProgress: (callback) => {
     ipcRenderer.on('shorts-progress', (_, data) => callback(data));
+  },
+  onSocialProgress: (callback) => {
+    ipcRenderer.on('social-progress', (_, data) => callback(data));
   },
 });

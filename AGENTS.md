@@ -4,7 +4,24 @@ This file persists operational knowledge across sessions. Read this before makin
 
 ## What This App Does
 
-Electron desktop app that automates AI-generated Nollywood dramas end-to-end: YouTube research → Gemini analysis → Claude script generation → Higgsfield image/video generation → FFmpeg assembly into a final 4K video.
+Electron desktop app that automates AI-generated Nollywood dramas end-to-end: YouTube research → Gemini analysis → Codex script generation → Higgsfield image/video generation → FFmpeg assembly into a final 4K video.
+
+## Complexity Profile & Failure Risk
+
+Complexity level: **very high**. Treat this as a long-running, stateful production automation robot with an Electron UI, not as a normal desktop CRUD app. The difficult part is not any single module; it is keeping local SQLite state, files on disk, LLM outputs, browser automation, external web UIs, credit spend, verification gates, and FFmpeg assembly aligned across multi-hour runs.
+
+Operational complexity is roughly **8.5/10 for implementation** and **9.5/10 for live runs**. The largest files reflect this coordination burden: `orchestrator.js`, `higgsfield.js`, `cinema-studio-automation.js`, `index.html`, and `script-engine.js` contain most of the hard-won recovery and edge-case logic.
+
+Primary failure points:
+- **Higgsfield/Cinema Studio UI automation drift:** duplicate toolbars, wrong Image/Video mode, stale React state, `@` element contamination, hidden upload controls, filechooser quirks, and controls that visually appear set before backend state is actually valid.
+- **Credit-burning mistakes:** wrong model, wrong mode, wrong resolution, missing start frame/reference, malformed prompt, inflated credit cost, or stale references can waste paid generation credits. Preserve hard pre-generation gates.
+- **State consistency:** SQLite asset rows must match real files. Crashes, partial downloads, duplicate/stale rows, missing files marked `done`, and orphaned remote generations are expected operational hazards.
+- **Model-output validity:** Script JSON, outline coverage, outfit IDs, cinematic clip constraints, prompt length, character limits, and structural review results all need validation because LLM output can drift or truncate.
+- **Long-run scale:** Prestige/cinematic runs amplify token limits, voice drift, generation time, asset count, retry volume, FFmpeg temp storage, and session/credit exhaustion.
+- **Verification blind spots:** Vision and clip verification reduce risk but do not fully replace human judgment for character identity, scene quality, framing, accent drift, prop continuity, or story strength.
+- **Partially validated branches:** Cinema Studio 3.5 video branch was syntax-validated but still requires a live one-clip Higgsfield run before trusting toolbar setup, eligibility detection, ledger confirmation, download/recovery, verification, and assembly.
+
+Default engineering posture: make small scoped changes, preserve existing gates, test with the cheapest duration/one-clip path first, and avoid bypassing recovery logic unless the user explicitly accepts the credit and quality risk.
 
 ## Architecture
 
@@ -18,7 +35,7 @@ Electron desktop app that automates AI-generated Nollywood dramas end-to-end: Yo
 | Module | Path | Purpose |
 |--------|------|---------|
 | Orchestrator | `src/main/pipeline/orchestrator.js` | Pipeline state machine, stage sequencing, approval gates, research cache, duration presets |
-| ScriptEngine | `src/main/pipeline/script-engine.js` | Claude API calls for titles + scripts, research context sanitization, title similarity scoring, `_safeParseScriptJson()` multi-strategy JSON recovery |
+| ScriptEngine | `src/main/pipeline/script-engine.js` | Codex API calls for titles + scripts, research context sanitization, title similarity scoring, `_safeParseScriptJson()` multi-strategy JSON recovery |
 | YouTubeScraper | `src/main/research/youtube-scraper.js` | Two-pool YouTube search (AI originals + remake candidates) |
 | GeminiAnalyzer | `src/main/research/gemini-analyzer.js` | Gemini 2.5 Flash video/title analysis, `_safeParseJSON()` fallback |
 | HiggsField | `src/main/automation/higgsfield.js` | Playwright browser automation for image + video generation |
@@ -35,7 +52,7 @@ Electron desktop app that automates AI-generated Nollywood dramas end-to-end: Yo
 - Produced title dedup
 
 **electron-store** — simple config only:
-- API keys (Claude, Gemini)
+- API keys (Codex, Gemini)
 - UI preferences (window size, theme)
 - Higgsfield session cookies
 
@@ -58,9 +75,9 @@ Full schema with all columns: see TESTING-RESULTS.md §13.
 
 ## Pipeline Flow
 
-1. **Pre-flight**: Ping Claude + Gemini APIs
+1. **Pre-flight**: Ping Codex + Gemini APIs
 2. **Research**: YouTube search → Gemini analysis → cache results (7-day TTL)
-3. **Script**: Claude generates title candidates → user approves → Claude generates full screenplay JSON
+3. **Script**: Codex generates title candidates → user approves → Codex generates full screenplay JSON
 4. **Portraits**: Higgsfield Nano Banana Pro (Unlimited mode, free) for character reference sheets
 5. **Scenes**: Higgsfield image gen with reference chaining (character portraits + previous scene)
 6. **Video**: Higgsfield Veo 3.1 Lite — 12 credits/clip, 8s at 720p
@@ -117,7 +134,7 @@ Shutdown sequence: cancel pipeline → close Playwright browser (saves Higgsfiel
 
 ## Research Cache System — Pattern Library Model + Multi-Pool (Session 8)
 
-The research pool is analyzed once and the resulting pattern library (themes, archetypes, settings, tones, audience triggers) is reused across **unlimited stories** until the 7-day TTL expires. Videos are never "consumed" — variety comes from Claude picking different theme combinations each time, plus the title dedup system preventing repetition.
+The research pool is analyzed once and the resulting pattern library (themes, archetypes, settings, tones, audience triggers) is reused across **unlimited stories** until the 7-day TTL expires. Videos are never "consumed" — variety comes from Codex picking different theme combinations each time, plus the title dedup system preventing repetition.
 
 **Multi-pool (migration 008):** The pipeline supports up to 5 coexisting research pools. "New Research Pool" creates a fresh pool without touching existing ones (old design overwrote); user picks which pool to work from via the home-screen pool list. Cap enforced at save time — when a 6th pool would be created, the oldest non-expired pool is hard-deleted to make room.
 
@@ -134,9 +151,9 @@ The research pool is analyzed once and the resulting pattern library (themes, ar
 
 - **Nationality**: Always "Nigerian" — hardcoded in storyBrief
 - **Accent**: Always "Nigerian accent" — hardcoded in storyBrief, used in `buildVideoPrompt()` for Veo lip-sync dialogue
-- **Tone**: **Per-line, not project-level.** Each `line.tone` in the script JSON (e.g. "Blissful", "Spiteful", "Terrified") is chosen by Claude based on the specific line's emotional beat, not locked for the whole story
-- **Setting**: **Per-scene, not project-level.** Each `scene.location` + `scene.location_details` in the script JSON is chosen by Claude based on narrative need — a story can open in a Lagos high-rise, move to a village, visit a palace. The script-prompt includes an explicit clause telling Claude to use the research patterns as a palette, not a constraint (Session 8 fix — previously `_deriveSettingFromPatterns()` picked one setting from research and forced it project-wide, producing village-monoculture output)
-- **Research patterns flow to Claude naturally** via the research summary in the system prompt (both title and script generation) — Claude picks settings and tones per-scene/per-line from what the research shows works
+- **Tone**: **Per-line, not project-level.** Each `line.tone` in the script JSON (e.g. "Blissful", "Spiteful", "Terrified") is chosen by Codex based on the specific line's emotional beat, not locked for the whole story
+- **Setting**: **Per-scene, not project-level.** Each `scene.location` + `scene.location_details` in the script JSON is chosen by Codex based on narrative need — a story can open in a Lagos high-rise, move to a village, visit a palace. The script-prompt includes an explicit clause telling Codex to use the research patterns as a palette, not a constraint (Session 8 fix — previously `_deriveSettingFromPatterns()` picked one setting from research and forced it project-wide, producing village-monoculture output)
+- **Research patterns flow to Codex naturally** via the research summary in the system prompt (both title and script generation) — Codex picks settings and tones per-scene/per-line from what the research shows works
 - **Quick Settings panel removed** from research view — nationality/accent are the only project-level constants; everything else is generator-driven from research
 
 ## Duration Presets
@@ -235,14 +252,14 @@ LOW:
 
 **Implementation split (both complete):**
 - Session 30N-A (Tasks 9-12, 15): ✅ Preset definitions, scaffolding, grading rubric, renderer UI — all "wiring" work
-- Session 30N-B (Tasks 13-14, 16-17): ✅ Two-phase outline engine, voice anchors, CLAUDE.md docs, validation
+- Session 30N-B (Tasks 13-14, 16-17): ✅ Two-phase outline engine, voice anchors, AGENTS.md docs, validation
 
 **Files modified:**
 - `src/main/pipeline/orchestrator.js` — DURATION_PRESETS, CINEMATIC_DURATION_PRESETS, getDurationTier, TIER_PRESTIGE constant, grader catch block (Session A)
 - `src/main/pipeline/script-engine.js` — _buildStructuralScaffolding (prestige five-act), _buildCinematicScaffolding (prestige constraints), reviewScriptStructure thresholds, _generateStoryDriven (refactored: prestige/standard outline split + Phase B loop), _generateStandardOutline (extracted), _generatePrestigeOutline (new, two-phase A1+A2), _extractVoiceAnchors (new, all story-driven) (Sessions A+B)
 - `prompts/structure-review-prompt.txt` — prestige rubric section (Session A)
 - `src/renderer/index.html` — duration dropdowns, PRESET_STRUCTURES, CINEMATIC_PRESET_STRUCTURES (Session A)
-- `CLAUDE.md` — this section (Session B)
+- `AGENTS.md` — this section (Session B)
 
 **Implementation gotchas discovered:**
 - Bash sandbox NTFS mount sync: `node -c` may see stale file versions and report false syntax errors. The Read tool is the source of truth for file completeness.
@@ -267,7 +284,7 @@ Files changed:
 - `src/main/pipeline/script-engine.js` — outline validation (range + length), Phase B per-call + final validation, auto-split hard-fail, 3-char scene enforcement, outfit IDs in compact bible
 - `src/renderer/index.html` — three tierLabel ternaries (cinematic, staged, review panel)
 - `prompts/structure-review-prompt.txt` — prestige tier definition
-- `CLAUDE.md` — this section
+- `AGENTS.md` — this section
 
 **Session 30P — Pipeline Stop-Point Mitigations (M1 + M2):**
 
@@ -291,7 +308,7 @@ Files changed:
 - `src/main/automation/higgsfield.js` — getAvailableCredits(), preflightCheck()
 - `src/main/pipeline/orchestrator.js` — preflight gate, credit pre-check in _withSessionRetry()
 - `src/renderer/index.html` — gate UI handlers for preflight-failed, credits-exhausted
-- `CLAUDE.md` — this section
+- `AGENTS.md` — this section
 
 **Session 30Q — Element Gate Auto-Verification (M3):**
 
@@ -316,69 +333,63 @@ Design decisions:
 Files changed:
 - `src/main/pipeline/orchestrator.js` — element auto-verification block before gate
 - `src/renderer/index.html` — missing elements passed to checklist renderer
-- `CLAUDE.md` — this section
+- `AGENTS.md` — this section
 
-**Session 30S — Catch Block Hardening (Resume-Critical DB Writes):**
+**Session 30V — Higgsfield Element Creation + Upload Hardening:**
 
-Four swallowed `catch (_) {}` blocks that silently discard errors on resume-critical DB writes. All fixes are non-breaking — they add logging and retry logic without changing control flow.
+Element creation was reworked for the May 2026 Higgsfield `@` Elements modal UI.
 
-Fix #1 — `kling_clip_id` metadata persistence (~line 7977):
-- Was: `catch (_) {}` around `db._setKlingClipMeta()`. Silent failure → clip invisible to resume/verify/export → duplicate re-generation on restart (~18 credits wasted per clip).
-- Now: logs error, retries once after 500ms (handles SQLite WAL locks), logs retry result. In-memory tag always set so current run is unaffected.
-
-Fix #2 — `element_name` persistence on portrait assets (~line 4358):
-- Was: `catch (_) {}` around `db.setAssetElementName()`. Silent failure → `cinematicElementNames` map empty on resume → every `@character` ref in prompts fails to resolve → entire video gen phase broken on restart.
-- Now: logs error, retries once after 500ms, counts failures. If any persist, emits CRITICAL-level log warning that resume will break. Current run continues (in-memory state valid).
-- Also hardened two location `setAssetElementName` calls (~lines 4560, 4579) with warn-level logging.
-
-Fix #3 — `pending_approval_gate` clearing on resume (~line 942):
-- Was: `catch (_) {}` around `db.updateProject()`. Silent failure → gate persists in DB → next restart re-enters same approval loop indefinitely.
-- Now: logs error, conditionally advances `_resumedGateOrder` only on success. If DB write fails, gate order is NOT advanced — pipeline re-enters the gate properly on next restart instead of silently skipping it.
-
-Fix #4 — Element existence panel scraper fallback (~line 4202):
-- Was: `catch (_) {}` around `elements.elementExists()` fallback. Silent failure → `existsAnyway` stays false → element counted as failed even if it exists → manual gate fires unnecessarily.
-- Now: logs warn with actual error message. No control flow change (still falls through to manual gate).
-
-Design: All fixes use the same pattern — log error, optional retry for DB writes, never hard-fail. Current run always continues. Retry delay is 500ms (sufficient for WAL checkpoint locks, the most common SQLite transient).
+- **Entry point:** The Elements modal opens from the small `@`/Elements control in the bottom toolbar, immediately after the `1x1` grid control. Higgsfield renders duplicate toolbar rows; automation must choose the controlling toolbar set, then try candidate no-text SVG buttons until the Elements modal opens.
+- **Create new:** The actionable control is the circular `+` inside the first `Create new` tile. Clicking only the `Create new` text can select or edit an existing element. If the new-element form opens with a pre-filled `reference-name`, treat it as editing an existing element: close the form and hard-fail before uploading.
+- **Upload source mapping:** `@{baseName}_o1_{suffix}` uses the master portrait (`portrait_character_N.png`) plus the `o1` grid (`character_N_o1_grid.png`). Non-default outfits use outfit portraits (`portrait_character_N_o2.png`, etc.) plus matching outfit grids. All element upload paths must resolve inside the current project directory.
+- **Upload mechanics:** Direct `setInputFiles()` on hidden `input[type=file]` is unsafe for the Elements form. It can create local-looking DOM state without Higgsfield accepting the file. Use real mouse clicks that trigger a trusted native `filechooser`, then attach files through `chooser.setFiles()`.
+- **First image upload:** Click the actual circular `+` inside the large `Upload images` tile. Backend success is visible as `POST /media/batch`, `PUT` to CloudFront/S3, and `POST /media/{id}/upload`.
+- **Second image upload:** After the first portrait is attached, the UI changes to a horizontal strip: small `Add more images` tile on the left, preview thumbnail beside it, empty strip space across the rest. The actionable target is still the inner circular `+` inside the small tile. Do not click the strip center or label; it will not fire `filechooser`.
+- **Waits:** Wait after each upload because Higgsfield needs time to process the file, render the thumbnail, and create the next `+` control. Current Elements flow uses a longer wait between portrait and grid uploads.
+- **Diagnostics:** On upload failure, log DOM diagnostics for visible upload controls, file inputs, preview thumbnails above the name field, current element name value, and a body-text snippet. This distinguishes selector failure from file/path mapping failure.
+- **Confirmation:** Save success is not sufficient. Element creation only counts as successful after `@` autocomplete confirms the new element. Missing confirmation should fall into the manual checklist gate.
 
 Files changed:
-- `src/main/pipeline/orchestrator.js` — all 4 catch blocks hardened
-- `CLAUDE.md` — this section
+- `src/main/automation/higgsfield-elements.js` — modal candidate selection, safe `Create new` plus click, trusted filechooser upload path, inner-plus targeting for first/second uploads, upload diagnostics
+- `src/main/pipeline/orchestrator.js` — restored-map verification, post-save confirmation hardening, outfit-aware persistence, path guards, final `@` verification
+- `AGENTS.md` — this section
 
-**Session 30T — Status Consistency + Staged Verify Fix:**
+**Session 30R — Batch Prompt-Preview Mode (M4):**
 
-Two bugs found via code review of terminal status handling across the pipeline.
+M4 — Batch prompt-preview gate:
+- Replaces the per-clip prompt-preview gate with a single batch review.
+- **Two-phase clip processing**: Phase 1 runs all prompt transforms (vision blocking, posture correction, rules engine, grounding prefix) and collects final prompts into `batchPreviewData[]` and `cachedFinalPrompts{}`. Phase 2 generates only approved clips using cached prompts.
+- After Phase 1, emits a single `'prompt-preview-batch'` gate with all clip data (clipId, label, prompt, startFramePath, duration).
+- Operator reviews all prompts at once in a paginated grid (20 per page).
+- **Approve All** (default): generates every pending clip.
+- **Selective approval**: toggle individual clips off, only approved clips generate.
+- **Stop**: cancels the entire generation run (no credits burned).
+- Phase 2 generation loop: uses `cachedClipGenData{}` for all generation parameters, includes session-expired recovery, retry logic, and per-clip review gate.
+- Rejected clips counted as `batchRejected` in final progress summary.
 
-P1 — Skipped cinematic clips block assembly (~line 2888):
-- **Root cause**: assembly integrity gate filtered `a.status !== 'done'`, catching skipped clips as blockers. But `getIncompleteAssets()` and `verifyStageComplete()` treat 'skipped' as terminal — so verify passes, then assembly fails.
-- **Fix**: use `TERMINAL_STATUSES = new Set(['done', 'skipped', 'archived'])` for the pending check. Skipped clips are logged and excluded from concatenation (they have no video file). Error message unchanged for truly pending/failed clips.
+UI:
+- `index.html` — new `batch-preview-panel` with purple (#8b5cf6) theme:
+  - Paginated card grid: start frame thumbnail, clip label, duration, truncated prompt (click to expand).
+  - Toggle selection per card (checkbox visual).
+  - Select All / Deselect All buttons.
+  - Approve Selected (count) / Stop buttons.
+  - Page navigation (Prev/Next with page label).
+- New IPC: `approvePromptPreviewBatch(decision)` — accepts 'stop', 'approve', or `{ approved: [clipId, ...] }`.
 
-P2 — Staged video file verification only logs missing files (~line 2598):
-- **Root cause**: staged path logged missing done-clip files but still advanced to `videos-done`. Cinematic path uses `verifyStageComplete()` which throws on missing files. Inconsistency means staged-mode missing files aren't caught until assembly (after Gemini verify burns credits).
-- **Fix**: collect missing files into array, throw with details before `updateProjectStage`. Matches cinematic path behavior.
+Design decisions:
+- Two-phase approach avoids duplicating 750 lines of transform code. Phase 1 reuses the existing loop with a `continue` after collection; Phase 2 is a dedicated generation-only loop.
+- `cachedClipGenData` stores all per-clip references (clipAsset, outputPath, etc.) to avoid re-querying in Phase 2.
+- Phase 2 has its own simplified error handling (session-expired recovery + single retry). Timeout recovery sweeps are omitted to keep batch generation moving fast.
+- All clips selected by default — operator deselects the ones that look wrong.
 
 Files changed:
-- `src/main/pipeline/orchestrator.js` — both fixes
-- `CLAUDE.md` — this section
+- `src/main/pipeline/orchestrator.js` — batch collection in Phase 1, batch gate, Phase 2 generation loop, `approvePromptPreviewBatch()` method
+- `src/renderer/index.html` — batch preview panel HTML, JS functions, gate handler
+- `src/main/main.js` — IPC handle for `approve-prompt-preview-batch`
+- `src/preload/preload.js` — preload binding for `approvePromptPreviewBatch`
+- `AGENTS.md` — this section
 
-**Session 30U — Outfit Key Normalization:**
-
-Multi-outfit character_outfits keys from the LLM can arrive in mismatched formats (character_N, @Prefix, mixed case) that don't match the orchestrator's element_name_hint keys. This causes silent outfit resolution failures — the character renders in default outfit instead of the scene-specific one.
-
-P1 — Script-engine normalization (script-engine.js, `_sanitizeKlingClipPrompts` ~line 1722):
-- **Fix**: Added key normalization block at scene level, before the clip-level loop. Lowercases keys, strips `@` prefix, resolves `character_N` → `element_name_hint` via the existing `charIndexMap`. Normalized keys replace original `character_outfits` object on the scene.
-
-P2 — Orchestrator safety net (orchestrator.js, two consumption points):
-- **Scene image gen** (~line 6795): if `sceneOutfits[charId]` misses but `sceneOutfits` has entries, iterates keys and resolves both sides through `elemMap` — if they land on the same element, uses that outfit. Logs when safety-net fires.
-- **Kling prompt transform** (~line 7882): identical safety-net pattern for `sceneOutfits[nameLower]` lookup in the `@ref` replacement regex callback.
-- Both safety nets are no-ops when script-engine normalization succeeds (expected 95%+ of cases). They catch residual mismatches from cached/old scripts or unexpected LLM key formats.
-
-Files changed:
-- `src/main/pipeline/script-engine.js` — key normalization in `_sanitizeKlingClipPrompts`
-- `src/main/pipeline/orchestrator.js` — two safety-net blocks at outfit consumption points
-- `CLAUDE.md` — this section
-
-### Cinematic (Kling) — story-driven model
+### Cinematic — story-driven video model (Kling default, Cinema Studio 3.5 optional)
 
 Cinematic mode uses a **credit-first, story-driven** approach. The clip is the atomic cost unit, not the line. Structure is flexible — scenes, lines, and characters are unlimited and driven by what the story needs.
 
@@ -406,7 +417,7 @@ Cinematic mode uses a **credit-first, story-driven** approach. The clip is the a
 
 **Scene = conversation beat, not location change.** A 30-min courtroom drama can have 25 scenes in the same courtroom — what changes is who's addressing whom, who enters/exits. The scene image stays the same for all clips within that scene. Locations are unlimited but scenes are the organizational unit for character groupings + dialogue flow.
 
-**Credit estimation shifts from line-based to clip-based.** The start screen shows estimated clips and credits derived from target duration, not from a fixed grid formula. The script prompt tells Claude the target clip count and lets the story distribute scenes/lines/characters freely within that budget.
+**Credit estimation shifts from line-based to clip-based.** The start screen shows estimated clips and credits derived from target duration, not from a fixed grid formula. The script prompt tells Codex the target clip count and lets the story distribute scenes/lines/characters freely within that budget.
 
 ## Script Structural Review (Session 8)
 
@@ -422,7 +433,7 @@ Cinematic mode uses a **credit-first, story-driven** approach. The clip is the a
    - Long-form tier: 3-act + midpoint reversal (must be a REFRAME, not just a twist) + B-plot (secondary storyline with its own mini-arc intersecting main plot before climax) + setup-payoff pairs (2+ details planted early, paid off late) + no exposition dumps
    - **Staged long-form:** 4-6 characters (hard cap in scaffolding)
    - **Cinematic long-form:** unlimited characters (every speaking role gets portrait), unlimited scenes per chapter, unlimited lines per scene (grouped into clips of 3). Max 3 characters per scene (Kling constraint). Scaffolding specifies target clip count instead of fixed grid.
-2. **Grader prompt** (`prompts/structure-review-prompt.txt`): Low-temperature (0.2) Claude call with a point-scored rubric. Returns JSON `{score, pass, issues[], strengths[], summary}`. ~$0.05-0.10 per review.
+2. **Grader prompt** (`prompts/structure-review-prompt.txt`): Low-temperature (0.2) Codex call with a point-scored rubric. Returns JSON `{score, pass, issues[], strengths[], summary}`. ~$0.05-0.10 per review.
 3. **Pass thresholds:** test ≥50, standard ≥60, long-form ≥70, prestige ≥80. Cinematic mode gets +5 across all tiers. Prestige has the highest bar because a bad 45-min script wastes ~3000 credits.
 4. **Hard-block:** `orchestrator.approveScript()` rejects approval when `review.pass === false` unless explicit `{ override: true }`. UI surfaces three buttons: primary Approve (disabled), secondary Regenerate, tertiary Override (with confirmation dialog warning of credit risk).
 5. **Regenerate loop:** capped at `MAX_SCRIPT_REGEN_ITERATIONS=3` (env-tunable). Each regen is a fresh `generateScript()` + fresh review. If the cap is hit, the last-generated script goes through (so pathological concepts can't loop forever).
@@ -443,8 +454,8 @@ Cinematic mode uses a **credit-first, story-driven** approach. The clip is the a
 - Completion view shows mode + aspect + duration as a rounded badge below the success message. Lets the user confirm at the end of a 30-min long-form run that they got cinematic output as intended.
 
 **Cinematic backlog (priority-ordered):**
-- 🟢 **RESOLVED (Session 9, updated May 2026) — Element creation automation works.** ~~Old issue: Elements panel → Generations view transition stuck state. Fixed by Generations tab click + stuck-guard.~~ **May 2026:** Elements tab removed entirely. Element creation now uses @ toolbar button modal overlay. The old panel→Generations transition issue no longer exists. `_ensureGenerationsView()` Elements-panel detection is a legacy no-op.
-- 🔴 **HIGH — Scene image generation end-to-end verification needed.** The toolbar setup sequence (Generations → Image → Cinematic Cameras → 1/4 → aspect → 2K → 1x1) is coded but needs live validation. ~~Model selector guards against Elements panel misclicks (OBSOLETE May 2026 — Elements panel removed).~~ execCommand prompt typing proven to work.
+- 🟢 **RESOLVED (Session 9) — Element creation automation works.** Elements are detected and created correctly. The blocking issue was the **Elements panel → Generations view transition**: after element setup, the UI stayed on the Elements panel, and scene generation couldn't find the toolbar. Fixed by: (a) orchestrator clicks Generations tab after element setup, (b) `_ensureGenerationsView()` detects Elements panel via "Add to Project" button count, (c) `_setupToolbarSequence()` has stuck-guard that clicks Generations on any 5s hang.
+- 🔴 **HIGH — Scene image generation end-to-end verification needed.** The toolbar setup sequence (Generations → Image → Cinematic Cameras → 1/4 → aspect → 2K → 1x1) is coded but needs live validation. Model selector guards against Elements panel misclicks. execCommand prompt typing proven to work.
 - 🟡 Element name generation: `${char.id.replace(/^character_/, '')}_${titleInitials}` produces ugly identifiers like `@1_matmw` (from `character_1` + `Mass production - Nollywood`). Should derive from `character.description_label` (slugified) instead — would yield `@mama_blessing_matmw`.
 - `kling-history-recovery.js` — parallel to existing Veo `higgsfield-history.js`. Scrapes Higgsfield Kling assets to reclaim orphans when a local download fails after server-side generation succeeded. Same scoring + tier infrastructure can be reused. Estimated 3-4 hours.
 - Voice-tone binding automation in element creation flow — currently elements are created voice-less. User must manually bind Nigerian English voice tone in Higgsfield UI for best Kling lip-sync. Phase 2 fallback step the user opts into per-character.
@@ -471,7 +482,7 @@ Research → Title → Script (cinematic schema with blocking + kling_clips)
   → Publish (auto-closes when final video + thumbnail both exist on disk)
 ```
 
-**Cinematic story-driven structure:** scenes per chapter, lines per scene, and character count are all unlimited (story-driven). The only fixed constraints are: exactly 3 shots per Kling clip, max 3 characters per scene, ≤9 words per dialogue sentence, and the total clip count derived from duration target ÷ 11 seconds. See "Duration Presets → Cinematic (Kling)" section above for full budget math.
+**Cinematic story-driven structure:** scenes per chapter, lines per scene, and character count are all unlimited (story-driven). The only fixed constraints are: exactly 3 shots per cinematic clip, max 3 characters per scene, ≤9 words per dialogue sentence, and the total clip count derived from duration target ÷ 11 seconds. See "Duration Presets → Cinematic" section above for full budget math. Kling 3.0 remains the default video engine; Cinema Studio 3.5 is selectable via `settings.cinematicVideoEngine`.
 
 **Files added/modified across all 6 phases:**
 
@@ -483,7 +494,7 @@ Research → Title → Script (cinematic schema with blocking + kling_clips)
 | `migrations/012-cinematic-video.sql` | 4 | `kling_clip_id`, `line_refs` columns + index |
 | `prompts/script-prompt.txt` | 1 | `{{CINEMATIC_SCAFFOLDING}}` placeholder |
 | `prompts/structure-review-prompt.txt` | 1 | `{{CINEMATIC_RUBRIC_EXTENSION}}` placeholder |
-| `src/main/automation/higgsfield-elements.js` | 2, 3 | Element creation (chars + locations + props), @ toolbar button modal automation (May 2026 rewrite — old Elements tab removed) |
+| `src/main/automation/higgsfield-elements.js` | 2, 3 | Element creation (chars + locations + props), 7-click UI path automation |
 | `src/main/automation/cinema-studio-automation.js` | 3 | Cinema Studio 2.0 scene image generation with @-element resolution |
 | `src/main/automation/kling-automation.js` | 4 | Kling 3.0 multi-shot video gen with start-frame + native audio + parsePromptSegments helper |
 | `src/main/verify/clipVerifier.js` | 5 | `verifyCinematicClip()` + per-line greedy matching |
@@ -517,7 +528,7 @@ Research → Title → Script (cinematic schema with blocking + kling_clips)
 
 **Phase 3 (Migration 011, asset types: `location_image`, `scene_image_cinematic`):**
 - Extended `HiggsfieldElements` with `createLocationElement()` + `createPropElement()` (refactored common path into `_createElement({category})` helper)
-- New automation module: `src/main/automation/cinema-studio-automation.js` — `CinemaStudioAutomation` class with `_ensureCinemaStudioActive`, `_setupToolbarSequence` (master 7-step setup: Generations→Image→CinematicCameras→1/4→aspect→2K→1x1), `_clickGenerationsReset` (stuck recovery), `_runStepWithStuckGuard` (5s timeout per step), `_ensureImageMode` (aria-selected on leftmost dual tabs), `_ensureCinematicCamerasModel` (model dropdown; ~~Elements-panel guard OBSOLETE May 2026~~), `_setImageCount`, `_setResolution2K`, `_setGrid1x1`, `_attachLocationReference`, `_setAspectRatio`, `_typeBlockingPrompt` (execCommand for Lexical + keyboard.type for @mentions), `_ensureGenerationsView` (~~Elements panel detection~~ legacy no-op since May 2026), `generateSceneImage`, `_waitAndDownload` (polls images.higgs.ai gallery), `_readToolbarState` (mode/model/aspect/cost from aria-selected + button text)
+- New automation module: `src/main/automation/cinema-studio-automation.js` — `CinemaStudioAutomation` class with `_ensureCinemaStudioActive`, `_setupToolbarSequence` (master 7-step setup: Generations→Image→CinematicCameras→1/4→aspect→2K→1x1), `_clickGenerationsReset` (stuck recovery), `_runStepWithStuckGuard` (5s timeout per step), `_ensureImageMode` (aria-selected on leftmost dual tabs), `_ensureCinematicCamerasModel` (model dropdown with Elements-panel guard), `_setImageCount`, `_setResolution2K`, `_setGrid1x1`, `_attachLocationReference`, `_setAspectRatio`, `_typeBlockingPrompt` (execCommand for Lexical + keyboard.type for @mentions), `_ensureGenerationsView` (Elements panel detection + Generations click), `generateSceneImage`, `_waitAndDownload` (polls images.higgs.ai gallery), `_readToolbarState` (mode/model/aspect/cost from aria-selected + button text)
 - Orchestrator: new `_runCinematicLocationSetup()` (extracts unique `location_element_hint` values from script, generates empty location images as reference images for scene gen) + `_runCinematicSceneImageStage()` (per scene: resolves @location + @character refs, builds blocking, generates via Cinema Studio 2.0)
 - Element-setup stage now runs character element creation + location image generation in sequence
 - Stage 3B forks based on `generatorMode`: cinematic → `_runCinematicSceneImageStage`, staged → existing Nano Banana per-line generation (unchanged)
@@ -554,14 +565,14 @@ Research → Title → Script (with cinematic fields)
 **What Phase 2 added (on top of Phase 1):**
 - Migration 010: `project_assets.higgsfield_element_id TEXT` + `project_assets.element_name TEXT` + two indexes. Schema ready to track which Higgsfield element each asset maps to.
 - New asset type: `character_grid` — 4-column reference sheet (front / left profile / right profile / back view, each with full-body + close-up) generated via Nano Banana Pro using the character's portrait as the reference image. Grid prompt from IMPROVEMENT-CINEMATIC-WORKFLOW.md's character-grid section.
-- New automation module: `src/main/automation/higgsfield-elements.js`. Class `HiggsfieldElements` with methods: `_openElementsModal`, `listExistingElements`, `elementExists(name)`, `createCharacterElement({name, portraitPath, gridPath, description})`, static `buildManualChecklist(pending)`. ~~Old flow: 7-click UI path through Elements tab.~~ **May 2026 rewrite:** Opens @ toolbar button modal overlay → clicks "Create new" card → fills form (upload images, name, category, description) → Save → re-opens modal to verify. Idempotent — checks existing elements by name before creating. Graceful fallback: per-element failures are collected, catastrophic failures surface the manual checklist via orchestrator event.
+- New automation module: `src/main/automation/higgsfield-elements.js`. Class `HiggsfieldElements` with methods: `_openElementsPanel`, `listExistingElements`, `elementExists(name)`, `createCharacterElement({name, portraitPath, gridPath, description})`, static `buildManualChecklist(pending)`. Navigates the 7-click UI path Higgsfield → Cinema Studio → 2.5 toggle → Image tab → Cinema 2.0 → @ button → + Create new → form. Idempotent — checks existing elements by name before creating. Graceful fallback: per-element failures are collected, catastrophic failures surface the manual checklist via orchestrator event.
 - New orchestrator stage: `_runCinematicElementSetup(projectId, projectDir)`. Gated behind `generatorMode === 'cinematic'` — staged mode is a no-op passthrough. Runs between `portraits-done` and scene generation (Stage 3A.5). Generates grids for every character, then creates character elements. On automation failure, emits `cinematic-manual-element-checklist` event and pauses at new `elements-ready` approval gate until user confirms elements are ready.
 - Element naming convention: `@{char-id-suffix}_{title-initials}` (e.g. `@claire_thp` for Claire in "The Heir's Probation"). `_titleInitials()` helper derives initials from the project title.
 - New IPC: `approve-elements-ready` routes to `orchestrator.approveElementsReady()`.
 - New renderer view: `#view-cinematic-elements` with pending-elements list + manual-creation steps (collapsible) + "Elements Ready — Continue" button. Shown when `event.gate === 'elements-ready'` OR `cinematic-manual-element-checklist` event received.
 
 **Phase 2 known limitations (honest):**
-- ~~The 7-click UI path automation is best-effort.~~ **May 2026:** Higgsfield removed the Elements tab entirely. Element creation now uses the @ toolbar button modal overlay (click @ → "Create new" card → form → Save). The automation is best-effort — selectors may need refinement as Higgsfield's UI evolves. The fallback is MANDATORY, not optional — treat automation as a convenience that reduces clicks, not a guarantee.
+- The 7-click UI path automation is best-effort. Selectors may need refinement against a fresh Higgsfield UI pass (Session 8 DevTools inspection covered the path conceptually but specific role/aria attributes weren't all captured). The fallback is MANDATORY, not optional — treat automation as a convenience that reduces clicks, not a guarantee.
 - Voice tone binding is NOT automated. Character elements are created voice-less. For the best Kling lip-sync output, the user should manually bind a Nigerian English voice tone to each element via Higgsfield's UI after creation. Phase 2 doesn't block on this — voice tone can be bound before or during Phase 4 (Kling video generation).
 - Location elements + prop elements are NOT in Phase 2. Locations are Phase 3 (paired with location image generation). Props emerge from `scene.props_in_scene` during Phase 3 or later.
 - Native file picker for uploading portrait + grid images to the element form — this is the one OS-level dialog we CAN'T automate through Playwright, so the automation uses Playwright's `page.waitForEvent('filechooser')` + `fileChooser.setFiles()` pattern. If that interception fails (ad popup covers the click, filechooser doesn't fire in time), the automation fails and we fall back to manual.
@@ -578,13 +589,13 @@ Research → Title → Script (with cinematic fields)
 **What Phase 1 shipped:**
 - Migration 009: `projects.generator_mode TEXT NOT NULL DEFAULT 'staged'` with validation enforced in `setProjectGeneratorMode()` (same lock-on-start semantics as aspect_ratio — throws if any project_assets rows exist)
 - Renderer: third dropdown alongside Duration + Aspect on both pool and fresh-start cards. Values: `staged` (default, proven) vs `cinematic` (opt-in, WIP). Research view badge shows mode. Resume card shows mode badge.
-- Script prompt: new `{{CINEMATIC_SCAFFOLDING}}` placeholder. When `generator_mode = 'cinematic'`, Claude receives detailed authoring requirements for `scene.blocking` (frame-left/center/right with character references), `scene.location_element_hint` (snake_case location key), `scene.props_in_scene` (Chekhov's-gun array), and `scene.kling_clips` (multi-shot prompt array using Kling's bracketed dialogue syntax). Staged mode gets an empty string — no change to existing behavior.
+- Script prompt: new `{{CINEMATIC_SCAFFOLDING}}` placeholder. When `generator_mode = 'cinematic'`, Codex receives detailed authoring requirements for `scene.blocking` (frame-left/center/right with character references), `scene.location_element_hint` (snake_case location key), `scene.props_in_scene` (Chekhov's-gun array), and `scene.kling_clips` (multi-shot prompt array using Kling's bracketed dialogue syntax). Staged mode gets an empty string — no change to existing behavior.
 - Structural review rubric: `CINEMATIC_RUBRIC_EXTENSION` injected when mode is cinematic. Adds 4 scoring dimensions (blocking completeness, kling clip coherence, element-hint discipline, props-as-elements) plus cinematic-specific critical failure modes. Cinematic mode thresholds bumped +5 across all tiers (test=55, standard=65, long-form=75).
 - Orchestrator: reads `options.generatorMode`, persists to DB, carries on `this.state.generatorMode`, passes through `storyBrief.generatorMode` to script engine. Resume path restores from DB.
 - Test: migration 009 verified against fresh DB; cinematic scaffolding substitution verified via integration test.
 
 **What Phase 1 deliberately does NOT do (deferred to Phases 2-6):**
-- No element-creation automation (Phase 2; ~~old: 7-8 click UI path~~ now @ toolbar button modal since May 2026)
+- No element-creation automation (UI path is 7-8 clicks deep; Phase 2)
 - No location generation stage (Phase 3)
 - No Cinema Studio 2.0 scene image automation (Phase 3)
 - No Kling 3.0 video generation automation (Phase 4)
@@ -606,7 +617,7 @@ Cinematic mode projects created today will generate cinematic-format script JSON
 **Why it exists:** Current staged output feels "stagey" because of the Conversation Lock rule in `script-prompt.txt` — every clip is a wide-group shot with one character's mouth moving. The fix isn't prompt-tuning (Veo generates single-shot 8s clips, no cuts within a generation). The fix is switching to Kling 3.0 which plans multi-shot coverage inside one generation, producing real cinematic rhythm with character consistency across cuts.
 
 **Key architectural pieces:**
-- **Higgsfield @ toolbar button modal** is load-bearing for Characters and Props (`@claire`, `@flashlight`) with voice tones baked into character elements. ~~Old: Elements tab/panel.~~ **May 2026:** Elements tab removed; the @ toolbar button in the bottom toolbar is now the sole entry point for element creation and browsing (opens a modal overlay with element grid + "Create new" card). **Locations are NOT elements** — they're plain reference images attached via the `+` button → "Image Generations" tab when Cinema Studio 2.0 generates a scene image. Earlier Phase 3 design tried creating Location elements; removed mid-build after user confirmed locations are reference images, never @-referenced in prompts.
+- **Higgsfield Elements panel** is load-bearing for Characters and Props (`@claire`, `@flashlight`) with voice tones baked into character elements. **Locations are NOT elements** — they're plain reference images attached via the `+` button → "Image Generations" tab when Cinema Studio 2.0 generates a scene image. Earlier Phase 3 design tried creating Location elements; removed mid-build after user confirmed locations are reference images, never @-referenced in prompts.
 - **Pre-production:** portraits + character grids (4-angle reference sheets) → character elements with voice tones.
 - **Production (images):** Nano Banana empty locations → Cinema Studio 2.0 scene images using `@element` refs + explicit blocking (frame-left/center/right).
 - **Cinematography (video):** Kling 3.0 multi-shot (up to 6 shots per 10-12s clip) with dialogue in Kling's bracketed syntax: `[@claire, speaking in a strained Nigerian English accent]: "..."`.
@@ -614,7 +625,7 @@ Cinematic mode projects created today will generate cinematic-format script JSON
 
 **What's shared with staged:** research stage, script generation + structural review, title approval, project DB, history recovery, Verify Clip (with adapted scope — grades shot groups not individual lines), assembly, publish.
 
-**What's new:** element creation automation (@ toolbar button modal overlay — ~~old: 7-8 click deep UI path, removed May 2026~~), location generation stage, Cinema Studio 2.0 automation surface, Kling 3.0 automation surface, `blocking` + `kling_clips` fields in script schema, generator_mode flag + migration 009.
+**What's new:** element creation automation (7-8 click deep UI path), location generation stage, Cinema Studio 2.0 automation surface, Kling 3.0 automation surface, `blocking` + `kling_clips` fields in script schema, generator_mode flag + migration 009.
 
 **Phase 0 validation (Session 8):** end-to-end test run confirmed Nano Banana → Cinema Studio 2.0 (with `@claire` + `@richard` element refs + 16:9 cinematic + kitchen location) → Kling 3.0 (multi-shot Auto mode, 15s, 720p, start frame from Cinema Studio, Nigerian English dialogue per character). Cost: ~32 credits. User has production-tested Kling 3.0 since January 2026; Nigerian accent renders correctly, character consistency holds across cuts, lip-sync switches per character.
 
@@ -681,17 +692,17 @@ The pipeline researches existing YouTube content, so copyright protection is cri
 
 ### Layer 3 — Source Title Injection
 - Orchestrator injects `sourceVideoTitles` into researchData
-- Shown to Claude as "EXISTING TITLES IN THIS SPACE (DO NOT COPY OR PARAPHRASE)"
+- Shown to Codex as "EXISTING TITLES IN THIS SPACE (DO NOT COPY OR PARAPHRASE)"
 
 ### Layer 4 — Research Context Sanitization
-- `buildScriptResearchContext()`: Individual video story structures (setup/conflict/climax) are NOT passed to Claude — removed entirely
+- `buildScriptResearchContext()`: Individual video story structures (setup/conflict/climax) are NOT passed to Codex — removed entirely
 - All pattern entries run through `sanitizePatternEntry()` which strips plot-summary-like text
 - `looksLikePlotSummary()` detects narrative indicators (action verbs, "A/The [person] [verb]" patterns)
 - Short abstract entries (≤60 chars, no narrative indicators) pass through unchanged
 - Long/narrative entries get truncated to first clause boundary or first 4 significant words
 - Both `buildResearchSummary()` and `buildScriptResearchContext()` are sanitized
 
-**Important**: Raw research data in the electron-store cache is NOT sanitized — it retains full Gemini analysis for UI display and debugging. Sanitization happens at the point of injection to Claude's API only.
+**Important**: Raw research data in the electron-store cache is NOT sanitized — it retains full Gemini analysis for UI display and debugging. Sanitization happens at the point of injection to Codex's API only.
 
 ## Higgsfield UI Automation Notes
 
@@ -727,30 +738,24 @@ Key differences between image and video pages:
 - Image model defaults to **`"Soul Cinema"`** (not "Cinematic Cameras" or "Nano Banana Pro"). Must be in image indicator list.
 - GENERATE button text can be `"GENERATE0.125"` or `"Generate26.25"` (no space/symbol between text and cost). Regex `/([\d,.]+)\s*$/` handles all variants.
 
-**Elements Panel — REMOVED (May 2026):**
-- As of May 2026, Higgsfield removed the Elements tab/panel entirely from the Cinema Studio UI. There is no longer a "Generations" / "Elements" tab pair at the top of the page. The stuck-state issue documented below is OBSOLETE.
-- **Old behavior (pre-May 2026):** Elements panel showed "Project elements", "Personal elements", "Add to Project" buttons, "Delete"/"Save" buttons, "Advanced settings", "Create Element". It had no Image/Video tabs, GENERATE button, or prompt textbox. The only exit was clicking the "Generations" tab.
-- **New behavior (May 2026+):** The **@ toolbar button** in the bottom toolbar (next to the 1x1 grid button) is now the SOLE entry point for both browsing existing elements AND creating new ones. Clicking it opens a **modal overlay** with: "Elements" heading, search bar, X close button, category sidebar (All/Pinned/Characters/Locations/Props), a "Create new" card (first position with + icon), and a scrollable grid of existing element cards with thumbnails.
-- **Element creation flow (new):** Click @ toolbar button → modal opens → click "Create new" card → form appears inside a dialog with: image upload zone (hidden 1x1 file input, accepts png/jpeg/mp4), element name input (placeholder "reference-name"), category combobox (Auto/Character/Location/Prop), Advanced settings toggle → description textarea + workspace combobox, Cancel + Save buttons.
-- **CRITICAL — Back button behavior:** The `<` back arrow from the "New element" form closes the ENTIRE modal and returns to the Generations view — it does NOT go back to the elements list. After saving an element, the automation must re-open the @ modal to verify the element was created.
-- **Detection signals (new, updated Session 30R-2):** Modal is open = case-insensitive "elements" heading present + "create new" text visible + Radix-specific containers (`[data-radix-popper-content-wrapper]`, `[class*="popover"]`, `[class*="Popover"]`, `[class*="Dialog"]`, `[class*="Sheet"]`) OR large fixed-position overlay (≥300×300) + category sidebar detection ("Characters"/"Pinned"/"Locations"/"Props"). No more "Add to Project" or "Project elements" signals.
-- **CRITICAL — Dual toolbar @ button selection (Session 30R-2):** The @ toolbar button suffers from the same DUAL TOOLBAR BUG as model selector buttons — two duplicate sets at slightly different positions. The CONTROLLING set is the LEFTMOST (minimum x). `_openElementsModal()` now uses model button y-position anchoring: find leftmost model button → get its y → filter @ button candidates within ±10px of that y → sort ascending by x → pick first/leftmost. Previously picked rightmost button, which was silently ignored by Radix UI (`isTrusted` check). Detection: no-text SVG-containing buttons, width 20-60px, in bottom toolbar (y > vh×0.65).
-- **`_openElementsModal()` retry strategy (Session 30R-2):** 3 attempts with increasing intervention: (1) click + 2000ms wait, (2) Escape + 500ms + re-click + 2500ms wait, (3) Escape + 500ms + re-click + 2500ms + `_getModalDiagnostics()` dump on failure. Diagnostics include: text signal matches (elements/create new/characters/pinned), Radix/overlay container count, fixed div inventory with dimensions, current URL.
-- **`_closeElementsModal()` isTrusted fix (Session 30R-2):** X close button must be clicked via `page.mouse.click(cx, cy)` (trusted CDP event), NOT `btn.click()` inside `page.evaluate()` (untrusted JS event that Radix ignores). Returns coordinates from evaluate, clicks externally.
-- **Guards updated:** Model selector no longer needs to check for "Add to Project" buttons (Elements panel doesn't exist). The `_ensureGenerationsView()` Elements-panel detection in `cinema-studio-automation.js` is now a legacy no-op — Elements panel can't appear.
+**Elements Panel — CRITICAL Stuck State:**
+- After element creation/checking, the UI stays on the Elements panel (shows "Project elements", "Personal elements", "Add to Project" buttons, "Delete"/"Save" buttons, "Advanced settings", "Create Element").
+- The Elements panel does NOT have Image/Video tabs, GENERATE button, or prompt textbox. All toolbar detection fails.
+- **The ONLY way out is clicking the "Generations" tab** (top of page, next to "Elements" tab). Going home does NOT dismiss it — the panel persists across navigation.
+- Detection signals: `"Add to Project"` button count ≥ 2, `"Delete"` + `"Save"` buttons present, `"Advanced settings"` text, `"Project elements"` heading, NO GENERATE button.
 
 **Model Selector:**
 - The model button is in the bottom toolbar (y > 65% of viewport). Shows the model name text: "Cinematic Cameras", "Cinema Studio 3.5", "Nano Banana Pro", etc.
 - **DUAL TOOLBAR BUG (CRITICAL):** The bottom toolbar renders TWO duplicate sets at slightly different x positions (e.g. x:373 vs x:378). Each set has its own model button showing DIFFERENT model names. The controlling set is the LEFTMOST (minimum x). The duplicate set at higher x shows stale/wrong model (e.g. "Nano Banana Pro" when the controlling set shows "Cinematic Cameras"). **ALL model reads and clicks MUST filter to the leftmost set** — collect all model-name buttons, find minX, only use buttons within 10px of minX. Reading from the wrong set causes infinite switch loops.
 - **Dropdown dismissal on reset:** When a stuck guard fires during model selection, the dropdown stays open and contaminates subsequent toolbar scans. `_clickGenerationsReset()` now presses Escape twice before resetting to dismiss any open dropdowns/popovers.
 - Model dropdown (verified live): Cinematic section (Cinematic Characters, Cinematic Locations, Soul Cinema, Cinematic Cameras), All models section (Auto, Higgsfield Soul, Google, ByteDance, Grok, Z-Image).
-- **GUARD against Elements panel**: ~~OBSOLETE (May 2026) — Elements panel removed from UI.~~ Previously needed to check for "Add to Project" buttons. No longer necessary.
+- **GUARD against Elements panel**: When on Elements panel, element rows (e.g. "mama_agbadoA 48-year-old Nigerian...") are wide buttons (526px) in the same y zone. The model selector must check for "Add to Project" buttons and skip fallback matching if detected.
 - "Style:Auto" and "Camera:Auto" are style/camera pickers, NOT model selectors. Do not match "Auto" as a model name — it's too ambiguous.
 - Default model for new projects: "Nano Banana Pro" (not Cinematic Cameras). Must explicitly switch.
 - **If controlling set already shows "Cinematic Cameras", do NOT click it** — clicking an already-selected model opens an "All models" dropdown where "Cinematic Cameras" is not listed, creating a stuck loop.
 
 **Toolbar Setup Sequence (the correct order):**
-1. ~~Click **Generations** tab (exit Elements panel)~~ — OBSOLETE (May 2026): Elements panel removed. Step 1 is now a no-op; if toolbar isn't visible, nuke context.
+1. Click **Generations** tab (exit Elements panel)
 2. Click **Image** tab (not Video)
 3. Select **Cinematic Cameras** model
 4. Set **1/4** image count (decrement button)
@@ -758,10 +763,7 @@ Key differences between image and video pages:
 6. Set **2K** resolution
 7. Set **1x1** grid
 8. Attach **reference image** (+ button → Uploads tab → fileChooser upload → click tile → verify thumbnail)
-8b. **Verify elements via @ button** — **TWO DIFFERENT @ MECHANISMS exist (CRITICAL distinction as of May 2026):**
-   - **Mechanism A — @ toolbar button click (element creation/browsing):** Clicking the @ toolbar button (small no-text SVG button, next to 1x1 grid) opens a **modal overlay** for browsing and creating elements. Used by `higgsfield-elements.js` (`_openElementsModal()`). This is the element management UI — the SOLE replacement for the removed Elements tab. The modal has its own close button (X), search bar, category sidebar, and element grid.
-   - **Mechanism B — typing `@` into the prompt textbox (element verification):** Typing the `@` character into the Lexical prompt textbox triggers an **autocomplete dropdown** listing available elements. Used by `cinema-studio-automation.js` (`_verifyElementsViaAtButton()`). This verifies elements exist in the Higgsfield project at scene generation time. This mechanism is UNCHANGED — it types `@` into the prompt, reads the dropdown, then cleans up. This MUST ONLY run when mode = Image AND model = Cinematic Cameras.
-   - **Root cause of past failures (April 2026):** After a page nuke (`resetFormForNextGeneration()`), the page lands on the base Cinema Studio URL which defaults to Video mode. The toolbar takes seconds to render. **Fix:** (1) `_setupToolbarSequence()` has a PRE-STEP that waits up to 15s for the toolbar to render. (2) Image mode verification no longer falls back to `ok: true` on ambiguous states. (3) Phase 1b DOM smoke check throws `SAFETY STOP` if video indicators persist after setup. **If Mechanism B runs in the wrong mode, it injects `@@@@` into the textbox which contaminates the prompt and can trigger a 96-credit video generation.**
+8b. **Verify elements via @ button** — The @ element check types `@` into the prompt to verify character elements exist in the Higgsfield project. This MUST ONLY run when mode = Image AND model = Cinematic Cameras. **Root cause of past failures (April 2026):** After a page nuke (`resetFormForNextGeneration()`), the page lands on the base Cinema Studio URL which defaults to Video mode. The toolbar takes seconds to render. The old toolbar setup had a `no-video-guns-fallback` that returned success when it found NO indicators at all (neither video nor image) — treating an empty/loading toolbar as "probably Image mode". This let the pipeline proceed, and by the time the @ check ran, the toolbar had loaded into Video mode. **Fix:** (1) `_setupToolbarSequence()` now has a PRE-STEP that waits up to 15s for the toolbar to render at least one concrete indicator (video OR image) before starting any steps. (2) The Step 2 (Image mode) verification no longer falls back to `ok: true` on ambiguous/empty states — if it can't positively confirm Image mode, it returns failure and triggers a restart. (3) Phase 1b in `generateSceneImage()` runs a final DOM smoke check — if video indicators are STILL present after setup "passed", it throws `SAFETY STOP` instead of silently skipping. The @ button is the RIGHTMOST small no-text SVG button in the toolbar (after 1x1 grid). Click → read dropdown → confirm characters exist → Escape to dismiss. Must happen AFTER toolbar setup, BEFORE reference attachment. **If the @ check runs in the wrong mode, it injects `@@@@` into the textbox which contaminates the prompt and can trigger a 96-credit video generation.**
 8c. **@ button cleanup (CRITICAL — April 2026):** Clicking the @ button inserts an `@` character (and potentially partial mention state) into the Lexical textbox. After dismissing the dropdown with Escape, `_verifyElementsViaAtButton()` runs a 3-attempt cleanup loop: `Ctrl+A → Backspace` + `execCommand('delete')` fallback, verifying the textbox is empty after each attempt. If 3 attempts fail, a nuclear fallback clicks away from textbox → Escape → re-focus → `Ctrl+A → Delete → Backspace`. This ensures no residual `@` text contaminates the prompt in Phase 3. Without this cleanup, the subsequent `_typeBlockingPrompt()` clear may fail to remove Lexical mention nodes, producing malformed generations with `@@` prefixes.
 9. Attach **reference image** (+ button → Uploads tab → local file → click tile → wait for thumbnail)
 10. Paste prompt (execCommand) with @mentions for characters
@@ -795,11 +797,11 @@ Key differences between image and video pages:
 
 **Vision-Based Blocking Refinement (April 2026):**
 - **Problem:** Script-generated blocking uses generic `frame_left/frame_center/frame_right` positions — the script never sees the location image, so it can't reference spatial anchors (the grill, the counter, the signpost). Result: 2+ character scenes look like police lineups instead of cinematic compositions.
-- **Solution:** Before building the Higgsfield prompt, send the location image + scene context to Claude API (vision) and ask it to propose spatially-grounded blocking. The refined blocking references actual objects in the image ("behind the grill, arms folded," "leaning on the counter frame-right") instead of abstract frame positions.
+- **Solution:** Before building the Higgsfield prompt, send the location image + scene context to Codex API (vision) and ask it to propose spatially-grounded blocking. The refined blocking references actual objects in the image ("behind the grill, arms folded," "leaning on the counter frame-right") instead of abstract frame positions.
 - **Method:** `_refineBlockingWithVision(locationImagePath, scene, characters)` in `orchestrator.js`. Takes the location PNG (base64), scene emotional context + characters, returns a refined prompt string with @mentions + spatial descriptions. Falls back to original script blocking on API failure.
 - **Placement:** Inside `_runCinematicSceneImageStage()` per-scene loop, AFTER resolving `locInfo` and `characters`, BEFORE calling `cinema.generateSceneImage()`. The refined blocking text replaces the raw `characters` array's position strings.
-- **Prompt design:** System prompt instructs Claude to: (1) describe spatial anchors in the location image, (2) propose character positions that use those anchors, (3) output @mention names with environment-relative positions, (4) never use generic frame-left/center/right language. Single-character scenes get intimate framing; multi-character scenes get dynamic spatial relationships.
-- **Cost:** One Claude API call per scene (~$0.01-0.03 with vision) vs 2 Higgsfield credits ($0.20+) per generation. The quality uplift is worth 10x the cost.
+- **Prompt design:** System prompt instructs Codex to: (1) describe spatial anchors in the location image, (2) propose character positions that use those anchors, (3) output @mention names with environment-relative positions, (4) never use generic frame-left/center/right language. Single-character scenes get intimate framing; multi-character scenes get dynamic spatial relationships.
+- **Cost:** One Codex API call per scene (~$0.01-0.03 with vision) vs 2 Higgsfield credits ($0.20+) per generation. The quality uplift is worth 10x the cost.
 - **Fallback:** If vision call fails or returns unparseable result, use original `scene.blocking` from script. Existing code path stays intact as safety net.
 
 **Inter-Generation Reset (April 2026 — CRITICAL):** After each successful scene generation + download, the form MUST be reset before the next scene starts. Higgsfield persists references and prompts at the PROJECT level AND in the browser context (localStorage, session storage, React in-memory state) — there is no UI control to remove a reference image once attached. Reloading the same project or even navigating to a different URL does NOT clear this state. The ONLY reliable reset is `recreateContext()`: tear down the entire browser page + context, preserve cookies for auth, create a brand new context with no localStorage, open a fresh page. This is the same pattern used by `clearVideoStartFrame()` in the staged workflow. Fix: `resetFormForNextGeneration()` in `cinema-studio-automation.js` calls `this.automation.recreateContext()`, then navigates the fresh page to `https://higgsfield.ai/cinema-studio`. Clears `_projectId` and `_projectCreated` so the next `generateSceneImage()` → `ensureProject()` call re-creates/finds the project fresh. Orchestrator calls this with a 5s cooldown between scenes. Similarly, `_nukePageForToolbarReset()` uses the same `recreateContext()` pattern when the toolbar setup can't switch modes — if clicking the Image tab doesn't work, nuke the whole context and retry from scratch.
@@ -817,7 +819,7 @@ Key differences between image and video pages:
 **Viewport/Coordinate Notes:**
 - Electron BrowserView viewport: 1920×847.
 - Screenshot resolution differs from DOM coordinates (scale ~0.817x). Clicking at DOM coordinates doesn't work for coordinate-based clicks — need to scale.
-- Cost: Cinematic Cameras = 2 credits/image, Soul Cinema = 0.125 credits, Cinema Studio 3.5 video = 8 credits. Safety gate: anything > 10 credits is suspicious (likely wrong mode).
+- Cost notes: Cinematic Cameras = 2 credits/image, Soul Cinema = 0.125 credits. Cinema Studio 3.5 video cost varies by settings; May 2026 walkthrough observed `15s + 480p + 9:16` at `52.5` credits. Do not use the image-mode `>10 credits` safety gate for Cinema Studio 3.5 video; use the dedicated Cinema video pre-gen guard instead.
 
 **GENERATE button text variants:** Can show as `"GENERATE ✦ 2"` (uppercase) or `"Generate2"` (compressed, depending on viewport). Match with `/^GENERATE|^Generate/` + digit check.
 
@@ -843,7 +845,7 @@ Gemini 2.5 Flash sometimes returns malformed JSON despite `responseMimeType: 'ap
 
 ## Script JSON Recovery
 
-Claude's script responses (especially at 90+ lines) can be truncated or malformed. `_safeParseScriptJson()` in script-engine.js provides 6-strategy progressive recovery: direct parse → regex extraction → trailing comma fix → bracket closing → unescaped quote fix → truncation to last complete element. Helper methods: `_closeUnclosedBrackets()`, `_fixUnescapedQuotes()`, `_truncateToLastComplete()`. The `max_tokens` is set to 16384 to minimize truncation in the first place.
+Codex's script responses (especially at 90+ lines) can be truncated or malformed. `_safeParseScriptJson()` in script-engine.js provides 6-strategy progressive recovery: direct parse → regex extraction → trailing comma fix → bracket closing → unescaped quote fix → truncation to last complete element. Helper methods: `_closeUnclosedBrackets()`, `_fixUnescapedQuotes()`, `_truncateToLastComplete()`. The `max_tokens` is set to 16384 to minimize truncation in the first place.
 
 **Session 30N fixes (5 critical):**
 1. `_closeUnclosedBrackets` — rewrote to use ordered nesting stack (old code closed `]` before `}` regardless of nesting order)
@@ -986,7 +988,7 @@ If all fail: throws `REFERENCE_UPLOAD_FAILED` to abort (prevents identity drift)
 
 `sanitizeContinuityTag(imagePrompt, lineNumber)` in `orchestrator.js` — called before staging references and sending prompts to Higgsfield for Lines 2+.
 
-The LLM (Claude script generator) sometimes produces garbled continuity tags where the tag text is interleaved with the scene description (e.g., `(Continuity: Using Image Prompt [Line 1] as rs slightly parted...`). The sanitizer:
+The LLM (Codex script generator) sometimes produces garbled continuity tags where the tag text is interleaved with the scene description (e.g., `(Continuity: Using Image Prompt [Line 1] as rs slightly parted...`). The sanitizer:
 1. Detects well-formed tag → passes through unchanged
 2. Detects garbled tag fragments → strips them, extracts line number, prepends clean tag
 3. No tag but line > 1 → prepends tag referencing previous line
@@ -1561,7 +1563,7 @@ Total wait time before failure: ~7 minutes of recovery windows. Videos that comp
 - **Outer generation catch** (line ~6690): pause pipeline, relaunch browser, wait for user Resume, `i--; continue`
 
 ### Vision-Refined Blocking — Bare Character Names (orchestrator.js)
-**Problem:** Claude Vision API returns blocking text with bare character names ("toward son_emeka") without `@` prefix. These don't become @-mention pills in Higgsfield.
+**Problem:** Codex Vision API returns blocking text with bare character names ("toward son_emeka") without `@` prefix. These don't become @-mention pills in Higgsfield.
 
 **Fix:** Post-processing in 3 locations ensures all character names get `@` prefix:
 1. `_refineBlockingWithVision()` — right after Vision API returns
@@ -1840,7 +1842,7 @@ return this.generateImage({ prompt, outputPath, references, useUnlimited: false,
 - Throws `NSFW_REJECTED` with `nsfwRejected: true, retryable: false`
 - `generateImage()` propagates immediately (no same-prompt retry — it'll just fail again)
 - **Orchestrator** catches `NSFW_REJECTED` in portrait loop:
-  1. Calls `_rewriteCharacterDescription(char)` — Claude rewrites `full_prompt_description` with more fictional/stylized traits while keeping ethnicity, wardrobe, and story role
+  1. Calls `_rewriteCharacterDescription(char)` — Codex rewrites `full_prompt_description` with more fictional/stylized traits while keeping ethnicity, wardrobe, and story role
   2. Updates `character_bible` in memory + persists to `script.json` via `_saveScriptState()`
   3. Resets asset to pending, splices it back into the loop, and retries with the new prompt
   4. Max 2 rewrites per character to prevent infinite loops
@@ -1887,7 +1889,7 @@ When the model isn't selected properly, the toolbar doesn't show Cinematic Camer
 
 ### Iterative Script Generation (script-engine.js — Session 18)
 
-**Problem:** The `generateScript()` method used a single API call with `max_tokens: 16384`. For 30-minute cinematic scripts (10 chapters × 3 scenes × 9 lines with blocking, kling_clips, image/animation prompts), one chapter uses ~12K tokens. A full 10-chapter script needs ~120K tokens — far beyond the 16384 limit. Claude would generate 1 chapter, hit the limit, and the truncation recovery would silently close the JSON with just 1 chapter. The pipeline then processed only 3 scenes instead of 30.
+**Problem:** The `generateScript()` method used a single API call with `max_tokens: 16384`. For 30-minute cinematic scripts (10 chapters × 3 scenes × 9 lines with blocking, kling_clips, image/animation prompts), one chapter uses ~12K tokens. A full 10-chapter script needs ~120K tokens — far beyond the 16384 limit. Codex would generate 1 chapter, hit the limit, and the truncation recovery would silently close the JSON with just 1 chapter. The pipeline then processed only 3 scenes instead of 30.
 
 **Fix:** Iterative chapter-by-chapter generation:
 - **Threshold detection:** Estimates tokens per chapter (cinematic: ~130 tokens/line, staged: ~45 tokens/line). If total exceeds 85% of max_tokens, switches to iterative path. Short scripts (test/standard staged) still use single-call.
@@ -1995,7 +1997,7 @@ Changes: strict exact file basename matching in `regenerateLocations()`, safety 
 
 **Problem:** When `_injectVisionBlocking()` prepends vision-refined character positions to the Kling prompt, the original `CHARACTER POSITIONS:` line remains in the body — giving Kling conflicting instructions.
 
-**Dependency chain:** portrait → character_grid → element → location_image → scene_image (uses vision blocking) → video_clip (uses scene as start frame + blocking). Vision-refined blocking is the ground truth because it's based on what Claude Vision actually saw in the location image (same image used as Kling start frame).
+**Dependency chain:** portrait → character_grid → element → location_image → scene_image (uses vision blocking) → video_clip (uses scene as start frame + blocking). Vision-refined blocking is the ground truth because it's based on what Codex Vision actually saw in the location image (same image used as Kling start frame).
 
 **Fix:** After building the vision preamble, strip original `CHARACTER POSITIONS:` lines from prompt body via regex. Only affects video gen (`_injectVisionBlocking` is never called from scene gen). Logged when stripping occurs.
 
@@ -2050,7 +2052,7 @@ Changes: strict exact file basename matching in `regenerateLocations()`, safety 
 
 **Problem:** SEO metadata (YouTube title/description/tags, Facebook caption) was only generated at publish time — a manual button click. The script already contains everything needed for SEO.
 
-**Fix:** `_generateEarlySEO(projectId, projectDir)` fires as background promise after script approval. Non-blocking — portrait generation proceeds in parallel. Generates YouTube + Facebook metadata via Claude, persists to DB, writes output files. If it fails, publish stage can still generate on demand.
+**Fix:** `_generateEarlySEO(projectId, projectDir)` fires as background promise after script approval. Non-blocking — portrait generation proceeds in parallel. Generates YouTube + Facebook metadata via Codex, persists to DB, writes output files. If it fails, publish stage can still generate on demand.
 
 **Skip logic:** Checks `youtube_metadata` column — if already populated, skips early generation (idempotent on resume).
 
@@ -2636,7 +2638,7 @@ Flow change:
 
 **DB persistence:** After successful verification, corrected `vision_refined_characters` + `vision_blocking_verified: true` flag are written back to the scene asset's `prompt_used` JSON via `db.updateAssetPromptUsed()`. On subsequent runs, scenes with the verified flag skip the Vision call entirely — no redundant API calls.
 
-**WebP-in-PNG handling:** Cinema Studio saves scene images with `.png` extension but WebP content. The verification detects actual format from file magic bytes (first 12 bytes: PNG `89504E47`, JPEG `FFD8FF`, WebP `RIFF....WEBP`) and converts WebP→JPEG via ffmpeg before sending to Claude Vision API.
+**WebP-in-PNG handling:** Cinema Studio saves scene images with `.png` extension but WebP content. The verification detects actual format from file magic bytes (first 12 bytes: PNG `89504E47`, JPEG `FFD8FF`, WebP `RIFF....WEBP`) and converts WebP→JPEG via ffmpeg before sending to Codex Vision API.
 
 **Name format preservation:** Vision returns base names (e.g. "ngozi"). Post-processing converts all bare names and @base names to the full suffixed element format (`@ngozi_towwf_0421`) using the same regex pattern as `_refineBlockingWithVision`.
 
@@ -2657,7 +2659,7 @@ Cost: ~1 Sonnet call per scene with pending clips. Cached in-memory per run + pe
 
 Position-independent actions need no fix: "gestures with hand", "narrows eyes", "crosses arms", "nods slowly."
 
-**Fix: `_reconcileShotDirectionsWithImage(sceneImagePath, verifiedPositions, prompt, imageData, mimeType)`** — 3rd Vision pass, per-clip. Sends the scene image + verified character positions + full shot directions to Claude Vision. Checks for TWO types of problems: (A) physically impossible actions given character positions, and (B) visual-state contradictions — wardrobe, props, or appearance described in shot directions that contradict what's visible in the scene image (the start frame). Kling cannot change wardrobe or conjure props not in the start frame. For visual-state contradictions, the fix is always STRIP (remove the contradicting phrase) — never invent a replacement. Runs ONLY when the 2nd Vision pass made corrections (corrections > 0).
+**Fix: `_reconcileShotDirectionsWithImage(sceneImagePath, verifiedPositions, prompt, imageData, mimeType)`** — 3rd Vision pass, per-clip. Sends the scene image + verified character positions + full shot directions to Codex Vision. Checks for TWO types of problems: (A) physically impossible actions given character positions, and (B) visual-state contradictions — wardrobe, props, or appearance described in shot directions that contradict what's visible in the scene image (the start frame). Kling cannot change wardrobe or conjure props not in the start frame. For visual-state contradictions, the fix is always STRIP (remove the contradicting phrase) — never invent a replacement. Runs ONLY when the 2nd Vision pass made corrections (corrections > 0).
 
 **Critical guardrails (action density vs lip sync trade-off):**
 Too much body action competes with dialogue lip sync — observed pattern from clip generation data. The 3rd Vision pass must simplify, never elaborate.
@@ -2820,7 +2822,7 @@ Script engine would author these per clip based on dramatic context. Orchestrato
 
 **F. Subtitle Suppression at Script Level**
 
-Currently `NO SUBTITLES.` is appended as a suffix by the orchestrator. If Kling consistently ignores the suffix position, move into the scaffolding template so it's baked into every `multi_shot_prompt` Claude writes: "Do NOT include subtitle text, caption overlays, or on-screen text of any kind."
+Currently `NO SUBTITLES.` is appended as a suffix by the orchestrator. If Kling consistently ignores the suffix position, move into the scaffolding template so it's baked into every `multi_shot_prompt` Codex writes: "Do NOT include subtitle text, caption overlays, or on-screen text of any kind."
 
 **G. Difficult-Word Replacement Dictionary**
 
@@ -2936,7 +2938,7 @@ Phase 1: Script Schema + Scaffolding (no runtime changes)
 ├── 1c. Update _buildCinematicScaffolding with outfit authoring rules
 ├── 1d. Update _validateScriptCompleteness: warn if outfits[] missing or
 │       character_outfits not declared per scene
-└── 1e. Update outline prompt: instruct Claude to assign outfits based on
+└── 1e. Update outline prompt: instruct Codex to assign outfits based on
         narrative context (time of day, location type, social setting)
 
 Phase 2: Portrait + Grid Generation (orchestrator.js)
@@ -3031,7 +3033,7 @@ Phase 5: Resume + Recovery
   - `verifyPortrait(portraitPath, character, { passThreshold = 80 })` — checks gender, age, skin tone, build, hair, clothing, overall impression against character bible. Weighted scoring (gender/skin_tone 3x, overall 2x).
   - `verifyGrid(gridPath, portraitPath, character, { passThreshold = 75 })` — multi-image comparison against approved portrait. Checks face consistency (3x weight), angle coverage, layout quality, clothing consistency, identity stability.
   - `verifySceneImage(scenePath, opts, { passThreshold = 70 })` — checks character presence (3x weight), character identity, setting match, blocking positions, composition. Forced fail if character_presence < 50. Supports portrait reference images.
-  - Shared infrastructure: image loading, mime detection from magic bytes, webp→jpeg conversion via ffmpeg, Claude Vision API calls (single + multi-image), JSON parsing, configurable thresholds
+  - Shared infrastructure: image loading, mime detection from magic bytes, webp→jpeg conversion via ffmpeg, Codex Vision API calls (single + multi-image), JSON parsing, configurable thresholds
   - `verifyLocationImage(locationPath, location, { passThreshold = 70 })` — checks no people present (3x weight — critical, forced fail if <50), description match (2x), mood/setting (1.5x), composition (1x). Locations must be completely empty backgrounds.
   - Single pass/fail verdict (no review tier). Returns `{ score, issues[], verdict, details }`. Fallback = 'pass' (non-blocking).
 - Orchestrator wiring — **eliminates human approval gates**:
@@ -3330,7 +3332,7 @@ Shorts tab — 3-phase flow with persistence:
 - **Plan Calendar** button: probes durations, computes groups, fills schedule table,
   persists to DB with status `planned`. Plan survives app restarts.
 - **Assemble + SEO** button (enabled after plan): reads planned shorts from DB, runs
-  FFmpeg sequentially, generates SEO via Claude API, updates each row to `seo_done`.
+  FFmpeg sequentially, generates SEO via Codex API, updates each row to `seo_done`.
   Resumable — skips already-assembled shorts.
 - **Upload** controls: reads `seo_done` shorts, Playwright uploads one at a time.
 - Previous single "Plan + Assemble + SEO" button replaced with two-step flow so user
@@ -3450,40 +3452,140 @@ Thumbnail credit tracking (session 30M):
 
 ---
 
-## Session 30R — Element Creation Loop Hardening (May 8, 2026)
-
-**5 fixes to the element creation and confirmation workflow in `_runCinematicElementSetup()` (orchestrator.js).**
-
-Zero downstream impact — all changes are internal to the element creation loop. The `cinematicElementNames` map (consumed by scene image gen + video clip gen) is populated identically; the changes only improve the accuracy of the `existingElements` Set and the `failedElements` filter that decides whether to fire the manual gate.
-
-**Fix #1 — Removed stale UUID swap block (~lines 3466-3491):**
-Dead code from an earlier design where element UUIDs were scraped from the Elements panel and swapped into the `cinematicElementNames` map. The pipeline no longer uses UUIDs — element names are the canonical identifiers. The block referenced variables (`swapTarget`, `tempCharIndex`) that no longer existed, making it unreachable. Removed cleanly.
-
-**Fix #2 — `existingElements` Set kept in sync during creation loop:**
-The `existingElements` Set was populated during the @ button pre-check phase but never updated when elements were successfully created and confirmed during the creation loop. The `failedElements` filter at line ~4239 (`actuallyPending.filter(p => !existingElements.has(...))`) would incorrectly include successfully created elements as "failed," triggering the manual gate unnecessarily.
-Fix: Added `existingElements.add(p.name.toLowerCase().trim())` at all 3 confirmation points:
-- Success path: after @ button post-creation confirmation (line ~4166)
-- Error recovery: after @ button confirms element exists despite creation error (line ~4197)
-- Panel scraper fallback: after `elementExists()` confirms element (line ~4209)
-
-**Fix #3 — Removed redundant final sanity check in success path:**
-When all elements were created/skipped successfully, the success path ran a full batch `_verifyElementsViaAtButton` on ALL elements — costing 3-5 minutes per run. This was redundant because Fix #2 ensures each element is individually confirmed via @ button during the creation loop. Replaced ~20 lines of batch re-verification with a single log line.
-
-**Fix #4 — Cache invalidation before panel scraper fallback:**
-Already present at line ~4205 (`elements.invalidateCache()` before `elements.elementExists(p.name)`). No change needed — confirmed correct.
-
-**Fix #5 — DB persistence retries increased to 3 with exponential backoff:**
-`db.setAssetElementName()` writes are critical for cross-run map restoration. Single retry with 500ms delay was insufficient for SQLite WAL checkpoint locks. Upgraded to 3 retries with exponential backoff (500ms, 1000ms, 2000ms). Failure counter tracks exhausted retries and emits CRITICAL-level log warning that resume will break.
-
-**Files changed:**
-- `src/main/pipeline/orchestrator.js` — all 5 fixes (lines ~4140-4420)
-- `CLAUDE.md` — this section
-
 ## Session 30N: Script Engine Review
 
 **Commit script:** `commit-session30N.ps1`
 
-**Task:** Thorough review of `src/main/pipeline/script-engine.js` — the Claude API integration
+**Task:** Thorough review of `src/main/pipeline/script-engine.js` — the Codex API integration
 that generates titles and screenplays. Review scope: prompt quality, JSON parsing resilience,
 error handling, structural grading, cinematic vs staged mode divergence, duration preset
 compliance, and any bugs or improvement opportunities discovered during review.
+
+---
+
+## TODO: Cinema Studio 3.5 Video Engine Branch (Session 30W Planning, May 2026)
+
+Goal: keep the existing cinematic pipeline and add Cinema Studio 3.5 as a selectable video-generation branch only. Reuse the cinematic script, scene images, Higgsfield elements, batch prompt preview, DB asset rows, retry/resume, verify, download/recovery, and assembly wherever possible.
+
+**Implementation status (Session 30W partial):**
+- The home/research UI now treats `Cinematic` as the neutral story-driven mode. The video engine is selected separately via `Video: Kling 3.0` or `Video: Cinema Studio 3.5`.
+- Default remains `kling`, preserving existing production behavior unless the user explicitly selects Cinema Studio 3.5 before project start.
+- The engine choice is stored on the project settings as `settings.cinematicVideoEngine`.
+- The global project aspect ratio (`projects.aspect_ratio`, selected on home) must control both video engines. Kling derives final clip aspect from the project scene/start frame; Cinema Studio 3.5 receives the same aspect explicitly and sets its toolbar to `16:9` or `9:16` before Generate.
+- Cinema Studio 3.5 video must reuse the same persisted Higgsfield Cinema Studio project context as the cinematic scene/image path. Navigate to `https://higgsfield.ai/cinema-studio?cinematic-project-id=<higgsfield_cinema_project_id>` first, then switch to Video -> Cinema Studio 3.5 and continue generation. Kling 3.0 has no Higgsfield project selection.
+- `_runCinematicVideoStage()` reads that stored setting at video stage time and instantiates either `KlingAutomation` or `CinemaVideoAutomation`.
+- Both engines share the same orchestrator contract: `generateClip()` and `recoverTimedOutClip()`. Downstream DB rows, prompt preview, clip review, verify, and assembly continue to use `video_clip_cinematic`.
+- Added `cinema-eligibility-failed` gate for Cinema Studio scene/element eligibility pauses. Human fixes the asset or eligibility state, approves the gate, and the same clip is retried.
+- Added `src/main/automation/cinema-video-automation.js` for Cinema Studio 3.5 setup/upload/eligibility/generate logic. It reuses Kling recovery/download patterns where practical, but uses Cinema-specific upload, eligibility, Generate safety, and credit-ledger confirmation.
+- Cinema Studio 3.5 video setup is an active setter pass, not a passive confirmation pass. Each run opens/sets the top controls (`Genre: General`, `Style: Auto`, `Camera: Auto`) and bottom controls (`Cinema Studio 3.5`, `15s`, `480p`, project aspect). Audio is the exception: click only when it reads `Off`, then verify it settled to `On`, because clicking while already `On` toggles it off.
+- Live UI re-check (May 2026): CS 3.5 can load as `8s`, `1080p`, `Auto`, `Off`. Duration is a `Duration` dialog with a slider, not a text option; set it by dragging the slider to max and verify the toolbar says `15s`. Resolution opens a `Resolution` listbox (`480p`, `720p`, `1080p`); select `480p` and verify the Generate button cost drops to `52.5` at `15s`. Aspect is a normal option dialog (`Auto`, `1:1`, `3:4`, `9:16`, `4:3`, `16:9`, `21:9`). Genre opens a Genre panel with `General`; Style opens a Style Settings panel with Auto columns and `Manual Style · Off`; Camera opens a Camera Settings panel with Auto camera/lens/aperture.
+- Live 1-minute CS 3.5 run has validated toolbar setup, start-frame upload/eligibility, `@` element eligibility, accidental Generate blocking during prompt typing, intentional Generate, credit ledger label/cost, 5-7 minute generation timing, and Asset Library recovery. Full verify + assembly still need a complete multi-clip pass before this branch is considered production-hardened.
+
+**Session 30W live-test findings (May 26-27, 2026):**
+- **Scene/start-frame upload eligibility is auto-triggered by Higgsfield.** Do not click `Check eligibility` for scene uploads. The automation should upload through the `+` scene-image picker, identify only the newly uploaded card by new `img.src`, hover the card because status text can be hover-revealed, and progressively wait for Higgsfield to move through `pending`/`checking` to `Eligible`.
+- **Scene eligibility timing is variable.** Observed settles ranged from about 10s to 60s+, and a later live clip sat in `checking` for 279s before becoming `Eligible`. The UI can sit on `pending` while the upload/backend catches up. Use a long wait with one extension near 90% of the current timeout instead of failing at the old 180s cliff. Current intent: new-card wait about 180s with extension, eligibility wait about 420s with extension up to about 10 minutes.
+- **Element eligibility is different from scene eligibility.** Elements must be opened from the bottom-toolbar `@` button next to Audio/Sound, not the sidebar Elements tab. For elements only, `Check eligibility` is a real required click when shown; after each element is confirmed `Eligible`, click the `@` button again to reopen the picker for the next element. Do not click the Elements tab directly for this workflow.
+- **Prompt typing can fire accidental Generate requests.** During `@` autocomplete and prompt insertion, arm the Cinema safety guard: a focused Generate-button shield plus a network kill switch that aborts `POST https://fnf.higgsfield.ai/jobs/v2/cinematic_studio_video_3_5`. Disarm only for the intentional Generate click. Restore Enter-based autocomplete for element mentions; do not replace it with mouse fishing.
+- **Fake silent dialogue must be normalized before approval.** LLMs can create contradictory prompt blocks such as `Mouth does not open. Total silence.` followed by `[@character, speaking in a silent accent]: "..."`. This is not valid dialogue and can cause lip-motion/subtitle nonsense. Runtime `RULE0` in `orchestrator.js::_validateAndFixPromptRules()` runs **after** vision blocking injection, shot-direction reconciliation, @/outfit sanitization, and posture correction, but **before** grounding prefix and prompt-preview approval. It converts fake silent dialogue (`"..."`, punctuation-only/empty text, `silence`, `no dialogue`, `speaking in a silent...`) to the canonical marker: `[@character_id has no dialogue]`. Regression test: `test/test-cinematic-silent-dialogue-sanitizer.js`.
+- **Generate confirmation requires two signals.** UI `Processing`/`Generating` proves Higgsfield accepted the click visually, but it is not enough to persist credit spend. A new credit row must also appear in History: `Cinematic Studio 3.5 Video`, action `Spent`, cost matching the button (`52.5 credits` for `15s/480p/9:16` in the live test), timestamp near the click. Only after the ledger row is confirmed should `onGenClicked(creditCost)` persist spend.
+- **Credit ledger parser live-confirmed.** The History page redirects to `https://higgsfield.ai/me/settings/usage?scope=personal` and renders real table rows: `52.5 credits | Cinematic Studio 3.5 Video | Spent | May 27, 202612:38 AM`. The parser must read `tr`/`td` cells, match `Cinematic Studio 3.5 Video`, ignore `Refunded`, and normalize missing date/time spacing (`202612:38` -> `2026 12:38`). Live confirmation at 1:33 AM: baseline captured 10 Cinema rows and matched the new 1:32 AM spend from `table-cells`.
+- **Ambiguous accepted state is not safe to retry.** If UI shows `Processing`/`Generating` but the ledger row does not appear within the confirmation window, do not throw a normal safe-to-retry `[PRE-GEN]` error. Log the ambiguous state and continue waiting/downloading/recovering to avoid a possible double-spend.
+- **Completion wait must be longer than Kling assumptions.** A Cinema Studio 3.5 15s/480p clip took roughly 5-7 minutes. After Generate confirmation, wait progressively for completion; do not launch asset recovery too early. If normal UI download misses it, then use Asset Library recovery.
+- **Asset recovery works for CS 3.5 video.** Recovered clips appear under `https://higgsfield.ai/asset/video`; prompt-similarity recovery found the generated clip at 99% similarity and downloaded it successfully. Recovery is a fallback for missed UI download/completion, not proof that a second Generate should be attempted.
+- **Credit ledger label is not Kling.** The correct live History rows read `Cinematic Studio 3.5 Video` with `Spent` or `Refunded`. Do not match or log `Kling` rows in the Cinema branch. Regression test: `test/test-cinema-video-ledger.js`.
+
+1. **Scope:** Do not create a new pipeline mode, provider framework, DB table, prompt system, or assembly path at first. Branch only where cinematic video clips are submitted to Higgsfield.
+
+2. **Setting:** Add one project setting, defaulting to the current behavior:
+   ```js
+   settings.cinematicVideoEngine = 'kling' | 'cinema-studio-3.5'
+   ```
+
+3. **Cinema Studio 3.5 setup:** Navigate to `https://higgsfield.ai/cinema-studio?cinematic-project-id=<higgsfield_cinema_project_id>`, ensure Video mode, and actively set every required control before each Generate attempt:
+   ```text
+   Genre: General
+   Style: Auto
+   Camera: Auto
+   Cinema Studio 3.5
+   15s
+   480p
+   project aspect (`16:9` or `9:16`)
+   Sound/Audio On
+   ```
+   Observed Generate button cost at these settings: `52.5` credits.
+
+4. **Scene/start image upload:** Use the **`+` symbol on the video input tile**, not the `@` button. Flow:
+   ```text
+   + symbol -> upload window -> Uploads -> Upload media -> trusted filechooser -> local DB file
+   ```
+   Source of truth remains `project_assets.file_path`.
+
+5. **Scene image eligibility:** Do not read global page text. Before upload, capture visible asset `img.src` values. After upload, find the new Higgsfield card by the new CDN image URL and read eligibility only inside that card. Parse in this order:
+   ```text
+   Not eligible
+   Checking / pending
+   Eligible
+   ```
+   Higgsfield auto-triggers the scene-image eligibility check after upload. Do not click `Check eligibility` for scene images. `Eligible` continues. `Not eligible`, timeout, or unknown pauses the pipeline. Do not mark the original scene asset failed. Use long progressive waits because the visible card can remain `pending` while the backend catches up.
+
+6. **Element eligibility entry point:** Use only the **`@` symbol next to Sound/Audio On**. Flow:
+   ```text
+   @ symbol -> Elements tab -> element card
+   ```
+   Ignore sidebar `Elements`, Assets, and project element management surfaces for this workflow.
+
+7. **Element eligibility behavior:** Element status is persistent once checked. For each required element:
+   ```text
+   already Eligible -> continue
+   already Not eligible -> pause
+   Check eligibility -> click once -> wait
+   ```
+   Observed live test: `Checking content...` settled to `Eligible` in `68.41s`. Use a generous timeout, about `180s` per element, polling for:
+   ```text
+   Checking content...
+   Eligible
+   Not eligible
+   Check eligibility
+   ```
+
+8. **Eligibility pause gate:** Add one pause gate if no existing gate fits:
+   ```text
+   cinema-eligibility-failed
+   ```
+   Payload shape:
+   ```js
+   {
+     assetKind: 'scene-image' | 'element',
+     failedAssets: [
+       { name, filePath, clipId, status, reason }
+     ]
+   }
+   ```
+
+9. **Generation branch:** Keep Kling unchanged:
+   ```text
+   cinematicVideoEngine === 'kling' -> existing cinematic Kling path
+   cinematicVideoEngine === 'cinema-studio-3.5' -> Cinema Studio setup/upload/eligibility/generate path
+   ```
+
+10. **Credit ledger confirmation:** Reuse the proven baseline/read/history pattern from Kling, but match Cinema-specific rows only. Open `https://higgsfield.ai/me/settings/credits-usage`, scroll to History, capture baseline rows, close tab, read Generate button cost, click Generate once, reopen credit usage, and confirm a new Cinema Studio spend row. UI `Processing`/`Generating` is required as an acceptance signal but does not replace the ledger row for persisted credit spend.
+
+11. **Cinema Studio credit row matching:** First test must confirm the exact ledger label for Cinema Studio 3.5. Expected matching fields:
+   ```text
+   Cinematic Studio 3.5 Video
+   Spent
+   52.5 credits (or Generate button cost)
+   cost ~= Generate button cost
+   timestamp near click
+   ```
+   Do not hardcode Kling text in the Cinema branch.
+
+12. **Pre-generate safety:** Before clicking Generate, verify toolbar settings, parse the Generate button cost, capture credit ledger baseline, then click Generate exactly once. If neither UI `Processing`/`Generating` nor a matching ledger row appears, throw a `[PRE-GEN]` error and treat it as safe to retry. If UI accepted but ledger is missing, treat it as ambiguous and do not retry automatically; continue to completion wait/recovery to avoid double-spending.
+
+13. **Post-click flow:** After both UI acceptance and ledger spend are confirmed, mark generation submitted/clicked, wait for the generated video, download it if it appears in the current UI, and fall back to asset recovery on timeout. Expect 5-7+ minutes for a 15s/480p Cinema Studio 3.5 clip.
+
+14. **Asset recovery:** Cinema Studio 3.5 outputs do appear under `https://higgsfield.ai/asset/video`. Reuse/adapt Kling recovery: open newest video tiles, compare prompt, download matching clip. A live recovery matched at 99% similarity and downloaded successfully. Recovery should run after a generous completion wait, not immediately after submit.
+
+15. **Downstream verification:** Confirm Cinema Studio clips work with existing clip review, verify flow, FFmpeg assembly, and 480p-to-4K upscale. Add normalization only if FFmpeg concat/upscale fails.
+
+16. **Regression tests:** Confirm existing Kling cinematic remains unchanged, staged/Veo remains untouched, and run a 1-minute Cinema Studio 3.5 test first. Test `+` scene upload, scoped scene eligibility, `@` element eligibility, not-eligible pause, ledger confirmation, download/recovery, verify, and assembly.

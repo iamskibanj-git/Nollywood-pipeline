@@ -572,6 +572,273 @@ class KlingAutomation {
     }
   }
 
+  async _readKlingCreditRows(ledgerPage) {
+    return ledgerPage.evaluate(() => {
+      const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+      const parseCost = (text) => {
+        const m = text.match(/([\d,.]+)\s+credits/i);
+        if (!m) return null;
+        const n = parseFloat(m[1].replace(/,/g, ''));
+        return Number.isFinite(n) ? n : null;
+      };
+      const parseDateText = (text) => {
+        const m = text.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b/i);
+        return m ? m[0] : null;
+      };
+      const signatureFor = (text) => normalize(text).toLowerCase();
+
+      const candidates = [
+        ...document.querySelectorAll('[role="row"], tr, tbody > *, [class*="row"], [class*="history"] > *')
+      ];
+      const rows = [];
+      const seen = new Set();
+      for (const el of candidates) {
+        const text = normalize(el.innerText || el.textContent || '');
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        if (!/kling\s*v?3\.0/i.test(text) || !/\bspent\b/i.test(text) || !/credits/i.test(text)) continue;
+        rows.push({
+          text,
+          signature: signatureFor(text),
+          cost: parseCost(text),
+          dateText: parseDateText(text),
+        });
+      }
+      return rows;
+    });
+  }
+
+  _extractKlingCreditRowsFromJson(payload, source = 'network') {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const parseCost = (text) => {
+      const m = normalize(text).match(/([\d,.]+)\s+credits/i);
+      if (!m) return null;
+      const n = parseFloat(m[1].replace(/,/g, ''));
+      return Number.isFinite(n) ? n : null;
+    };
+    const parseDateText = (text) => {
+      const value = normalize(text);
+      const human = value.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b/i);
+      if (human) return human[0];
+      const iso = value.match(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/i);
+      return iso ? iso[0] : null;
+    };
+    const signatureFor = (text) => normalize(text).toLowerCase();
+    const rows = [];
+
+    const visit = (node, depth = 0) => {
+      if (node == null || depth > 8) return;
+      if (Array.isArray(node)) {
+        node.forEach(item => visit(item, depth + 1));
+        return;
+      }
+      if (typeof node !== 'object') return;
+
+      const primitiveValues = Object.entries(node)
+        .filter(([, value]) => value == null || ['string', 'number', 'boolean'].includes(typeof value))
+        .map(([key, value]) => `${key}: ${value}`);
+      const combined = normalize(primitiveValues.join(' '));
+
+      if (/kling\s*v?3\.0/i.test(combined) && /\bspent\b/i.test(combined) && /credit/i.test(combined)) {
+        let cost = parseCost(combined);
+        let dateText = parseDateText(combined);
+
+        for (const [key, value] of Object.entries(node)) {
+          const lowerKey = key.toLowerCase();
+          if (cost === null && typeof value === 'number' && /credit|amount|cost|value/.test(lowerKey)) {
+            cost = value;
+          }
+          if (!dateText && typeof value === 'string' && /date|time|created|updated|timestamp/.test(lowerKey)) {
+            dateText = parseDateText(value);
+          }
+        }
+
+        rows.push({
+          text: combined,
+          signature: signatureFor(`${source} ${combined}`),
+          cost,
+          dateText,
+          source,
+        });
+      }
+
+      for (const value of Object.values(node)) {
+        if (value && typeof value === 'object') visit(value, depth + 1);
+      }
+    };
+
+    visit(payload);
+    return rows;
+  }
+
+  _parseCreditLedgerDate(dateText) {
+    const value = String(dateText || '').trim();
+    const isoMs = Date.parse(value);
+    if (Number.isFinite(isoMs)) return isoMs;
+
+    const m = value.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\b/i);
+    if (!m) return NaN;
+    const months = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+      jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+    };
+    const month = months[m[1].toLowerCase().slice(0, 4)] ?? months[m[1].toLowerCase().slice(0, 3)];
+    if (month == null) return NaN;
+    let hour = Number(m[4]);
+    const minute = Number(m[5]);
+    const ampm = m[6].toUpperCase();
+    if (ampm === 'PM' && hour < 12) hour += 12;
+    if (ampm === 'AM' && hour === 12) hour = 0;
+    return new Date(Number(m[3]), month, Number(m[2]), hour, minute, 0, 0).getTime();
+  }
+
+  async _scrollCreditLedgerToHistory(ledgerPage) {
+    await ledgerPage.evaluate(() => {
+      const all = [...document.querySelectorAll('*')];
+      const historyHeader = all.find(el => {
+        const text = (el.textContent || '').trim();
+        return /^history$/i.test(text);
+      });
+      if (historyHeader) {
+        historyHeader.scrollIntoView({ block: 'start', inline: 'nearest' });
+      } else {
+        window.scrollTo(0, Math.max(document.body.scrollHeight * 0.45, 600));
+      }
+    });
+    await ledgerPage.waitForTimeout(2000);
+  }
+
+  async _readKlingCreditLedger(context, waitMs = 15000) {
+    const ledgerPage = await context.newPage();
+    const networkRows = [];
+    const responseHandler = async (response) => {
+      try {
+        const url = response.url();
+        const headers = response.headers();
+        const contentType = headers['content-type'] || '';
+        if (!/json/i.test(contentType) && !/credit|usage|billing|history/i.test(url)) return;
+
+        const text = await response.text().catch(() => '');
+        if (!/kling\s*v?3\.0/i.test(text) || !/\bspent\b/i.test(text)) return;
+
+        let payload = null;
+        try {
+          payload = JSON.parse(text);
+        } catch (_) {
+          return;
+        }
+        networkRows.push(...this._extractKlingCreditRowsFromJson(payload, `network:${url}`));
+      } catch (_) {
+        // Network capture is best-effort; DOM history is the fallback.
+      }
+    };
+
+    ledgerPage.on('response', responseHandler);
+    try {
+      await ledgerPage.goto('https://higgsfield.ai/me/settings/credits-usage', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await ledgerPage.waitForTimeout(waitMs);
+      await this._scrollCreditLedgerToHistory(ledgerPage);
+      await ledgerPage.waitForTimeout(5000);
+      const domRows = await this._readKlingCreditRows(ledgerPage);
+      const rows = [...networkRows, ...domRows];
+      const seen = new Set();
+      return rows.filter(row => {
+        if (!row || !row.signature || seen.has(row.signature)) return false;
+        seen.add(row.signature);
+        return true;
+      });
+    } finally {
+      ledgerPage.off('response', responseHandler);
+      await ledgerPage.close().catch(() => {});
+    }
+  }
+
+  async _detectKlingGenerationInProgress(page) {
+    if (!page) return { active: false, evidence: null };
+    try {
+      return await page.evaluate(() => {
+        const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+
+        const elements = [...document.querySelectorAll('button, [role="button"], [role="status"], [aria-live], div, span')];
+        for (const el of elements) {
+          if (!visible(el)) continue;
+          const text = normalize(el.innerText || el.textContent || '');
+          if (/^generating$/i.test(text) || /\bgenerating\b/i.test(text)) {
+            return { active: true, evidence: text.slice(0, 120) };
+          }
+        }
+        return { active: false, evidence: null };
+      });
+    } catch (err) {
+      return { active: false, evidence: `check failed: ${err.message}` };
+    }
+  }
+
+  async _confirmKlingCreditSpend({ expectedCost, clickedAt, timeoutMs = 60000, baselineSignatures = [], generationPage = null } = {}) {
+    const context = this.automation.page?.context();
+    if (!context) throw new Error('Browser context not ready for credit ledger confirmation');
+
+    const baseline = new Set(baselineSignatures || []);
+    const expected = Number.isFinite(expectedCost) ? expectedCost : null;
+    const started = Date.now();
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const uiState = await this._detectKlingGenerationInProgress(generationPage);
+        if (uiState.active) {
+          this.log(`Kling generation accepted by UI state (${uiState.evidence || 'Generating'})`);
+          return { ok: true, row: { cost: expected, dateText: clickedAt.toISOString(), source: 'ui-generating' } };
+        }
+
+        const rows = await this._readKlingCreditLedger(context, 15000);
+        const rejectCounts = {};
+        const matchingRows = rows.filter(row => {
+          const reject = (reason) => {
+            rejectCounts[reason] = (rejectCounts[reason] || 0) + 1;
+            return false;
+          };
+          if (baseline.has(row.signature)) return reject('baseline');
+          if (!row.dateText) return reject('no-date');
+          if (expected !== null && row.cost !== null && Math.abs(row.cost - expected) > 0.02) return reject('cost');
+          const rowTime = this._parseCreditLedgerDate(row.dateText);
+          if (!Number.isFinite(rowTime)) return reject('date-parse');
+          // Higgsfield displays minute-level timestamps, so a click at 7:02:49
+          // can legitimately appear as 7:02 PM. Allow a small backward skew,
+          // but require the ledger row to be tied to this click attempt.
+          const lowerBound = clickedAt.getTime() - (2 * 60 * 1000);
+          const upperBound = clickedAt.getTime() + (15 * 60 * 1000);
+          if (rowTime < lowerBound || rowTime > upperBound) return reject('time-window');
+          return true;
+        });
+
+        if (matchingRows.length > 0) {
+          const row = matchingRows[0];
+          this.log(`Credit ledger confirmed Kling spend: ${row.cost ?? 'unknown'} credits (${row.dateText}, ${row.source || 'dom'})`);
+          return { ok: true, row };
+        }
+
+        const newest = rows.find(row => !baseline.has(row.signature) && row.dateText) || rows.find(row => row.dateText);
+        const newestHint = newest ? `; newest=${newest.cost ?? '?'} @ ${newest.dateText} (${newest.source || 'dom'})` : '';
+        this.log(`Credit ledger not matched yet (${rows.length} Kling row(s), rejects=${JSON.stringify(rejectCounts)}${newestHint}) — polling...`);
+      } catch (ledgerErr) {
+        this.log(`Credit ledger check failed (${ledgerErr.message}) — polling...`, 'warn');
+      }
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    const finalUiState = await this._detectKlingGenerationInProgress(generationPage);
+    if (finalUiState.active) {
+      this.log(`Kling generation accepted by final UI state (${finalUiState.evidence || 'Generating'})`);
+      return { ok: true, row: { cost: expected, dateText: clickedAt.toISOString(), source: 'ui-generating' } };
+    }
+    return { ok: false, reason: `No matching Kling credit row appeared within ${Math.round(timeoutMs / 1000)}s` };
+  }
+
   /**
    * Type the multi_shot_prompt into Kling's prompt textbox. The prompt is
    * Claude-authored and contains @element references that need autocomplete-
@@ -919,16 +1186,37 @@ class KlingAutomation {
     }
 
     // ── SINGLE CLICK ONLY ──
+    this.log('Kling credit ledger confirmation mode: history+network timestamp v2');
+    let baselineLedgerSignatures = [];
+    try {
+      const baselineRows = await this._readKlingCreditLedger(page.context(), 15000);
+      baselineLedgerSignatures = baselineRows.map(row => row.signature);
+      this.log(`Credit ledger baseline captured (${baselineLedgerSignatures.length} Kling row(s))`);
+    } catch (ledgerErr) {
+      this.log(`Warn: could not capture credit ledger baseline before click: ${ledgerErr.message}`, 'warn');
+    }
+
     // CRITICAL: We click GENERATE exactly ONCE. The old 3-attempt escalation pattern
     // caused triple generation (3× "Generating" tiles) because didGenerationStart()
     // detection was unreliable — the CSS selectors didn't match the actual DOM,
     // causing all 3 attempts to fire. If the single click doesn't work, we throw
     // an error and let the orchestrator's retry loop handle it with a fresh browser context.
+    const clickedAt = new Date();
     await page.mouse.click(genBtnBox.x, genBtnBox.y);
-    this.log('GENERATE clicked once — waiting for submission to register');
-    await page.waitForTimeout(4000);
+    this.log(`GENERATE clicked once at ${clickedAt.toLocaleTimeString()} - confirming credit ledger before marking generation submitted`);
 
-    this.log('Kling 3.0 generation submitted — credits burned');
+    const creditConfirmation = await this._confirmKlingCreditSpend({
+      expectedCost: creditCost,
+      clickedAt,
+      timeoutMs: 60000,
+      baselineSignatures: baselineLedgerSignatures,
+      generationPage: page,
+    });
+    if (!creditConfirmation.ok) {
+      throw new Error(`[PRE-GEN] Generate click was not confirmed in credit history (${creditConfirmation.reason}) - safe to retry`);
+    }
+
+    this.log('Kling 3.0 generation accepted - credits confirmed in ledger');
 
     // Notify caller that Generate was clicked (for DB persistence + credit tracking)
     if (typeof onGenClicked === 'function') {

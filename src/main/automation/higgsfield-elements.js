@@ -75,6 +75,13 @@ class HiggsfieldElements {
     return (name || '').toLowerCase().trim().replace(/^@+/, '');
   }
 
+  /** Normalize scraped modal labels, which often include a leading "Use" button label. */
+  _normalizeScrapedElementName(name) {
+    const raw = (name || '').trim();
+    const withoutUse = raw.replace(/^Use(?=[@A-Za-z0-9_-])/, '');
+    return this._normalizeName(withoutUse);
+  }
+
   /** Clear the cached element list so the next call re-scrapes. */
   invalidateCache() {
     this._cache = null;
@@ -114,22 +121,48 @@ class HiggsfieldElements {
     const page = this.automation.page;
     this.log('Opening elements modal via @ toolbar button...');
 
-    // Find the @ button: no-text SVG button in bottom toolbar (y > 65% vh)
+    // Find the @ button using dual-toolbar-aware selection.
+    // CRITICAL: Higgsfield renders TWO duplicate toolbar sets at slightly different
+    // positions. The CONTROLLING set is the LEFTMOST (minimum x). We must find the
+    // controlling toolbar's y position first (via the model button), then pick the
+    // @ button from that same toolbar set (within ±5px of that y).
     const btnInfo = await page.evaluate(() => {
       const vh = window.innerHeight;
       const yThreshold = vh * 0.65;
-      const candidates = [];
 
-      const buttons = document.querySelectorAll('button');
-      for (const btn of buttons) {
+      // Step 1: Find the controlling toolbar set's y by locating the leftmost
+      // model button (has text like "Cinematic Cameras", "Nano Banana Pro", etc.)
+      const modelIndicators = [
+        'cinematic cameras', 'nano banana pro', 'soul cinema', 'cinema studio',
+        'cinematic characters', 'cinematic locations', 'higgsfield soul',
+      ];
+      let controllingY = null;
+      let minModelX = Infinity;
+
+      const allButtons = document.querySelectorAll('button');
+      for (const btn of allButtons) {
         const rect = btn.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) continue;
-        if (rect.y < yThreshold) continue; // must be in bottom toolbar
+        if (rect.y < yThreshold) continue;
+        const text = (btn.textContent?.trim() || '').toLowerCase();
+        if (modelIndicators.some(m => text.includes(m))) {
+          if (rect.x < minModelX) {
+            minModelX = rect.x;
+            controllingY = rect.y + rect.height / 2;
+          }
+        }
+      }
+
+      // Step 2: Find all no-text SVG button candidates in bottom toolbar
+      const candidates = [];
+      for (const btn of allButtons) {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) continue;
+        if (rect.y < yThreshold) continue;
 
         const text = btn.textContent?.trim() || '';
         const hasSvg = !!btn.querySelector('svg');
 
-        // @ button is a small no-text button with SVG, width 20-60px
         if (!text && hasSvg && rect.width >= 15 && rect.width <= 80) {
           candidates.push({
             cx: rect.x + rect.width / 2,
@@ -141,46 +174,141 @@ class HiggsfieldElements {
         }
       }
 
-      if (candidates.length === 0) return null;
+      if (candidates.length === 0) {
+        return { error: 'no_candidates', controllingY, candidateCount: 0 };
+      }
 
-      // The @ button is positioned after the 1x1 grid button.
-      // Among no-text SVG buttons in the toolbar, pick the one with the
-      // highest x position that isn't the GENERATE button area (which is
-      // typically the rightmost and much wider).
-      // Sort by x position descending, pick the best match.
-      candidates.sort((a, b) => b.x - a.x);
+      // Step 3: Filter to controlling toolbar set if we found a model button.
+      // The dual toolbars differ by ~4px in y. Use ±5px tolerance from the
+      // controlling model button's y center to select the correct set.
+      let pool = candidates;
+      let gridButtonRight = null;
+      if (controllingY !== null) {
+        const yFiltered = candidates.filter(c => Math.abs(c.cy - controllingY) < 10);
+        if (yFiltered.length > 0) {
+          pool = yFiltered;
+        }
 
-      // Filter out candidates that are too wide (GENERATE area) or too far right
-      const filtered = candidates.filter(c => c.w <= 60);
-      if (filtered.length === 0) return candidates[0]; // fallback
+        for (const btn of allButtons) {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width < 1 || rect.height < 1) continue;
+          const text = btn.textContent?.trim() || '';
+          if (text === '1x1' && Math.abs((rect.y + rect.height / 2) - controllingY) < 12) {
+            gridButtonRight = rect.x + rect.width;
+            break;
+          }
+        }
+      }
 
-      // The @ button should be the rightmost small no-text SVG button
-      // before the camera/model selector and GENERATE button
-      return filtered[0];
+      // Step 4: Filter out wide buttons (GENERATE area)
+      const filtered = pool.filter(c => c.w <= 60);
+      if (filtered.length === 0 && pool.length > 0) {
+        // fallback to unfiltered pool
+        pool.sort((a, b) => a.x - b.x);
+        return { ...pool[0], candidateCount: candidates.length, controllingY };
+      }
+
+      // Step 5: Pick the LEFTMOST small no-text SVG button in the controlling set.
+      // The @ button in the controlling (leftmost) toolbar set is what we want.
+      // Sort ascending by x — leftmost first (matches controlling toolbar).
+      filtered.sort((a, b) => a.x - b.x);
+      let ordered = filtered;
+      if (gridButtonRight !== null) {
+        const afterGrid = filtered.filter(c => c.x > gridButtonRight - 2).sort((a, b) => a.x - b.x);
+        const beforeGrid = filtered.filter(c => c.x <= gridButtonRight - 2).sort((a, b) => a.x - b.x);
+        ordered = [...afterGrid, ...beforeGrid];
+      }
+
+      // Return several candidates. Higgsfield currently renders two tiny
+      // no-text icons beside the model selector; the Elements/@ control may be
+      // either one depending on UI rollout.
+      return {
+        ...ordered[0],
+        candidates: ordered.slice(0, 6),
+        candidateCount: candidates.length,
+        controllingY,
+        gridButtonRight,
+      };
     });
 
-    if (!btnInfo) {
-      throw new Error('Could not find @ toolbar button in bottom toolbar');
+    if (!btnInfo || btnInfo.error) {
+      const diag = btnInfo ? `controllingY=${btnInfo.controllingY}, candidates=${btnInfo.candidateCount}` : 'null';
+      throw new Error(`Could not find @ toolbar button in bottom toolbar (${diag})`);
     }
 
-    this.log(`Found @ button at (${Math.round(btnInfo.cx)}, ${Math.round(btnInfo.cy)}), w=${Math.round(btnInfo.w)}`);
+    {
+    const candidates = Array.isArray(btnInfo.candidates) && btnInfo.candidates.length > 0
+      ? btnInfo.candidates
+      : [btnInfo];
+    this.log(`Found ${candidates.length} @ button candidate(s): ${candidates.map(c => `(${Math.round(c.cx)},${Math.round(c.cy)},w=${Math.round(c.w)})`).join(', ')}, total=${btnInfo.candidateCount}, controllingY=${btnInfo.controllingY ? Math.round(btnInfo.controllingY) : 'unknown'}`);
 
-    // Click with real mouse (isTrusted)
-    await page.mouse.click(btnInfo.cx, btnInfo.cy);
-    await page.waitForTimeout(1500);
+    let modalOpened = false;
+    let clickedInfo = null;
+    for (let i = 0; i < candidates.length && !modalOpened; i++) {
+      const candidate = candidates[i];
+      this.log(`Trying @/Elements candidate ${i + 1}/${candidates.length} at (${Math.round(candidate.cx)}, ${Math.round(candidate.cy)})...`);
 
-    // Verify modal opened: look for "Elements" heading
-    const modalOpened = await this._isElementsModalOpen(page);
+      // Click with real mouse (isTrusted) - required for Radix UI
+      await page.mouse.click(candidate.cx, candidate.cy);
+      await page.waitForTimeout(2000);
+      modalOpened = await this._isElementsModalOpen(page);
+
+      if (!modalOpened) {
+        this.log(`Candidate ${i + 1} did not open Elements modal - retrying same candidate once...`);
+        await page.mouse.click(candidate.cx, candidate.cy);
+        await page.waitForTimeout(2500);
+        modalOpened = await this._isElementsModalOpen(page);
+      }
+
+      if (!modalOpened) {
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(800);
+      } else {
+        clickedInfo = candidate;
+      }
+    }
+
     if (!modalOpened) {
-      // Retry click once
+      const diag = await this._getModalDiagnostics(page);
+      this.log(`[DIAG] Modal detection failed. Page signals: ${JSON.stringify(diag)}`);
+      throw new Error(`Elements modal did not open after trying ${candidates.length} @ toolbar candidate(s). Diagnostics: ${JSON.stringify(diag)}`);
+    }
+
+    this.log(`Elements modal opened${clickedInfo ? ` via candidate at (${Math.round(clickedInfo.cx)}, ${Math.round(clickedInfo.cy)})` : ''}`);
+    return;
+    }
+
+    this.log(`Found @ button at (${Math.round(btnInfo.cx)}, ${Math.round(btnInfo.cy)}), w=${Math.round(btnInfo.w)}, candidates=${btnInfo.candidateCount}, controllingY=${btnInfo.controllingY ? Math.round(btnInfo.controllingY) : 'unknown'}`);
+
+    // Click with real mouse (isTrusted) — required for Radix UI
+    await page.mouse.click(btnInfo.cx, btnInfo.cy);
+    await page.waitForTimeout(2000);
+
+    // Verify modal opened
+    let modalOpened = await this._isElementsModalOpen(page);
+    if (!modalOpened) {
+      // Retry 1: click same button again
       this.log('Modal not detected after first click — retrying...');
       await page.mouse.click(btnInfo.cx, btnInfo.cy);
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(2500);
+      modalOpened = await this._isElementsModalOpen(page);
+    }
 
-      const retryOpened = await this._isElementsModalOpen(page);
-      if (!retryOpened) {
-        throw new Error('Elements modal did not open after clicking @ toolbar button');
-      }
+    if (!modalOpened) {
+      // Retry 2: Escape first (dismiss any partial state), then click
+      this.log('Modal still not detected — pressing Escape and retrying...');
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(1000);
+      await page.mouse.click(btnInfo.cx, btnInfo.cy);
+      await page.waitForTimeout(2500);
+      modalOpened = await this._isElementsModalOpen(page);
+    }
+
+    if (!modalOpened) {
+      // Dump diagnostic info for debugging
+      const diag = await this._getModalDiagnostics(page);
+      this.log(`[DIAG] Modal detection failed. Page signals: ${JSON.stringify(diag)}`);
+      throw new Error(`Elements modal did not open after clicking @ toolbar button. Diagnostics: ${JSON.stringify(diag)}`);
     }
 
     this.log('Elements modal opened');
@@ -188,27 +316,105 @@ class HiggsfieldElements {
 
   /**
    * Check if the elements modal overlay is currently open.
-   * Looks for "Elements" heading and modal-like overlay structure.
+   * Uses broad detection: text signals, overlay containers, Radix popovers.
+   * Case-insensitive matching to handle UI text changes.
    */
   async _isElementsModalOpen(page) {
     return page.evaluate(() => {
-      // Look for "Elements" heading in a modal/overlay context
-      const allText = document.body.innerText || '';
-      const hasElementsHeading = allText.includes('Elements');
-      const hasCreateNew = allText.includes('Create new');
+      const allText = (document.body.innerText || '').toLowerCase();
 
-      // Check for modal/dialog overlay
-      const dialogs = document.querySelectorAll('[role="dialog"], [data-state="open"]');
-      const overlays = document.querySelectorAll('[class*="overlay"], [class*="modal"]');
+      // Text signals (case-insensitive)
+      const hasElementsHeading = allText.includes('elements');
+      const hasCreateNew = allText.includes('create new');
+      const hasCreateElement = allText.includes('create element') || allText.includes('new element');
+      const hasPinned = allText.includes('pinned');
+      const hasCharacters = allText.includes('characters');
 
-      // Also check for the search bar and category sidebar which are unique to the modal
-      const hasSearch = !!document.querySelector('input[type="search"], input[placeholder*="earch"]');
+      // Overlay/modal container signals — broad set for Radix/Headless UI
+      const dialogs = document.querySelectorAll(
+        '[role="dialog"], [data-state="open"], [data-radix-popper-content-wrapper], ' +
+        '[class*="overlay"], [class*="modal"], [class*="popover"], [class*="Popover"], ' +
+        '[class*="Dialog"], [class*="Sheet"]'
+      );
+
+      // Fixed/absolute positioned large overlays that appeared recently
+      const fixedOverlays = document.querySelectorAll('div[style*="position: fixed"], div[style*="position:fixed"]');
+      let hasLargeOverlay = false;
+      for (const el of fixedOverlays) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 200 && rect.height > 200) {
+          const innerText = (el.innerText || '').toLowerCase();
+          if (innerText.includes('element') || innerText.includes('create new')) {
+            hasLargeOverlay = true;
+            break;
+          }
+        }
+      }
+
+      // Search bar unique to the modal
+      const hasSearch = !!document.querySelector(
+        'input[type="search"], input[placeholder*="earch"], input[placeholder*="Search"]'
+      );
+
+      // Category sidebar signals (All, Pinned, Characters, Locations, Props)
+      const hasCategorySidebar = hasCharacters && (hasPinned || allText.includes('locations') || allText.includes('props'));
 
       return (hasElementsHeading && hasCreateNew) ||
-             (dialogs.length > 0 && hasElementsHeading) ||
-             (overlays.length > 0 && hasElementsHeading) ||
-             (hasSearch && hasCreateNew);
+             (hasElementsHeading && hasCategorySidebar) ||
+             (dialogs.length > 0 && (hasElementsHeading || hasCreateNew || hasCreateElement)) ||
+             (hasLargeOverlay) ||
+             (hasSearch && (hasCreateNew || hasCreateElement)) ||
+             (hasElementsHeading && hasSearch);
     }).catch(() => false);
+  }
+
+  /**
+   * Gather diagnostic info about what the page currently shows.
+   * Used when modal detection fails, to help debug selector issues.
+   */
+  async _getModalDiagnostics(page) {
+    return page.evaluate(() => {
+      const allText = (document.body.innerText || '').toLowerCase();
+      const dialogs = document.querySelectorAll('[role="dialog"], [data-state="open"]');
+      const radixPoppers = document.querySelectorAll('[data-radix-popper-content-wrapper]');
+      const overlays = document.querySelectorAll('[class*="overlay"], [class*="modal"], [class*="popover"]');
+      const fixedDivs = document.querySelectorAll('div[style*="position: fixed"], div[style*="position:fixed"]');
+
+      // Check for specific text fragments
+      const textSignals = {
+        elements: allText.includes('elements'),
+        create_new: allText.includes('create new'),
+        pinned: allText.includes('pinned'),
+        characters: allText.includes('characters'),
+        locations: allText.includes('locations'),
+        props: allText.includes('props'),
+        search: !!document.querySelector('input[type="search"], input[placeholder*="earch"]'),
+      };
+
+      // Count overlay-like containers
+      const containerCounts = {
+        dialogs: dialogs.length,
+        radixPoppers: radixPoppers.length,
+        overlays: overlays.length,
+        fixedDivs: fixedDivs.length,
+      };
+
+      // Sample large fixed divs
+      const fixedDivInfo = [];
+      for (const el of fixedDivs) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 100 && rect.height > 100) {
+          fixedDivInfo.push({
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+            textSnippet: (el.innerText || '').slice(0, 80).replace(/\n/g, ' '),
+          });
+        }
+        if (fixedDivInfo.length >= 3) break;
+      }
+
+      return { textSignals, containerCounts, fixedDivInfo, url: window.location.href };
+    }).catch((e) => ({ error: e.message }));
   }
 
   /**
@@ -219,9 +425,8 @@ class HiggsfieldElements {
     const page = this.automation.page;
     this.log('Closing elements modal...');
 
-    // Strategy 1: Click X close button (top-right of modal)
-    let closed = await page.evaluate(() => {
-      // Find X / close buttons in the modal area
+    // Strategy 1: Find X close button coordinates, then click with real mouse (isTrusted)
+    const closeBtn = await page.evaluate(() => {
       const buttons = document.querySelectorAll('button');
       for (const btn of buttons) {
         const rect = btn.getBoundingClientRect();
@@ -230,20 +435,19 @@ class HiggsfieldElements {
         const text = btn.textContent?.trim() || '';
         const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
 
-        // X close button: small button with × or x text, or aria-label close/dismiss
         const isClose = text === '×' || text === '✕' || text === 'x' || text === 'X' ||
           ariaLabel.includes('close') || ariaLabel.includes('dismiss');
 
         if (isClose && rect.width <= 60) {
-          btn.click();
-          return 'x-button';
+          return { cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 };
         }
       }
-      return false;
-    }).catch(() => false);
+      return null;
+    }).catch(() => null);
 
-    if (closed) {
-      this.log(`Closed modal via: ${closed}`);
+    if (closeBtn) {
+      await page.mouse.click(closeBtn.cx, closeBtn.cy);
+      this.log('Closed modal via X button (real mouse click)');
       await page.waitForTimeout(1000);
       return;
     }
@@ -429,13 +633,20 @@ class HiggsfieldElements {
     // Click "Characters" filter to tag character elements, etc.
     // For now, leave as 'unknown' — category is not critical for the pipeline.
 
-    this.log(`Found ${elements.length} existing elements: ${elements.map(e => e.name).join(', ') || '(none)'}`);
+    const normalizedElements = elements
+      .map(e => {
+        const normalizedName = this._normalizeScrapedElementName(e.name);
+        return normalizedName ? { ...e, name: normalizedName, rawName: e.name } : null;
+      })
+      .filter(Boolean);
+
+    this.log(`Found ${normalizedElements.length} existing elements: ${normalizedElements.map(e => e.name).join(', ') || '(none)'}`);
 
     // Close the modal
     await this._closeElementsModal();
 
-    this._cache = elements;
-    return elements;
+    this._cache = normalizedElements;
+    return normalizedElements;
   }
 
   // ───────────────────────────────────────────────────────────────────
@@ -465,13 +676,22 @@ class HiggsfieldElements {
    */
   async _createElement({ name, imagePaths, description, category = 'Auto' }) {
     const page = this.automation.page;
+    const fs = require('fs');
+    const path = require('path');
     const normalized = this._normalizeName(name);
     const uiCategory = HiggsfieldElements.CATEGORY_MAP[(category || 'auto').toLowerCase()] || 'Auto';
 
     if (!normalized) throw new Error('Element name is required');
     if (!imagePaths || imagePaths.length === 0) throw new Error('At least one image path required');
 
-    this.log(`Creating element @${normalized} (${uiCategory}) with ${imagePaths.length} image(s)...`);
+    const uploadImagePaths = imagePaths.map((srcPath) => {
+      if (!fs.existsSync(srcPath)) {
+        throw new Error(`Upload source file does not exist: ${srcPath}`);
+      }
+      return srcPath;
+    });
+
+    this.log(`Creating element @${normalized} (${uiCategory}) with ${uploadImagePaths.length} image(s)...`);
 
     // ── Idempotency: check if element already exists ──
     const alreadyExists = await this.elementExists(normalized);
@@ -492,28 +712,55 @@ class HiggsfieldElements {
     this.log('Step 2: Clicking "Create new" card...');
     let createNewClicked = false;
 
-    // Strategy A: Find by text content "Create new"
+    // Strategy A: find the "Create new" tile by its label, then click the
+    // circular plus control inside that same tile. Clicking the label itself
+    // is not reliable in the current Higgsfield UI.
     const createNewInfo = await page.evaluate(() => {
-      // Search for "Create new" text in buttons/cards within the modal
-      const allClickable = document.querySelectorAll('button, [role="button"], div[tabindex], a');
-      for (const el of allClickable) {
-        const text = el.textContent?.trim() || '';
-        if (text.includes('Create new')) {
-          const rect = el.getBoundingClientRect();
-          if (rect.width > 20 && rect.height > 20) {
-            return { cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 };
-          }
-        }
-      }
+      const all = [...document.querySelectorAll('button, [role="button"], div[tabindex], a, div, span, p')];
+      for (const labelEl of all) {
+        const text = (labelEl.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text !== 'Create new') continue;
 
-      // Strategy B: Find the + icon card (first card in grid with + or plus)
-      for (const el of allClickable) {
-        const text = el.textContent?.trim() || '';
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 30 || rect.height < 30) continue;
-        // Look for a plus icon card (+ symbol or SVG with plus path)
-        if (text === '+' || (text === '' && el.querySelector('svg') && rect.width < 120 && rect.height < 120)) {
-          return { cx: rect.x + rect.width / 2, cy: rect.y + rect.height / 2 };
+        let tile = labelEl;
+        for (let depth = 0; depth < 5 && tile; depth++) {
+          const rect = tile.getBoundingClientRect();
+          const tileText = (tile.textContent || '').replace(/\s+/g, ' ').trim();
+          if (rect.width >= 100 && rect.height >= 100 && tileText.includes('Create new')) {
+            const plusCandidates = [...tile.querySelectorAll('button, [role="button"], svg, div')]
+              .map(el => {
+                const r = el.getBoundingClientRect();
+                return {
+                  cx: r.x + r.width / 2,
+                  cy: r.y + r.height / 2,
+                  w: r.width,
+                  h: r.height,
+                  text: (el.textContent || '').trim(),
+                  hasSvg: !!el.querySelector?.('svg') || el.tagName.toLowerCase() === 'svg',
+                };
+              })
+              .filter(c =>
+                c.w >= 20 && c.w <= 70 &&
+                c.h >= 20 && c.h <= 70 &&
+                (c.text === '+' || c.hasSvg) &&
+                c.cy < rect.y + rect.height * 0.75
+              )
+              .sort((a, b) => Math.abs(a.cx - (rect.x + rect.width / 2)) - Math.abs(b.cx - (rect.x + rect.width / 2)));
+
+            if (plusCandidates.length > 0) {
+              return { ...plusCandidates[0], method: 'plus-in-create-new-tile' };
+            }
+
+            // Last safe fallback: click near the visual plus position within
+            // the located Create new tile, not any arbitrary SVG card.
+            return {
+              cx: rect.x + rect.width / 2,
+              cy: rect.y + rect.height * 0.42,
+              w: rect.width,
+              h: rect.height,
+              method: 'create-new-tile-estimated-plus',
+            };
+          }
+          tile = tile.parentElement;
         }
       }
 
@@ -523,17 +770,9 @@ class HiggsfieldElements {
     if (createNewInfo) {
       await page.mouse.click(createNewInfo.cx, createNewInfo.cy);
       createNewClicked = true;
-      this.log('Clicked "Create new" card');
+      this.log(`Clicked Create new plus (${createNewInfo.method || 'unknown'}) at (${Math.round(createNewInfo.cx)}, ${Math.round(createNewInfo.cy)})`);
     } else {
-      // Fallback: use Playwright locator
-      try {
-        const createBtn = page.getByText('Create new', { exact: false }).first();
-        await createBtn.click({ timeout: 5000 });
-        createNewClicked = true;
-        this.log('Clicked "Create new" via locator');
-      } catch (e) {
-        throw new Error(`Could not find "Create new" card in elements modal: ${e.message}`);
-      }
+      throw new Error('Could not find the Create new tile/plus control in elements modal');
     }
 
     await page.waitForTimeout(2000);
@@ -571,6 +810,9 @@ class HiggsfieldElements {
     }).catch(() => ({ nameValue: '' }));
 
     if (formState.nameValue && formState.nameValue.length > 0) {
+      this.log(`SAFETY STOP: form has pre-filled name "${formState.nameValue}" - likely editing an existing element; refusing to upload files`, 'error');
+      await this._closeCreationForm(page);
+      throw new Error(`Create-new safety check failed: opened existing element "${formState.nameValue}" instead of a blank new-element form`);
       this.log(`Warn: form has pre-filled name "${formState.nameValue}" — may be editing. Clearing.`);
       try {
         const nameInput = page.locator('input[placeholder="reference-name"]').first();
@@ -579,66 +821,333 @@ class HiggsfieldElements {
       } catch (_) {}
     }
 
-    // ── Step 3: Upload images ──
-    this.log(`Step 3: Uploading ${imagePaths.length} image(s)...`);
+    // Fill the required name before uploads. Higgsfield keeps Save disabled
+    // until this field has a value, and filling it early gives us a stable
+    // signal if the form is actually writable.
+    this.log('Pre-fill: setting required element name before upload...');
     try {
-      // The file input is hidden (1x1px), accepts image/png, image/jpeg, video/mp4
-      const fileInput = await page.$('input[type="file"]');
-      if (!fileInput) {
-        throw new Error('File input not found in creation form');
+      const nameInput = page.locator('input[type="text"][placeholder="reference-name"]').first();
+      await nameInput.click({ timeout: 3000 });
+      await nameInput.fill(normalized, { timeout: 3000 });
+      await page.waitForTimeout(500);
+      const nameValue = await page.evaluate(() => {
+        const input = document.querySelector('input[placeholder="reference-name"]');
+        return input?.value || '';
+      }).catch(() => '');
+      if (nameValue !== normalized) {
+        throw new Error(`name field verification failed; value="${nameValue}"`);
       }
+      this.log(`Pre-fill confirmed element name: "${normalized}"`);
+    } catch (nameErr) {
+      await this._closeCreationForm(page);
+      throw new Error(`Could not pre-fill element name before upload: ${nameErr.message}`);
+    }
 
-      await fileInput.setInputFiles(imagePaths);
-      this.log(`setInputFiles completed for ${imagePaths.length} file(s)`);
-
-      // Trigger React onChange via multiple methods
-      await page.evaluate(() => {
-        const input = document.querySelector('input[type="file"]');
-        if (!input) return;
-
-        // Method 1: Standard DOM events
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-
-        // Method 2: React fiber walk to find onChange handler
-        const reactKey = Object.keys(input).find(k =>
-          k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-        if (reactKey) {
-          let fiber = input[reactKey];
-          while (fiber) {
-            if (fiber.memoizedProps && fiber.memoizedProps.onChange) {
-              try {
-                fiber.memoizedProps.onChange({ target: input, currentTarget: input });
-              } catch (_) {}
-              break;
-            }
-            fiber = fiber.return;
+    // ── Step 3: Upload images ──
+    this.log(`Step 3: Uploading ${uploadImagePaths.length} image(s)...`);
+    const uploadResponses = [];
+    const responseListener = (response) => {
+      try {
+        const url = response.url();
+        const lowerUrl = url.toLowerCase();
+        const status = response.status();
+        const method = response.request().method();
+        const isUploadish =
+          (method === 'POST' && (
+            lowerUrl.includes('/upload') ||
+            lowerUrl.includes('/asset') ||
+            lowerUrl.includes('/media') ||
+            lowerUrl.includes('/image') ||
+            lowerUrl.includes('/file') ||
+            lowerUrl.includes('/reference')
+          )) ||
+          (method === 'PUT' && (
+            lowerUrl.includes('amazonaws') ||
+            lowerUrl.includes('cloudfront') ||
+            lowerUrl.includes('s3') ||
+            lowerUrl.includes('storage') ||
+            lowerUrl.includes('higgs')
+          ));
+        if (isUploadish) {
+          uploadResponses.push({ url: url.slice(0, 140), status, method, ts: Date.now() });
+          if (status >= 200 && status < 300) {
+            this.log(`[UPLOAD-NET] ${method} ${status} ${url.slice(0, 100)}`);
           }
         }
+      } catch (_) {}
+    };
+    page.on('response', responseListener);
 
-        // Method 3: React props key
-        const propsKey = Object.keys(input).find(k => k.startsWith('__reactProps$'));
-        if (propsKey && input[propsKey]?.onChange) {
-          try {
-            input[propsKey].onChange({ target: input, currentTarget: input });
-          } catch (_) {}
+    let fileChooserHandler = null;
+    try {
+      this.log(`Upload files: ${uploadImagePaths.join(' | ')}`);
+
+      const countPreviews = async () => page.evaluate(() => {
+        const nameInput = document.querySelector('input[placeholder="reference-name"]');
+        const nameRect = nameInput?.getBoundingClientRect();
+        const formBottom = nameRect ? nameRect.y : window.innerHeight * 0.45;
+        let count = 0;
+        for (const el of document.querySelectorAll('img, video')) {
+          const r = el.getBoundingClientRect();
+          if (r.width >= 40 && r.height >= 40 && r.y >= 0 && r.y <= formBottom) count++;
         }
+        return count;
+      }).catch(() => 0);
+
+      const getUploadDomDiagnostics = async () => page.evaluate(() => {
+        const nameInput = document.querySelector('input[placeholder="reference-name"]');
+        const nameRect = nameInput?.getBoundingClientRect();
+        const maxY = nameRect ? nameRect.y : window.innerHeight * 0.45;
+        const visibleControls = [];
+        for (const el of document.querySelectorAll('button, [role="button"], label, input[type="file"], div')) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 5 || r.height < 5 || r.y > maxY) continue;
+          const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+          const tag = el.tagName.toLowerCase();
+          const type = (el.getAttribute('type') || '').toLowerCase();
+          const accept = el.getAttribute('accept') || '';
+          if (tag === 'input' || /upload|add more|\+/.test(text.toLowerCase()) || accept) {
+            visibleControls.push({
+              tag,
+              type,
+              accept,
+              text: text.slice(0, 60),
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+            });
+          }
+          if (visibleControls.length >= 20) break;
+        }
+        const previews = [...document.querySelectorAll('img, video')]
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            return {
+              tag: el.tagName.toLowerCase(),
+              src: (el.currentSrc || el.src || '').slice(0, 80),
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+            };
+          })
+          .filter(p => p.w >= 30 && p.h >= 30 && p.y <= maxY);
+        return {
+          nameValue: nameInput?.value || '',
+          visibleControls,
+          previews,
+          bodyText: (document.body.innerText || '').slice(0, 300).replace(/\s+/g, ' '),
+        };
+      }).catch(e => ({ error: e.message }));
+
+      const findUploadTarget = async () => page.evaluate(() => {
+        const nameInput = document.querySelector('input[placeholder="reference-name"]');
+        const nameRect = nameInput?.getBoundingClientRect();
+        const maxY = nameRect ? nameRect.y : window.innerHeight * 0.45;
+        let previewCount = 0;
+        for (const media of document.querySelectorAll('img, video')) {
+          const mr = media.getBoundingClientRect();
+          if (mr.width >= 40 && mr.height >= 40 && mr.y >= 0 && mr.y <= maxY) previewCount++;
+        }
+        const candidates = [];
+        for (const el of document.querySelectorAll('button, [role="button"], div, label, input[type="file"]')) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 10 || r.height < 10 || r.y > maxY) continue;
+          const text = (el.textContent || '').trim().toLowerCase();
+          const tag = el.tagName.toLowerCase();
+          const type = (el.getAttribute('type') || '').toLowerCase();
+          const cls = String(el.className || '').toLowerCase();
+          const isFile = tag === 'input' && type === 'file';
+          const hasUploadText = text.includes('upload images') || text.includes('add more images');
+          const hasPlus = text === '+' || text.includes('add more') || !!el.querySelector?.('svg');
+          if (!hasUploadText && !isFile && !hasPlus) continue;
+
+          let clickX = r.x + r.width / 2;
+          let clickY = r.y + r.height / 2;
+          let clickKind = 'element-center';
+
+          // The actionable control is the circular + button inside the upload
+          // tile. Clicking the tile label or horizontal strip can be ignored.
+          const innerControls = [...el.querySelectorAll('button, [role="button"], svg, [class*="plus"], [class*="Plus"]')]
+            .map(child => {
+              const cr = child.getBoundingClientRect();
+              return {
+                x: cr.x,
+                y: cr.y,
+                w: cr.width,
+                h: cr.height,
+                cx: cr.x + cr.width / 2,
+                cy: cr.y + cr.height / 2,
+                tag: child.tagName.toLowerCase(),
+              };
+            })
+            .filter(c =>
+              c.w >= 12 && c.h >= 12 &&
+              c.x >= r.x - 2 && c.y >= r.y - 2 &&
+              c.x + c.w <= r.x + r.width + 2 &&
+              c.y + c.h <= r.y + r.height + 2
+            )
+            .sort((a, b) => {
+              const aSvg = a.tag === 'svg' ? 1 : 0;
+              const bSvg = b.tag === 'svg' ? 1 : 0;
+              if (aSvg !== bSvg) return bSvg - aSvg;
+              return (a.w * a.h) - (b.w * b.h);
+            });
+
+          if (innerControls.length > 0) {
+            clickX = innerControls[0].cx;
+            clickY = innerControls[0].cy;
+            clickKind = `inner-${innerControls[0].tag}`;
+          } else if (hasUploadText || text.includes('add more images')) {
+            // Fallback to the visual plus position: horizontally centered and
+            // above the label in the upper third of the upload tile.
+            clickX = r.x + r.width / 2;
+            clickY = r.y + Math.min(r.height * 0.38, 58);
+            clickKind = 'plus-position-fallback';
+          }
+
+          let score = 0;
+          if (text.includes('add more images')) score += 100;
+          if (text.includes('upload images')) score += 90;
+          if (hasPlus) score += 30;
+          if (tag === 'label' || tag === 'button') score += 20;
+          if (isFile) score -= 50;
+          if (previewCount > 0) {
+            // After the first upload, Higgsfield renders a full-width strip
+            // containing a small "Add more images" tile on the left plus the
+            // existing preview. Clicking the strip center hits empty space, so
+            // prefer the compact tile itself.
+            if (text.includes('add more images') && r.width >= 80 && r.width <= 180 && r.height >= 80 && r.height <= 150) score += 120;
+            if (r.width > 300) score -= 80;
+          } else if (r.width > 500 && r.height > 80) {
+            score += 10;
+          }
+          if (cls.includes('upload')) score += 10;
+          candidates.push({
+            cx: clickX,
+            cy: clickY,
+            w: r.width,
+            h: r.height,
+            tag,
+            text: text.slice(0, 80),
+            score,
+            previewCount,
+            clickKind,
+          });
+        }
+        candidates.sort((a, b) => b.score - a.score || a.cy - b.cy || (b.w * b.h) - (a.w * a.h));
+        return candidates[0] || null;
       });
-      this.log('React onChange triggered');
+
+      let currentUploadFile = null;
+      let lastFileChooserAt = 0;
+      fileChooserHandler = async (chooser) => {
+        try {
+          if (!currentUploadFile) {
+            await chooser.setFiles([]).catch(() => {});
+            return;
+          }
+          const file = currentUploadFile;
+          await chooser.setFiles(file);
+          lastFileChooserAt = Date.now();
+          this.log(`[UPLOAD-FC] Filechooser accepted ${path.basename(file)}`);
+        } catch (e) {
+          this.log(`[UPLOAD-FC] Handler error: ${e.message.split('\n')[0]}`, 'warn');
+        }
+      };
+      page.on('filechooser', fileChooserHandler);
+
+      const countSuccessfulUploadsSince = (ts) =>
+        uploadResponses.filter(r => r.ts >= ts && r.status >= 200 && r.status < 300).length;
+
+      for (let i = 0; i < uploadImagePaths.length; i++) {
+        const imagePath = uploadImagePaths[i];
+        const beforeCount = await countPreviews();
+        this.log(`Uploading image ${i + 1}/${uploadImagePaths.length}: ${imagePath} (previews before=${beforeCount})`);
+
+        currentUploadFile = imagePath;
+        const fileChooserAtBeforeClick = lastFileChooserAt;
+        const uploadStartTs = Date.now();
+        const uploadTarget = await findUploadTarget();
+        if (!uploadTarget) {
+          const diag = await getUploadDomDiagnostics();
+          throw new Error(`No upload target found in creation form; dom=${JSON.stringify(diag)}`);
+        }
+
+        this.log(`Upload target ${i + 1}/${uploadImagePaths.length}: <${uploadTarget.tag}> "${uploadTarget.text || '(no text)'}" plus-click=${uploadTarget.clickKind || 'unknown'} at (${Math.round(uploadTarget.cx)}, ${Math.round(uploadTarget.cy)}) tile=${Math.round(uploadTarget.w)}x${Math.round(uploadTarget.h)}`);
+        await page.mouse.move(uploadTarget.cx, uploadTarget.cy);
+        await page.waitForTimeout(250);
+        await page.mouse.click(uploadTarget.cx, uploadTarget.cy);
+
+        const chooserWaitStart = Date.now();
+        while (Date.now() - chooserWaitStart < 12000) {
+          if (lastFileChooserAt > fileChooserAtBeforeClick) break;
+          await page.waitForTimeout(250);
+        }
+        if (lastFileChooserAt <= fileChooserAtBeforeClick) {
+          const diag = await getUploadDomDiagnostics();
+          throw new Error(`Trusted click did not trigger filechooser for image ${i + 1}; dom=${JSON.stringify(diag)}`);
+        }
+
+        let accepted = false;
+        for (let poll = 0; poll < 12; poll++) {
+          await page.waitForTimeout(2500);
+          const currentCount = await countPreviews();
+          this.log(`Upload ${i + 1}/${uploadImagePaths.length} settle ${poll + 1}/12: previews=${currentCount}`);
+          if (currentCount >= beforeCount + 1) {
+            accepted = true;
+            break;
+          }
+        }
+        if (!accepted) {
+          const diag = await getUploadDomDiagnostics();
+          throw new Error(`Image ${i + 1}/${uploadImagePaths.length} did not appear as an uploaded preview; dom=${JSON.stringify(diag)}`);
+        }
+
+        let backendConfirmed = false;
+        const uploadConfirmStart = Date.now();
+        while (Date.now() - uploadConfirmStart < 30000) {
+          if (countSuccessfulUploadsSince(uploadStartTs) > 0) {
+            backendConfirmed = true;
+            break;
+          }
+          await page.waitForTimeout(500);
+        }
+        if (backendConfirmed) {
+          this.log(`Upload ${i + 1}/${uploadImagePaths.length} confirmed by network response`);
+        } else {
+          const recent = uploadResponses.filter(r => r.ts >= uploadStartTs).slice(0, 8);
+          this.log(`Upload ${i + 1}/${uploadImagePaths.length} did not show upload network response within 30s; continuing with preview signal. Recent upload-ish responses: ${JSON.stringify(recent)}`, 'warn');
+        }
+
+        currentUploadFile = null;
+        const interUploadWait = i < uploadImagePaths.length - 1 ? 8000 : 4000;
+        this.log(`Waiting ${Math.round(interUploadWait / 1000)}s after image ${i + 1}/${uploadImagePaths.length} upload...`);
+        await page.waitForTimeout(interUploadWait);
+      }
+
+      page.off('filechooser', fileChooserHandler);
+      fileChooserHandler = null;
       await page.waitForTimeout(2000);
 
     } catch (e) {
+      if (fileChooserHandler) page.off('filechooser', fileChooserHandler);
+      page.off('response', responseListener);
       // Try to close the form before bailing
       await this._closeCreationForm(page);
       throw new Error(`Image upload failed: ${e.message}`);
     }
+    page.off('response', responseListener);
 
     // ── Wait for upload to be processed (Save button enabled) ──
-    const UPLOAD_POLL_MAX = 25;
+    // Save is expected to stay disabled until the required element name is
+    // filled in Step 4; the per-image preview checks above are the upload gate.
+    const UPLOAD_POLL_MAX = 0;
     const UPLOAD_POLL_MS = 2000;
-    this.log(`Waiting up to ${(UPLOAD_POLL_MAX * UPLOAD_POLL_MS) / 1000}s for Save to enable...`);
+    this.log(`Upload previews accepted; Save enable check will run after required name/category fields are filled`);
 
-    let uploadProcessed = false;
+    let uploadProcessed = true;
     for (let poll = 0; poll < UPLOAD_POLL_MAX; poll++) {
       await page.waitForTimeout(UPLOAD_POLL_MS);
 
@@ -693,24 +1202,39 @@ class HiggsfieldElements {
         };
       }).catch(() => ({}));
       this.log(`Upload diagnosis: ${JSON.stringify(diagnosis)}`);
-      this.log('Warn: Save not enabled after 50s — images may not have been processed');
+      await this._closeCreationForm(page);
+      throw new Error(`Image upload did not complete: Save stayed disabled after 50s; diagnosis=${JSON.stringify(diagnosis)}`);
     }
 
     await page.waitForTimeout(2000);
 
     // ── Step 4: Fill element name ──
-    this.log('Step 4: Filling element name...');
+    this.log('Step 4: Verifying/filling element name...');
     try {
       const nameInput = page.locator('input[type="text"][placeholder="reference-name"]').first();
       await nameInput.click({ timeout: 3000 });
       await nameInput.fill(normalized, { timeout: 3000 });
-      this.log(`Element name set to "${normalized}"`);
+      const confirmedName = await page.evaluate(() => {
+        const input = document.querySelector('input[placeholder="reference-name"]');
+        return input?.value || '';
+      }).catch(() => '');
+      if (confirmedName !== normalized) {
+        throw new Error(`name field verification failed; value="${confirmedName}"`);
+      }
+      this.log(`Element name confirmed as "${normalized}"`);
     } catch (e) {
       try {
         const fallbackInput = page.locator('input[type="text"]').first();
         await fallbackInput.click({ timeout: 3000 });
         await fallbackInput.fill(normalized, { timeout: 3000 });
-        this.log('Element name set via fallback input');
+        const confirmedName = await page.evaluate(() => {
+          const input = document.querySelector('input[placeholder="reference-name"], input[type="text"]');
+          return input?.value || '';
+        }).catch(() => '');
+        if (confirmedName !== normalized) {
+          throw new Error(`fallback name field verification failed; value="${confirmedName}"`);
+        }
+        this.log('Element name confirmed via fallback input');
       } catch (e2) {
         await this._closeCreationForm(page);
         throw new Error(`Could not fill element name: ${e2.message}`);
@@ -819,16 +1343,8 @@ class HiggsfieldElements {
       }).catch(() => ({}));
       this.log(`Save diagnosis: previews=${diagnosis.previewCount}, uploadText=${diagnosis.hasUploadText}, disabled=${diagnosis.saveDisabled}`);
 
-      // Last resort: force-click
-      try {
-        const saveBtn = page.getByRole('button', { name: 'Save', exact: true }).first();
-        await saveBtn.click({ force: true, timeout: 5000 });
-        saveClicked = true;
-        this.log('Save button force-clicked via role selector');
-      } catch (e) {
-        await this._closeCreationForm(page);
-        throw new Error(`"Save" button could not be clicked after ${MAX_SAVE_ATTEMPTS} attempts: ${e.message}`);
-      }
+      await this._closeCreationForm(page);
+      throw new Error(`"Save" button never became safely clickable after ${MAX_SAVE_ATTEMPTS} attempts`);
     }
 
     // Wait for element to be processed
@@ -846,37 +1362,21 @@ class HiggsfieldElements {
     };
 
     let formStillOpen = await checkFormOpen();
-
     if (formStillOpen === 'form-still-open') {
-      this.log('Warn: creation form still open after Save — waiting 5s then retrying Save click');
-      await page.waitForTimeout(5000);
-
-      try {
-        await page.evaluate(() => {
-          const btns = document.querySelectorAll('button');
-          for (const b of btns) {
-            if (b.textContent?.trim() === 'Save' && b.getBoundingClientRect().width > 0 && !b.disabled) {
-              b.click();
-              return true;
-            }
-          }
-          return false;
-        });
-        this.log('Save button re-clicked');
-        await page.waitForTimeout(5000);
-      } catch (_) {}
-
-      formStillOpen = await checkFormOpen();
+      this.log('Warn: creation form still open after Save - waiting for first Save request to finish (no second Save click)');
+      const saveWaitStart = Date.now();
+      while (Date.now() - saveWaitStart < 30000) {
+        await page.waitForTimeout(3000);
+        formStillOpen = await checkFormOpen();
+        if (formStillOpen !== 'form-still-open') break;
+      }
     }
 
-    // ── Step 9: If form still open, close it before throwing ──
     if (formStillOpen === 'form-still-open') {
-      this.log('Form still open after retries — closing form before continuing');
+      this.log('Form still open after one Save click - closing form and verifying; no duplicate Save will be attempted', 'warn');
       await this._closeCreationForm(page);
-      throw new Error(`Element @${normalized} creation failed — form still open after Save retries`);
+      await page.waitForTimeout(3000);
     }
-
-    await page.waitForTimeout(3000);
 
     // ── Step 10: Verify element was created ──
     // CRITICAL: After Save, the back button closes the entire modal.
@@ -1051,4 +1551,3 @@ class HiggsfieldElements {
 }
 
 module.exports = { HiggsfieldElements };
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       

@@ -167,6 +167,7 @@
       <h1>NOLLYWOOD AI PIPELINE</h1>
       <button class="header-btn" onclick="openStandalonePublish()" id="btn-publish-standalone" title="Open Publish for any completed project" style="border-color:var(--accent2);color:var(--accent2);">Publish</button>
       <button class="header-btn" onclick="openShortsTab()" id="btn-shorts-standalone" title="Repurpose clips as Facebook Reels" style="border-color:#f59e0b;color:#f59e0b;">Shorts</button>
+      <button class="header-btn" onclick="openSocialTab()" id="btn-social-standalone" title="Schedule engagement posts around Reels" style="border-color:#22c55e;color:#22c55e;">Engagement</button>
       <button class="header-btn" onclick="toggleSettings()">Settings</button>
     </div>
 
@@ -218,18 +219,22 @@
                   <option value="1min">1 min (~9 clips, ~108 credits) — test</option>
                   <option value="2min">2 min (~18 clips, ~216 credits) — test</option>
                   <option value="5min">5 min (~45 clips, ~540 credits) — test</option>
-                  <option value="10min" selected>10 min (~90 clips, ~1080 credits)</option>
+                  <option value="10min">10 min (~90 clips, ~1080 credits)</option>
                   <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
-                  <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+                  <option value="30min" selected>30 min (~270 clips, ~3240 credits) — long-form</option>
                   <option value="45min">45 min (~405 clips, ~4860 credits) — prestige</option>
                 </select>
+                <select id="cinematic-video-engine-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Cinematic video engine">
+                  <option value="kling">Video: Kling 3.0</option>
+                  <option value="cinema-studio-3.5" selected>Video: Cinema Studio 3.5</option>
+                </select>
                 <select id="aspect-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Aspect ratio — locked once Research starts">
-                  <option value="16:9" selected>16:9 (YouTube long)</option>
-                  <option value="9:16">9:16 (Shorts / TikTok / Reels)</option>
+                  <option value="16:9">16:9 (YouTube long)</option>
+                  <option value="9:16" selected>9:16 (Shorts / TikTok / Reels)</option>
                 </select>
                 <select id="mode-preset" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Generator mode — locked once Research starts. Cinematic requires Cinema Studio 2.0 + Kling 3.0 pipeline (Phases 2-6, not yet built)">
-                  <option value="staged" selected>Staged (Veo — proven)</option>
-                  <option value="cinematic">Cinematic (Kling — prestige, WIP)</option>
+                  <option value="staged">Staged (Veo — proven)</option>
+                  <option value="cinematic" selected>Cinematic (story-driven)</option>
                 </select>
               </div>
               <p style="font-size:11px;color:var(--accent);margin:0;text-align:center;white-space:pre-line;line-height:1.6;" id="duration-info">Target: ~90 clips × 7s = 10+ minutes</p>
@@ -246,18 +251,22 @@
                 <option value="1min">1 min (~9 clips, ~108 credits) — test</option>
                 <option value="2min">2 min (~18 clips, ~216 credits) — test</option>
                 <option value="5min">5 min (~45 clips, ~540 credits) — test</option>
-                <option value="10min" selected>10 min (~90 clips, ~1080 credits)</option>
+                <option value="10min">10 min (~90 clips, ~1080 credits)</option>
                 <option value="20min">20 min (~180 clips, ~2160 credits) — long-form</option>
-                <option value="30min">30 min (~270 clips, ~3240 credits) — long-form</option>
+                <option value="30min" selected>30 min (~270 clips, ~3240 credits) — long-form</option>
                 <option value="45min">45 min (~405 clips, ~4860 credits) — prestige</option>
               </select>
+              <select id="cinematic-video-engine-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Cinematic video engine">
+                <option value="kling">Video: Kling 3.0</option>
+                <option value="cinema-studio-3.5" selected>Video: Cinema Studio 3.5</option>
+              </select>
               <select id="aspect-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Aspect ratio — locked once Research starts">
-                <option value="16:9" selected>16:9 (YouTube long)</option>
-                <option value="9:16">9:16 (Shorts / TikTok / Reels)</option>
+                <option value="16:9">16:9 (YouTube long)</option>
+                <option value="9:16" selected>9:16 (Shorts / TikTok / Reels)</option>
               </select>
               <select id="mode-preset-fresh" onchange="updateDurationInfo()" style="width:auto;display:inline-block;padding:8px 12px;font-size:13px;" title="Generator mode — locked once Research starts. Cinematic requires Cinema Studio 2.0 + Kling 3.0 pipeline (Phases 2-6, not yet built)">
-                <option value="staged" selected>Staged (Veo — proven)</option>
-                <option value="cinematic">Cinematic (Kling — prestige, WIP)</option>
+                <option value="staged">Staged (Veo — proven)</option>
+                <option value="cinematic" selected>Cinematic (story-driven)</option>
               </select>
             </div>
             <p style="font-size:11px;color:var(--accent);margin-bottom:20px;white-space:pre-line;line-height:1.6;" id="duration-info-fresh">Target: ~90 clips × 7s = 10+ minutes</p>
@@ -309,7 +318,7 @@
               </select>
               <select id="research-edit-mode" style="padding:8px 12px;font-size:13px;">
                 <option value="staged">Staged (Veo — proven)</option>
-                <option value="cinematic">Cinematic (Kling — prestige, WIP)</option>
+                <option value="cinematic">Cinematic (story-driven)</option>
               </select>
             </div>
             <div style="margin-top:10px;display:flex;gap:8px;">
@@ -425,7 +434,7 @@
               Pre-Gen Prompt Preview — <span id="prompt-preview-label"></span>
             </p>
             <p style="margin:0 0 8px; font-size:11px; color:var(--muted);">
-              TEMPORARY GATE — remove when full production starts. Review the prompt before Kling burns ~18 credits.
+              TEMPORARY GATE — remove when full production starts. Review the prompt before video generation burns credits.
             </p>
             <div style="margin-bottom:8px;">
               <img id="prompt-preview-startframe" style="max-width:100%; max-height:180px; border-radius:6px; background:#000; display:none;" />
@@ -846,6 +855,70 @@
         </div>
       </div>
 
+      <!-- SOCIAL ENGAGEMENT POSTS VIEW -->
+      <div id="view-social" style="display:none">
+        <div class="card">
+          <div id="social-project-bar" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border);">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <select id="social-project-selector" onchange="switchSocialProject(this.value)" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;">
+                <option value="">Select a project...</option>
+              </select>
+              <button class="btn btn-ghost" onclick="exitSocialTab()" style="font-size:11px;padding:6px 10px;">Back</button>
+            </div>
+            <div id="social-project-status" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
+          </div>
+
+          <h2>Engagement - Social Posts</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Plan image/text posts around already scheduled Facebook Reels.</p>
+
+          <div id="social-tools" style="display:none;">
+            <div style="margin-bottom:20px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Workflow</h3>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+                <select id="social-plan-scope" onchange="updateSocialActionButtons()" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px 8px;font-size:12px;">
+                  <option value="next_day" selected>Next eligible day only</option>
+                  <option value="all_future">All future days</option>
+                </select>
+                <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;">
+                  Target date
+                  <input id="social-target-date" type="date" onchange="updateSocialActionButtons()" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:5px 8px;font-size:12px;">
+                </label>
+                <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;">
+                  <input id="social-include-type1" type="checkbox" onchange="updateSocialActionButtons()">
+                  Type 1B
+                </label>
+                <button class="btn btn-primary" onclick="planSocialPosts()" id="btn-plan-social" style="font-size:12px;">Plan Posts</button>
+                <button class="btn btn-primary" onclick="generateSocialPosts()" id="btn-generate-social" style="font-size:12px;background:#8b5cf6;border-color:#8b5cf6;" disabled>Generate Copy</button>
+                <button class="btn btn-primary" onclick="scheduleAllSocialPosts()" id="btn-schedule-social" style="font-size:12px;background:#22c55e;border-color:#22c55e;" disabled>Schedule All</button>
+              </div>
+              <div id="social-progress" style="font-size:11px;color:var(--muted);"></div>
+              <div id="social-stats" style="display:none;margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:6px;font-size:12px;gap:20px;flex-wrap:wrap;"></div>
+            </div>
+
+            <div style="margin-bottom:20px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Planned Posts</h3>
+              <div style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">
+                <table style="width:100%;font-size:11px;border-collapse:collapse;">
+                  <thead>
+                    <tr style="background:var(--bg3);position:sticky;top:0;">
+                      <th style="padding:6px 8px;text-align:left;">Date</th>
+                      <th style="padding:6px 8px;text-align:left;">Time</th>
+                      <th style="padding:6px 8px;text-align:left;">Type</th>
+                      <th style="padding:6px 8px;text-align:left;">Source</th>
+                      <th style="padding:6px 8px;text-align:left;">Media</th>
+                      <th style="padding:6px 8px;text-align:left;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="social-posts-body">
+                    <tr><td colspan="6" style="padding:12px;color:var(--muted);text-align:center;">Select a project to see engagement posts</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- COMPLETE VIEW -->
       <div id="view-complete" style="display:none">
         <div class="card" style="text-align:center;padding:40px;">
@@ -979,10 +1052,12 @@
       badge.className = `status-badge ${status}`;
       badge.textContent = status.replace('_', ' ').toUpperCase();
 
+      const operatorResumeGate = ['preflight-failed', 'credits-exhausted'].includes(state.currentApprovalGate);
       document.getElementById('btn-pause').disabled = status !== 'running';
       document.getElementById('btn-cancel').disabled = status === 'idle' || status === 'complete';
-      document.getElementById('btn-pause').style.display = status === 'paused' ? 'none' : 'inline-block';
-      document.getElementById('btn-resume-pipeline').style.display = status === 'paused' ? 'inline-block' : 'none';
+      document.getElementById('btn-pause').style.display = (status === 'paused' || operatorResumeGate) ? 'none' : 'inline-block';
+      document.getElementById('btn-resume-pipeline').style.display = (status === 'paused' || operatorResumeGate) ? 'inline-block' : 'none';
+      document.getElementById('btn-resume-pipeline').disabled = false;
     }
 
     // ── Theme Selection State ──
@@ -1000,7 +1075,7 @@
       '30min': { chapters: 10, scenesPerChapter: 3, linesPerScene: 9, tier: 'long-form' },
       '45min': { chapters: 15, scenesPerChapter: 3, linesPerScene: 9, tier: 'prestige' },
     };
-    // Cinematic (Kling): story-driven, clip-budget model
+    // Cinematic: story-driven, clip-budget model. The video engine is selected separately.
     const CINEMATIC_PRESET_STRUCTURES = {
       '1min':  { chapters: 1, targetClips: 6, estimatedScenes: 3, estimatedChars: 3, tier: 'test' },
       '2min':  { chapters: 2, targetClips: 11, estimatedScenes: 6, estimatedChars: 3, tier: 'test' },
@@ -1017,7 +1092,7 @@
         return '16:9 horizontal (YouTube long-form)';
       };
 
-      const buildInfo = (dur, asp, mode) => {
+      const buildInfo = (dur, asp, mode, videoEngine) => {
         const isCinematic = mode === 'cinematic';
 
         if (isCinematic) {
@@ -1044,7 +1119,8 @@
           const line2 = `Script: ~${(scriptTokens / 1000).toFixed(0)}K tokens in ${numBatches} batches · $${claudeCost.toFixed(2)} API` +
             ` | Gen: ~${hfCredits.toLocaleString()} credits · ~$${hfDollars.toFixed(0)}` +
             ` | Total: ~$${totalDollars.toFixed(0)}`;
-          const line3 = `${aspectLabel(asp)} · Cinematic (Cinema Studio + Kling)`;
+          const engineLabel = videoEngine === 'cinema-studio-3.5' ? 'Cinema Studio 3.5' : 'Kling 3.0';
+          const line3 = `${aspectLabel(asp)} · Cinematic (${engineLabel})`;
           return `${line1}\n${line2}\n${line3}`;
         }
 
@@ -1087,16 +1163,18 @@
       const poolDur = document.getElementById('duration-preset');
       const poolAsp = document.getElementById('aspect-preset');
       const poolMode = document.getElementById('mode-preset');
+      const poolEngine = document.getElementById('cinematic-video-engine-preset');
       const poolInfo = document.getElementById('duration-info');
       if (poolDur && poolInfo) {
-        poolInfo.textContent = buildInfo(poolDur.value, poolAsp?.value || '16:9', poolMode?.value || 'staged');
+        poolInfo.textContent = buildInfo(poolDur.value, poolAsp?.value || '16:9', poolMode?.value || 'staged', poolEngine?.value || 'kling');
       }
       const freshDur = document.getElementById('duration-preset-fresh');
       const freshAsp = document.getElementById('aspect-preset-fresh');
       const freshMode = document.getElementById('mode-preset-fresh');
+      const freshEngine = document.getElementById('cinematic-video-engine-preset-fresh');
       const freshInfo = document.getElementById('duration-info-fresh');
       if (freshDur && freshInfo) {
-        freshInfo.textContent = buildInfo(freshDur.value, freshAsp?.value || '16:9', freshMode?.value || 'staged');
+        freshInfo.textContent = buildInfo(freshDur.value, freshAsp?.value || '16:9', freshMode?.value || 'staged', freshEngine?.value || 'kling');
       }
     }
 
@@ -1127,6 +1205,15 @@
         : document.getElementById('mode-preset-fresh');
       const v = el?.value;
       return (v === 'cinematic' || v === 'staged') ? v : 'staged';
+    }
+
+    function getActiveCinematicVideoEngine() {
+      const picker = document.getElementById('pool-picker');
+      const el = (picker && picker.style.display !== 'none')
+        ? document.getElementById('cinematic-video-engine-preset')
+        : document.getElementById('cinematic-video-engine-preset-fresh');
+      const v = el?.value;
+      return (v === 'cinema-studio-3.5') ? 'cinema-studio-3.5' : 'kling';
     }
 
     // ── Pipeline Actions ──
@@ -1165,8 +1252,9 @@
       const duration = document.getElementById('research-edit-duration').value;
       const aspectRatio = document.getElementById('research-edit-aspect').value;
       const generatorMode = document.getElementById('research-edit-mode').value;
+      const cinematicVideoEngine = document.getElementById('research-edit-cinematic-video-engine')?.value || getActiveCinematicVideoEngine();
       try {
-        await window.api.updateProjectSettings({ duration, aspectRatio, generatorMode });
+        await window.api.updateProjectSettings({ duration, aspectRatio, generatorMode, cinematicVideoEngine });
         setResearchProjectBadge(duration, aspectRatio, generatorMode);
         addLog(`Settings updated → ${duration}, ${aspectRatio}, ${generatorMode}`);
       } catch (e) {
@@ -1179,8 +1267,9 @@
       const duration = getActiveDuration();
       const aspectRatio = getActiveAspectRatio();
       const generatorMode = getActiveGeneratorMode();
+      const cinematicVideoEngine = getActiveCinematicVideoEngine();
       const poolTag = forceRefresh ? ' with FRESH research' : (researchCacheId ? ` from pool #${researchCacheId}` : '');
-      addLog(`Starting pipeline [${duration}, ${aspectRatio}, ${generatorMode}]${poolTag}...`);
+      addLog(`Starting pipeline [${duration}, ${aspectRatio}, ${generatorMode}, video=${cinematicVideoEngine}]${poolTag}...`);
       updateStatusBadge('running');
       updateStepper('research', 'running');
       setResearchProjectBadge(duration, aspectRatio, generatorMode);
@@ -1188,7 +1277,7 @@
       document.getElementById('research-searching').style.display = 'block';
       selectedThemes = [];
 
-      await window.api.startPipeline({ forceRefresh, duration, aspectRatio, generatorMode, researchCacheId });
+      await window.api.startPipeline({ forceRefresh, duration, aspectRatio, generatorMode, cinematicVideoEngine, researchCacheId });
     }
 
     // Called from the per-pool "Use this pool" button in the pool list
@@ -1211,6 +1300,11 @@
     }
 
     async function resumeProject() {
+      if (state.currentApprovalGate === 'preflight-failed' || state.currentApprovalGate === 'credits-exhausted') {
+        addLog(`Acknowledging ${state.currentApprovalGate} gate and retrying...`);
+        await window.api.resumePipeline();
+        return;
+      }
       addLog('Resuming in-progress project...');
       updateStatusBadge('running');
       // Don't show any stage view yet — let the backend 'stage' event drive the correct view.
@@ -1253,11 +1347,13 @@
 
     async function pausePipeline() {
       await window.api.pausePipeline();
+      state.currentApprovalGate = null;
       updateStatusBadge('paused');
     }
 
     async function resumePipeline() {
       await window.api.resumePipeline();
+      state.currentApprovalGate = null;
       updateStatusBadge('running');
     }
 
@@ -1450,6 +1546,10 @@
     }
 
     async function approveScript() {
+      if (state.currentApprovalGate && state.currentApprovalGate !== 'script') {
+        addLog(`Approve Script ignored — waiting on ${state.currentApprovalGate}. Use Resume after fixing that gate.`, 'warn');
+        return;
+      }
       if (currentReview && !currentReview.pass) {
         addLog('Approve blocked — script review failed. Regenerate or override.', 'warn');
         return;
@@ -1576,6 +1676,7 @@
       if (currentGenGate === 'portraits') await window.api.approvePortraits();
       else if (currentGenGate === 'scenes') await window.api.approveScenes();
       else if (currentGenGate === 'clips') await window.api.approveClips();
+      else if (currentGenGate === 'cinema-eligibility-failed') await window.api.approveCinemaEligibilityFailed();
     }
 
     async function rerenderFlagged() {
@@ -1588,7 +1689,7 @@
     }
 
     // ── TEMPORARY — remove when full production starts ──
-    // Pre-gen prompt preview: show final multi_shot_prompt before Kling generation
+    // Pre-gen prompt preview: show final multi_shot_prompt before cinematic video generation
     async function approvePromptPreview(decision) {
       document.getElementById('prompt-preview-panel').style.display = 'none';
       addLog(`Prompt preview: ${decision}`);
@@ -2513,6 +2614,10 @@
 
     function showPublishView(data) {
       standalonePublishMode = false;
+      currentPublishProjectId = data?.projectId || null;
+      publishCharactersLoaded = false;
+      publishScenesLoaded = false;
+      document.getElementById('publish-character-select').innerHTML = '<option value="">Loading characters...</option>';
       document.getElementById('publish-project-bar').style.display = 'none';
       document.getElementById('publish-tools').style.display = 'block';
       document.getElementById('stepper').style.display = 'flex';
@@ -2540,6 +2645,7 @@
     // ── Thumbnail Mode Toggle ──
     let currentThumbMode = 'scene'; // 'scene' or 'custom'
     let publishCharactersLoaded = false;
+    let currentPublishProjectId = null;
 
     function switchThumbMode(mode) {
       currentThumbMode = mode;
@@ -2561,7 +2667,7 @@
       const grid = document.getElementById('publish-scene-grid');
       grid.innerHTML = '<div style="color:var(--muted);font-size:11px;grid-column:span 2;">Scoring scenes...</div>';
       try {
-        const candidates = await window.api.scoreSceneThumbnails();
+        const candidates = await window.api.scoreSceneThumbnails(currentPublishProjectId);
         if (candidates && candidates.length > 0) {
           renderSceneCandidates(candidates);
           publishScenesLoaded = true;
@@ -2576,7 +2682,7 @@
 
     async function loadPublishCharacters() {
       try {
-        const data = await window.api.getPublishCharacters();
+        const data = await window.api.getPublishCharacters(currentPublishProjectId);
         const select = document.getElementById('publish-character-select');
         select.innerHTML = '';
         if (data && data.characters && data.characters.length > 0) {
@@ -2617,9 +2723,9 @@
             if (btn) { btn.disabled = false; btn.textContent = 'Generate Thumbnail'; }
             return;
           }
-          result = await window.api.generateCustomThumbnail({ placement, genre, characterElementName, expression, aspectRatioOverride });
+          result = await window.api.generateCustomThumbnail({ projectId: currentPublishProjectId, placement, genre, characterElementName, expression, aspectRatioOverride });
         } else {
-          result = await window.api.generateThumbnail({ placement, genre, aspectRatioOverride });
+          result = await window.api.generateThumbnail({ projectId: currentPublishProjectId, placement, genre, aspectRatioOverride });
         }
         if (result && result.error === 'login-required') {
           addLog(result.message, 'warn');
@@ -2765,11 +2871,16 @@
 
     async function switchPublishProject(projectId) {
       if (!projectId) {
+        currentPublishProjectId = null;
         resetPublishFields();
         document.getElementById('publish-tools').style.display = 'none';
         return;
       }
 
+      currentPublishProjectId = projectId;
+      publishCharactersLoaded = false;
+      publishScenesLoaded = false;
+      document.getElementById('publish-character-select').innerHTML = '<option value="">Loading characters...</option>';
       const statusEl = document.getElementById('publish-project-status');
       statusEl.textContent = 'Loading project...';
 
@@ -2802,6 +2913,8 @@
         // Only score scene candidates if currently in scene-based mode
         if (currentThumbMode === 'scene') {
           loadSceneCandidates();
+        } else {
+          loadPublishCharacters();
         }
       } catch (e) {
         statusEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
@@ -3094,6 +3207,279 @@
     }
 
     // ── Project Logs Viewer ──
+    // SOCIAL ENGAGEMENT POSTS TAB
+    let socialProjectId = null;
+    let socialCurrentPosts = [];
+
+    async function openSocialTab() {
+      document.getElementById('stepper').style.display = 'none';
+      showView('view-social');
+      document.getElementById('social-tools').style.display = 'none';
+      document.getElementById('social-progress').textContent = '';
+      socialCurrentPosts = [];
+      renderSocialPosts([]);
+      renderSocialStats(null);
+
+      const selector = document.getElementById('social-project-selector');
+      selector.innerHTML = '<option value="">Select a project...</option>';
+      const statusEl = document.getElementById('social-project-status');
+      statusEl.textContent = 'Loading projects with scheduled shorts...';
+
+      try {
+        const projects = await window.api.getSocialProjects();
+        if (!projects || projects.length === 0) {
+          statusEl.innerHTML = '<span style="color:var(--yellow);">No projects with scheduled shorts found. Run Shorts upload first.</span>';
+          return;
+        }
+        projects.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = `${p.id} - ${p.title || 'Untitled'} (${p.future_short_count || 0} future scheduled)`;
+          selector.appendChild(opt);
+        });
+        statusEl.textContent = `${projects.length} eligible project${projects.length > 1 ? 's' : ''}`;
+
+        if (projects.length === 1) {
+          selector.value = projects[0].id;
+          await switchSocialProject(projects[0].id);
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+    }
+
+    function exitSocialTab() {
+      document.getElementById('stepper').style.display = 'flex';
+      showView('view-launcher');
+      socialProjectId = null;
+    }
+
+    async function switchSocialProject(projectId) {
+      socialProjectId = projectId || null;
+      document.getElementById('social-tools').style.display = socialProjectId ? 'block' : 'none';
+      if (!socialProjectId) return;
+      await refreshSocialPosts();
+    }
+
+    async function refreshSocialPosts() {
+      if (!socialProjectId) return;
+      const statusEl = document.getElementById('social-project-status');
+      try {
+        const data = await window.api.getSocialStatus(socialProjectId);
+        const posts = data.posts || [];
+        socialCurrentPosts = posts;
+        renderSocialPosts(posts);
+        renderSocialStats(data.stats);
+
+        const summary = data.summary || {};
+        if (summary.total > 0) {
+          statusEl.textContent = `${summary.total} posts - ${summary.planned || 0} planned, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled` + ((summary.upload_failed || 0) > 0 ? `, ${summary.upload_failed} failed` : '');
+        } else {
+          statusEl.textContent = 'No engagement posts planned yet. Click Plan Posts after Shorts are scheduled.';
+        }
+
+        updateSocialActionButtons();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+        socialCurrentPosts = [];
+        renderSocialPosts([]);
+        renderSocialStats(null);
+        updateSocialActionButtons();
+      }
+    }
+
+    function getSocialTargetDate() {
+      const value = document.getElementById('social-target-date')?.value || '';
+      return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+    }
+
+    function getSocialActionState() {
+      const targetDate = getSocialTargetDate();
+      const scope = document.getElementById('social-plan-scope')?.value || 'next_day';
+      const rows = targetDate
+        ? socialCurrentPosts.filter(p => p.scheduled_date === targetDate)
+        : socialCurrentPosts;
+      const planned = rows.filter(p => p.status === 'planned').length;
+      const ready = rows.filter(p => p.status === 'content_done' || p.status === 'upload_failed').length;
+      const scheduled = rows.filter(p => p.status === 'scheduled').length;
+      const allRowsScheduled = rows.length > 0 && planned === 0 && ready === 0 && scheduled === rows.length;
+      const targetComplete = !!targetDate && allRowsScheduled;
+      const allFutureComplete = !targetDate && scope === 'all_future' && allRowsScheduled;
+      const complete = targetComplete || allFutureComplete;
+      const completeMessage = targetComplete
+        ? `All ${scheduled} posts for ${targetDate} are already scheduled.`
+        : (allFutureComplete ? `All ${scheduled} future engagement posts are already scheduled.` : '');
+
+      return { targetDate, scope, rows, planned, ready, scheduled, complete, completeMessage };
+    }
+
+    function updateSocialActionButtons() {
+      const planBtn = document.getElementById('btn-plan-social');
+      const generateBtn = document.getElementById('btn-generate-social');
+      const scheduleBtn = document.getElementById('btn-schedule-social');
+      const progressEl = document.getElementById('social-progress');
+      if (!planBtn || !generateBtn || !scheduleBtn) return;
+
+      const state = getSocialActionState();
+      planBtn.disabled = state.complete;
+      planBtn.title = state.complete ? state.completeMessage : '';
+      generateBtn.disabled = state.planned === 0;
+      generateBtn.title = state.planned > 0 ? '' : (state.complete ? state.completeMessage : 'Plan posts first');
+      scheduleBtn.disabled = state.ready === 0;
+      scheduleBtn.title = state.ready > 0 ? '' : (state.complete ? state.completeMessage : 'Generate copy first');
+
+      if (state.complete && progressEl) {
+        progressEl.innerHTML = `<span style="color:var(--green);">${escapeHtml(state.completeMessage)}</span>`;
+      }
+    }
+
+    function renderSocialPosts(posts) {
+      const tbody = document.getElementById('social-posts-body');
+      if (!tbody) return;
+      if (!posts || posts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="padding:12px;color:var(--muted);text-align:center;">No engagement posts planned</td></tr>';
+        return;
+      }
+
+      const labels = {
+        character_intro: 'Character spotlight',
+        pre_short_teaser: 'Pre-Reel teaser',
+        post_short_recap: 'Post-Reel recap',
+      };
+      const statusColors = {
+        planned: 'var(--muted)',
+        content_done: 'var(--accent)',
+        scheduled: 'var(--green)',
+        upload_failed: 'var(--red)',
+        skipped: 'var(--yellow)',
+      };
+
+      tbody.innerHTML = '';
+      posts.forEach(p => {
+        const source = p.post_type === 'character_intro'
+          ? (p.source_character_element_name || p.source_character_id || '-')
+          : (p.short_id ? `short #${p.short_id}` : '-');
+        const mediaName = p.media_path ? p.media_path.split(/[\\/]/).pop() : 'missing';
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--border)';
+        tr.innerHTML = `
+          <td style="padding:5px 8px;">${escapeHtml(p.scheduled_date || '-')}</td>
+          <td style="padding:5px 8px;">${escapeHtml(p.scheduled_time || '-')}</td>
+          <td style="padding:5px 8px;">${escapeHtml(labels[p.post_type] || p.post_type)}</td>
+          <td style="padding:5px 8px;color:var(--muted);">${escapeHtml(source)}</td>
+          <td style="padding:5px 8px;color:${p.media_path ? 'var(--text)' : 'var(--red)'};" title="${escapeHtml(p.media_path || p.error_message || '')}">${escapeHtml(mediaName)}</td>
+          <td style="padding:5px 8px;color:${statusColors[p.status] || 'var(--muted)'}">${escapeHtml(p.status || 'planned')}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderSocialStats(stats) {
+      const el = document.getElementById('social-stats');
+      if (!el) return;
+      if (!stats) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+      }
+      el.style.display = 'flex';
+      el.innerHTML = `
+        <span><strong style="color:var(--accent);">${stats.characterIntros || 0}</strong> character intros</span>
+        <span><strong style="color:var(--accent);">${stats.teasers || 0}</strong> teasers</span>
+        <span><strong style="color:var(--accent);">${stats.recaps || 0}</strong> recaps</span>
+        <span><strong style="color:var(--green);">${escapeHtml(stats.startDate || '-')}</strong> to <strong style="color:var(--green);">${escapeHtml(stats.endDate || '-')}</strong></span>
+      `;
+    }
+
+    async function planSocialPosts() {
+      if (!socialProjectId) return;
+      const btn = document.getElementById('btn-plan-social');
+      const progressEl = document.getElementById('social-progress');
+      const actionState = getSocialActionState();
+      if (actionState.complete) {
+        progressEl.innerHTML = `<span style="color:var(--green);">${escapeHtml(actionState.completeMessage)}</span>`;
+        updateSocialActionButtons();
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Planning...';
+      progressEl.textContent = 'Tracing scheduled shorts back to clips, dialogue, scene images, and character portraits...';
+
+      try {
+        const scope = actionState.scope;
+        const targetDate = actionState.targetDate;
+        const includeType1 = !!document.getElementById('social-include-type1')?.checked;
+        const result = await window.api.planSocialPosts(socialProjectId, { scope, targetDate, includeType1 });
+        progressEl.innerHTML = `<span style="color:var(--green);">Planned ${result.inserted} new posts (${result.planned} eligible slots checked${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}).</span>`;
+        renderSocialPosts(result.posts || []);
+        await refreshSocialPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Plan Posts';
+    }
+
+    async function generateSocialPosts() {
+      if (!socialProjectId) return;
+      const btn = document.getElementById('btn-generate-social');
+      const progressEl = document.getElementById('social-progress');
+      btn.disabled = true;
+      btn.textContent = 'Generating...';
+      progressEl.textContent = 'Generating and persisting engagement captions with Claude...';
+
+      try {
+        const targetDate = document.getElementById('social-target-date')?.value || '';
+        const result = await window.api.generateSocialPosts(socialProjectId, { targetDate });
+        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Generated ${result.generated} post${result.generated === 1 ? '' : 's'}${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        renderSocialPosts(result.posts || []);
+        await refreshSocialPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Generate Copy';
+    }
+
+    async function scheduleAllSocialPosts() {
+      if (!socialProjectId) return;
+      const btn = document.getElementById('btn-schedule-social');
+      const progressEl = document.getElementById('social-progress');
+      btn.disabled = true;
+      btn.textContent = 'Scheduling...';
+      progressEl.textContent = 'Launching Facebook and scheduling image posts...';
+
+      try {
+        const targetDate = document.getElementById('social-target-date')?.value || '';
+        const result = await window.api.scheduleAllSocialPosts(socialProjectId, { targetDate });
+        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Scheduled ${result.uploaded} post${result.uploaded === 1 ? '' : 's'}${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        renderSocialPosts(result.posts || []);
+        await refreshSocialPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Schedule All';
+    }
+
+    if (window.api.onSocialProgress) {
+      window.api.onSocialProgress((data) => {
+        const progressEl = document.getElementById('social-progress');
+        if (!progressEl) return;
+        if (data.message) progressEl.textContent = data.message;
+        else if (data.phase === 'generate' && data.status === 'done') {
+          progressEl.textContent = `Generated ${data.generated || 0}; failed ${data.failed || 0}.`;
+        } else if (data.phase === 'upload' && data.status === 'done') {
+          progressEl.textContent = `Scheduled ${data.uploaded || 0}; failed ${data.failed || 0}.`;
+        }
+      });
+    }
+
     let projectLogOffset = 0;
 
     async function populateProjectLogSelector() {
@@ -3450,6 +3836,7 @@
           break;
 
         case 'waiting':
+          state.currentApprovalGate = event.gate;
           const gateStageMap = { title: 'script', script: 'script', research: 'research', 'elements-ready': 'portraits', 'locations-ready': 'locations' };
           updateStepper(gateStageMap[event.gate] || event.gate, 'waiting_approval');
           updateStatusBadge('waiting_approval');
@@ -3481,9 +3868,10 @@
           }
           if (event.gate === 'prompt-preview') {
             // TEMPORARY — remove when full production starts.
-            // Pre-gen prompt preview: show the final prompt + start frame before Kling generation.
+            // Pre-gen prompt preview: show the final prompt + start frame before cinematic video generation.
             // Ensure the generation view is visible (may be coming from dialogue triage or another view)
-            showGenerationView('Generating Video Clips (Kling 3.0)...', 'clips');
+            const engineLabel = event.videoEngineLabel || (event.videoEngine === 'cinema-studio-3.5' ? 'Cinema Studio 3.5' : 'Kling 3.0');
+            showGenerationView(`Generating Video Clips (${engineLabel})...`, 'clips');
             // Update progress counter from the clip event data (showGenerationView resets to 0/0)
             if (typeof event.clipIndex === 'number' && typeof event.clipTotal === 'number') {
               updateGenProgress(event.clipIndex, event.clipTotal);
@@ -3560,6 +3948,9 @@
             const msg = `⚠ Higgsfield Preflight Failed\n\n${reason}\n\nFix the session (log into Higgsfield in the automation browser), then click Resume.`;
             updateLog(msg, 'warn');
             updateStepper('portraits', 'waiting_approval');
+            document.getElementById('btn-pause').style.display = 'none';
+            document.getElementById('btn-resume-pipeline').style.display = 'inline-block';
+            document.getElementById('btn-resume-pipeline').disabled = false;
           }
           if (event.gate === 'credits-exhausted') {
             // Credit pre-check detected potential exhaustion
@@ -3568,6 +3959,15 @@
             const cost = d.creditCost != null ? ` (cost per generation: ${d.creditCost} credits)` : '';
             const msg = `⚠ Credits Exhausted\n\n${reason}${cost}\n\nAdd credits in Higgsfield, then click Resume.`;
             updateLog(msg, 'warn');
+            document.getElementById('btn-pause').style.display = 'none';
+            document.getElementById('btn-resume-pipeline').style.display = 'inline-block';
+            document.getElementById('btn-resume-pipeline').disabled = false;
+          }
+          if (event.gate === 'cinema-eligibility-failed') {
+            const failed = (event.failedAssets || []).map(a => `${a.type || 'asset'}: ${a.name || a.path || 'unknown'} (${a.status || 'not eligible'})`).join('\n');
+            updateLog(`Cinema Studio eligibility needs human input for ${event.clipLabel || event.clipId}:\n${failed || 'No details provided'}\n\nFix or replace the asset, then approve to retry.`, 'warn');
+            showGenerationView('Cinema Studio Eligibility Check', 'cinema-eligibility-failed');
+            document.getElementById('gen-approve-btns').style.display = 'flex';
           }
           break;
 

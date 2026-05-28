@@ -657,13 +657,19 @@ Requirements:
    * Returns character names with their element names for dropdown.
    *
    * @param {object} script - Parsed script JSON
-   * @param {string} elementSuffix - Element name suffix (e.g. "towwf_0421")
+   * @param {string|object} elementOptions - Legacy suffix string or cinematic element lookup options
    * @returns {Array<{name, elementName, dialogueCount}>}
    */
-  getCharactersForThumbnail(script, elementSuffix) {
+  getCharactersForThumbnail(script, elementOptions) {
     if (!script || !script.character_bible) return [];
 
     const bible = script.character_bible;
+    const options = typeof elementOptions === 'object' && elementOptions !== null
+      ? elementOptions
+      : { elementSuffix: elementOptions };
+    const elementSuffix = options.elementSuffix || null;
+    const cinematicElementNames = options.cinematicElementNames || {};
+    const outfitElements = options.outfitElements || {};
 
     // Count dialogue lines per character
     const dialogueCounts = {};
@@ -678,7 +684,14 @@ Requirements:
 
     return bible.map(char => {
       const hint = (char.element_name_hint || '').replace(/^@/, '').toLowerCase();
-      const suffixedName = elementSuffix ? `${hint}_${elementSuffix}` : hint;
+      const defaultOutfitName = outfitElements[hint]?.o1 || outfitElements[hint]?.['o1'];
+      const mappedName = defaultOutfitName
+        || cinematicElementNames[hint]
+        || cinematicElementNames[`@${hint}`]
+        || cinematicElementNames[char.id]
+        || cinematicElementNames[`@${char.id}`];
+      const normalizedSuffix = elementSuffix ? String(elementSuffix).replace(/^_+/, '') : '';
+      const suffixedName = mappedName || (normalizedSuffix ? `${hint}_${normalizedSuffix}` : hint);
       const count = dialogueCounts[hint] || 0;
 
       return {

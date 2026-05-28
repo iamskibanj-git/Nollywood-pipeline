@@ -541,6 +541,55 @@ function getCompletedProjects() {
 }
 
 /**
+ * Collect recently used character names from prior generated scripts.
+ * Used by script generation to avoid recycling the same small name pool
+ * (Ada/Adaeze/Emeka/Ngozi/etc.) across projects.
+ */
+function getRecentCharacterNames(limit = 80) {
+  const rows = queryAll(
+    `SELECT script_json FROM projects
+     WHERE script_json IS NOT NULL AND TRIM(script_json) != ''
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+    [Math.max(1, limit)]
+  );
+  const names = new Set();
+  const addName = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return;
+    const variants = [raw];
+    for (const part of raw.split(/[??-]/)) variants.push(part);
+    for (const part of raw.split(/[_\s]+/)) variants.push(part);
+
+    for (const variant of variants) {
+      const cleaned = variant
+        .replace(/^@+/, '')
+        .replace(/\b(The|A|An)\s+/gi, '')
+        .replace(/\b(Protagonist|Antagonist|Mother|Father|Wife|Husband|Bride|Groom|Pastor|Chief|Elder|Friend|Confidant|Supporting|Fallen|Married|Spiritual|Mirror|Charmer)\b/gi, '')
+        .replace(/\b(Mama|Papa|Madam|Mr|Mrs|Miss|Dr|Barrister|Alhaji|Alhaja)\b/gi, '')
+        .replace(/_/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (cleaned.length < 3 || cleaned.length > 40) continue;
+      names.add(cleaned.toLowerCase());
+    }
+  };
+
+  for (const row of rows) {
+    try {
+      const script = typeof row.script_json === 'string' ? JSON.parse(row.script_json) : row.script_json;
+      for (const c of (script?.character_bible || [])) {
+        addName(c.name);
+        addName(c.description_label);
+        addName(c.element_name_hint);
+      }
+    } catch (_) {}
+  }
+
+  return [...names].slice(0, limit);
+}
+
+/**
  * Get all projects that have at least one completed scene image.
  * Used by the standalone Publish tab — any project with scenes is eligible
  * for thumbnail generation, regardless of pipeline completion status.
@@ -1370,8 +1419,9 @@ function saveResearchCache(youtubeData, analysisData) {
     VALUES (datetime('now'), ?, ?, ?, 1)
   `, [expiresAt, JSON.stringify(youtubeData), JSON.stringify(analysisData)]);
 
-  // Get the id we just inserted so the caller can link projects to it
-  const row = queryOne(`SELECT last_insert_rowid() AS id`);
+  // sql.js has been unreliable for last_insert_rowid() after our runSql/save
+  // wrapper. The newest row is the one this synchronous insert just created.
+  const row = queryOne(`SELECT id FROM research_cache ORDER BY id DESC LIMIT 1`);
   return row?.id || null;
 }
 
@@ -1775,6 +1825,130 @@ function getProjectLogCount(projectId) {
   return row ? row.cnt : 0;
 }
 
+// ── Social engagement posts ──
+
+function getSocialPostProjects() {
+  return queryAll(`
+    SELECT p.id, p.title, p.project_dir, p.created_at,
+      (SELECT COUNT(*) FROM shorts s
+       WHERE s.project_id = p.id
+         AND s.status = 'scheduled'
+         AND date(s.scheduled_date) >= date('now')) as future_short_count,
+      (SELECT COUNT(*) FROM social_posts sp
+       WHERE sp.project_id = p.id) as social_post_count,
+      (SELECT COUNT(*) FROM social_posts sp
+       WHERE sp.project_id = p.id AND sp.status = 'scheduled') as social_scheduled_count
+    FROM projects p
+    WHERE EXISTS (
+      SELECT 1 FROM shorts s
+      WHERE s.project_id = p.id
+        AND s.status = 'scheduled'
+        AND date(s.scheduled_date) >= date('now')
+    )
+    ORDER BY p.created_at DESC
+  `);
+}
+
+function getFutureScheduledShorts(projectId) {
+  return queryAll(`
+    SELECT * FROM shorts
+    WHERE project_id = ?
+      AND status = 'scheduled'
+      AND date(scheduled_date) >= date('now')
+    ORDER BY scheduled_date ASC, scheduled_time ASC, short_number ASC
+  `, [projectId]);
+}
+
+function getSocialPostsForProject(projectId) {
+  return queryAll(`
+    SELECT * FROM social_posts
+    WHERE project_id = ?
+    ORDER BY scheduled_date ASC, scheduled_time ASC, post_type ASC, id ASC
+  `, [projectId]);
+}
+
+function insertSocialPost(post) {
+  db.run(`
+    INSERT OR IGNORE INTO social_posts (
+      project_id, short_id, post_type, sequence, title, body, hashtags,
+      caption_json, media_path, scheduled_date, scheduled_time, status,
+      source_character_id, source_character_element_name, source_scene_asset_id,
+      error_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    post.project_id,
+    post.short_id || null,
+    post.post_type,
+    post.sequence || 1,
+    post.title || null,
+    post.body || null,
+    post.hashtags || '[]',
+    post.caption_json || null,
+    post.media_path || null,
+    post.scheduled_date || null,
+    post.scheduled_time || null,
+    post.status || 'planned',
+    post.source_character_id || null,
+    post.source_character_element_name || null,
+    post.source_scene_asset_id || null,
+    post.error_message || null,
+  ]);
+  const changed = typeof db.getRowsModified === 'function' ? db.getRowsModified() : 1;
+  save();
+  if (changed === 0) return null;
+  const row = queryOne('SELECT last_insert_rowid() as id');
+  return row?.id || null;
+}
+
+function updateSocialPost(id, fields) {
+  const allowed = [
+    'title', 'body', 'hashtags', 'caption_json', 'media_path',
+    'scheduled_date', 'scheduled_time', 'status', 'facebook_post_id',
+    'error_message', 'source_character_id', 'source_character_element_name',
+    'source_scene_asset_id', 'generated_at', 'upload_confirmed_at',
+  ];
+  const sets = [];
+  const vals = [];
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (!allowed.includes(key)) continue;
+    sets.push(`${key} = ?`);
+    vals.push(value);
+  }
+  if (sets.length === 0) return;
+  sets.push(`updated_at = datetime('now')`);
+  vals.push(id);
+  runSql(`UPDATE social_posts SET ${sets.join(', ')} WHERE id = ?`, vals);
+}
+
+function getPendingSocialUploads(projectId) {
+  return queryAll(`
+    SELECT * FROM social_posts
+    WHERE project_id = ?
+      AND status IN ('content_done', 'upload_failed')
+    ORDER BY scheduled_date ASC, scheduled_time ASC, id ASC
+  `, [projectId]);
+}
+
+function markSocialPostScheduled(id, facebookPostId = null) {
+  runSql(`
+    UPDATE social_posts SET status = 'scheduled',
+                            facebook_post_id = ?,
+                            upload_confirmed_at = datetime('now'),
+                            error_message = NULL,
+                            updated_at = datetime('now')
+    WHERE id = ?
+  `, [facebookPostId, id]);
+}
+
+function markSocialPostFailed(id, errorMessage) {
+  runSql(`
+    UPDATE social_posts SET status = 'upload_failed',
+                            error_message = ?,
+                            updated_at = datetime('now')
+    WHERE id = ?
+  `, [errorMessage || 'Unknown social post upload failure', id]);
+}
+
 module.exports = {
   init,
   getDb,
@@ -1793,6 +1967,7 @@ module.exports = {
   completeProject,
   abandonProject,
   getCompletedProjects,
+  getRecentCharacterNames,
   getPublishableProjects,
   // Assets
   insertExpectedAssets,
@@ -1865,6 +2040,15 @@ module.exports = {
   insertLog,
   getProjectLogs,
   getProjectLogCount,
+  // Social engagement posts
+  getSocialPostProjects,
+  getFutureScheduledShorts,
+  getSocialPostsForProject,
+  insertSocialPost,
+  updateSocialPost,
+  getPendingSocialUploads,
+  markSocialPostScheduled,
+  markSocialPostFailed,
   // Credit tracking
   getProjectCreditUsage,
   // Migration

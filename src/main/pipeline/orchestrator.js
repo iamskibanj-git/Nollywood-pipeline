@@ -38,6 +38,8 @@ const KLING_CLIP_DURATION = 15;      // Fixed 15s per Kling clip — duration al
 const KLING_CREDITS_PER_CLIP = 11;   // ~11 credits per Kling multi-shot clip
 const KLING_CREDITS_PER_SCENE = 2;   // ~2 credits per scene image (Nano Banana Pro)
 const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
+const TEMP_SKIP_CINEMA35_PROMPT_PREVIEW = true;
+const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = true;
 
 /**
  * Duration presets. Each defines the target and matching story structures.
@@ -514,7 +516,7 @@ class PipelineOrchestrator {
    * Updates both the DB row and in-memory state so the next stage picks up
    * the new settings. Story structure is recalculated from the new duration.
    */
-  updateProjectSettings({ duration, aspectRatio, generatorMode }) {
+  updateProjectSettings({ duration, aspectRatio, generatorMode, cinematicVideoEngine }) {
     const active = this.getActiveProject();
     if (!active) {
       return { success: false, reason: 'No active project.' };
@@ -543,6 +545,14 @@ class PipelineOrchestrator {
       db.setProjectGeneratorMode(projectId, generatorMode);
       this.state.generatorMode = generatorMode;
       this.log(`[SETTINGS] Generator mode updated → ${generatorMode}`);
+    }
+    if (cinematicVideoEngine && ['kling', 'cinema-studio-3.5'].includes(cinematicVideoEngine)) {
+      const rawSettings = db.getProject(projectId)?.settings;
+      const settings = rawSettings ? (typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings) : {};
+      settings.cinematicVideoEngine = cinematicVideoEngine;
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+      this.state.cinematicVideoEngine = cinematicVideoEngine;
+      this.log(`[SETTINGS] Cinematic video engine updated -> ${cinematicVideoEngine}`);
     }
     return { success: true };
   }
@@ -614,6 +624,7 @@ class PipelineOrchestrator {
         projectDir = activeProject.projectDir;
         this.state.aspectRatio = activeProject.aspectRatio || '16:9';
         this.state.generatorMode = activeProject.generatorMode || 'staged';
+        this.state.cinematicVideoEngine = activeProject.settings?.cinematicVideoEngine || 'kling';
         structure = calculateStoryStructure(activeProject.durationPreset, this.state.generatorMode);
         this.state.storyStructure = structure;
         this.state.selectedPoolId = activeProject.researchCacheId || null;
@@ -646,6 +657,24 @@ class PipelineOrchestrator {
 
         this.state.project = { id: projectId, dir: projectDir, brief: storyBrief };
         this.state.selectedTitle = activeProject.title;
+
+        // Resume safety: if a run failed after research but before script was
+        // persisted, reload the saved research files even when the pool id was
+        // not linked correctly. This preserves the original title/script context.
+        try {
+          const analysisPath = path.join(projectDir, 'research-analysis.json');
+          const youtubePath = path.join(projectDir, 'research-youtube.json');
+          if (!this.state.researchData && fs.existsSync(analysisPath)) {
+            this.state.researchData = JSON.parse(fs.readFileSync(analysisPath, 'utf8'));
+            this.log('[RESUME] Restored research analysis from project files');
+          }
+          if ((!this.state.topVideos || this.state.topVideos.length === 0) && fs.existsSync(youtubePath)) {
+            const youtube = JSON.parse(fs.readFileSync(youtubePath, 'utf8'));
+            this.state.topVideos = youtube.all || [];
+          }
+        } catch (e) {
+          this.log(`[RESUME] WARN: Could not restore research files: ${e.message}`, 'warn');
+        }
 
         // Restore Higgsfield Cinema Studio project ID from DB settings
         if (settings.higgsfield_cinema_project_id) {
@@ -751,6 +780,10 @@ class PipelineOrchestrator {
           ? options.aspectRatio
           : '16:9';
         this.state.aspectRatio = aspectRatio;
+        const cinematicVideoEngine = options.cinematicVideoEngine === 'cinema-studio-3.5'
+          ? 'cinema-studio-3.5'
+          : 'kling';
+        this.state.cinematicVideoEngine = cinematicVideoEngine;
 
         if (structure.storyDriven) {
           this.log(`Target [${durationPreset}, ${aspectRatio}, ${generatorMode}]: ~${structure.targetClips} clips (~${structure.estimatedDuration} min, ~${structure.estimatedCredits} credits) = ${structure.chapters}ch × unlimited scenes × unlimited lines (story-driven)`);
@@ -799,6 +832,7 @@ class PipelineOrchestrator {
           settings: {
             nationality: storyBrief.nationality,
             accent: storyBrief.accent,
+            cinematicVideoEngine,
             // tone/setting intentionally omitted — chosen per-scene/per-line by Claude
           },
           projectDir,
@@ -1898,17 +1932,23 @@ class PipelineOrchestrator {
             // (the map has many keys pointing to the same value — deduplicate values)
             const expectedNames = [...new Set(Object.values(this.state.cinematicElementNames || {}))];
             if (expectedNames.length > 0) {
-              elemChecker.invalidateCache();
-              const existing = await elemChecker.listExistingElements();
-              const existingLower = new Set(existing.map(e => e.name.toLowerCase()));
-              const missing = expectedNames.filter(name => !existingLower.has(name.toLowerCase()));
-
-              if (missing.length === 0) {
-                this.log(`[CINEMATIC] ✓ All ${expectedNames.length} elements verified in Higgsfield — auto-approving`);
+              if (this.state._cinematicElementsConfirmedViaAtButton) {
+                this.log(`[CINEMATIC] Elements already confirmed via @ button in this run ? auto-approving`);
                 elementsAutoApproved = true;
               } else {
-                this.log(`[CINEMATIC] ${missing.length}/${expectedNames.length} elements missing: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '...' : ''}`, 'warn');
-                this._lastMissingElements = missing;
+                elemChecker.invalidateCache();
+                const existing = await elemChecker.listExistingElements();
+                const normalizeElementName = (value) => (value || '').toLowerCase().trim().replace(/^@+/, '').replace(/^use(?=[a-z0-9_-])/, '');
+                const existingLower = new Set(existing.map(e => normalizeElementName(e.name)));
+                const missing = expectedNames.filter(name => !existingLower.has(normalizeElementName(name)));
+
+                if (missing.length === 0) {
+                  this.log(`[CINEMATIC] ? All ${expectedNames.length} elements verified in Higgsfield ? auto-approving`);
+                  elementsAutoApproved = true;
+                } else {
+                  this.log(`[CINEMATIC] ${missing.length}/${expectedNames.length} elements missing: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '...' : ''}`, 'warn');
+                  this._lastMissingElements = missing;
+                }
               }
             }
           } catch (verifyErr) {
@@ -2182,32 +2222,45 @@ class PipelineOrchestrator {
           // On resume (e.g. at scenes-done), the element stage is skipped, so
           // we rebuild it from portrait assets that have element_name set.
           if (!this.state.cinematicElementNames || Object.keys(this.state.cinematicElementNames).length === 0) {
-            const portraitAssets = db.getAssets(projectId, { type: 'portrait' })
-              .filter(a => a.element_name);
-            if (portraitAssets.length > 0) {
+            const elementAssets = db.getAssets(projectId)
+              .filter(a => (a.type === 'portrait' || a.type === 'character_grid') && a.element_name);
+            if (elementAssets.length > 0) {
               this.state.cinematicElementNames = {};
+              this.state._outfitElements = this.state._outfitElements || {};
               const bible = this.state.script?.character_bible || [];
-              for (const a of portraitAssets) {
+              for (const a of elementAssets) {
                 const name = a.element_name; // suffixed name e.g. "son_emeka_bpdr_0419"
                 this.state.cinematicElementNames[name] = name;
                 this.state.cinematicElementNames[`@${name}`] = name;
                 // Derive base name by stripping suffix (_xxxx_MMDD)
-                const baseMatch = name.match(/^(.+)_[a-z]{2,5}_\d{4}$/);
+                const baseMatch = name.match(/^(.+?)(?:_(o\d+))?_[a-z]{2,5}_\d{4}$/);
                 if (baseMatch) {
-                  this.state.cinematicElementNames[baseMatch[1]] = name;
-                  this.state.cinematicElementNames[`@${baseMatch[1]}`] = name;
+                  const baseName = baseMatch[1];
+                  const outfitId = baseMatch[2] || 'o1';
+                  if (outfitId === 'o1') {
+                    this.state.cinematicElementNames[baseName] = name;
+                    this.state.cinematicElementNames[`@${baseName}`] = name;
+                  }
+                  if (!this.state._outfitElements[baseName]) this.state._outfitElements[baseName] = {};
+                  this.state._outfitElements[baseName][outfitId] = name;
                 }
                 // Restore char.id and description_label slug keys so ALL
                 // lookup patterns work on resume (matches element-setup build)
                 const char = bible.find(c => c.element_name_hint === name ||
                   (baseMatch && c.element_name_hint === baseMatch[1]) ||
-                  c.id === a.character_id);
+                  c.id === a.character_id ||
+                  (typeof a.character_id === 'string' && a.character_id.startsWith(`${c.id}_`)));
                 if (char) {
-                  this.state.cinematicElementNames[char.id] = name;
+                  const outfitId = baseMatch?.[2] || 'o1';
+                  if (outfitId === 'o1') this.state.cinematicElementNames[char.id] = name;
                   if (char.element_name_hint) {
                     const hint = char.element_name_hint.toLowerCase().replace(/^@/, '');
-                    this.state.cinematicElementNames[hint] = name;
-                    this.state.cinematicElementNames[`@${hint}`] = name;
+                    if (outfitId === 'o1') {
+                      this.state.cinematicElementNames[hint] = name;
+                      this.state.cinematicElementNames[`@${hint}`] = name;
+                    }
+                    if (!this.state._outfitElements[hint]) this.state._outfitElements[hint] = {};
+                    this.state._outfitElements[hint][outfitId] = name;
                   }
                   if (char.description_label) {
                     const labelSlug = char.description_label
@@ -2215,15 +2268,16 @@ class PipelineOrchestrator {
                       .replace(/^(the|a|an)\s+/i, '')
                       .replace(/[^a-z0-9]+/g, '_')
                       .replace(/^_+|_+$/g, '');
-                    if (labelSlug) this.state.cinematicElementNames[labelSlug] = name;
+                    if (labelSlug && outfitId === 'o1') this.state.cinematicElementNames[labelSlug] = name;
                   }
                 }
               }
-              this.log(`[CINEMATIC] Restored cinematicElementNames from DB: ${portraitAssets.map(a => a.element_name).join(', ')}`);
+              this.log(`[CINEMATIC] Restored cinematicElementNames from DB: ${elementAssets.map(a => a.element_name).join(', ')}`);
               // Warn if count mismatch — at video stage this is informational
               // (elements should already exist since scenes were generated)
-              if (portraitAssets.length < bible.length) {
-                this.log(`[CINEMATIC] WARN: DB has ${portraitAssets.length} element names but bible has ${bible.length} characters — some @mentions may not resolve`, 'warn');
+              const restoredCount = new Set(Object.values(this.state.cinematicElementNames)).size;
+              if (restoredCount < bible.length) {
+                this.log(`[CINEMATIC] WARN: DB has ${restoredCount} restored element names but bible has ${bible.length} characters — some @mentions may not resolve`, 'warn');
               }
             } else {
               this.log('[CINEMATIC] WARN: no portrait assets with element_name found — @-ref sanitization may strip character names', 'warn');
@@ -3040,6 +3094,7 @@ class PipelineOrchestrator {
           // Emit for renderer to show publish view with candidates
           this.emit({
             type: 'publish-ready',
+            projectId,
             sceneCandidates,
             title: storyBrief?.title || this.state.selectedTitle,
           });
@@ -3466,40 +3521,55 @@ class PipelineOrchestrator {
     // ── RESTORE cinematicElementNames from DB on resume ──
     // cinematicElementNames only lives in memory. On app restart it's lost,
     // so rebuild from portrait assets before the idempotency gate fires.
-    let restoredFromDb = false;
+    let restoredFromDb = !!this.state._cinematicMapsRestoredFromSettings;
     let restoredSuffix = null; // suffix from existing DB entries for consistency
     if (!this.state.cinematicElementNames || Object.keys(this.state.cinematicElementNames).length === 0) {
-      const portraitAssets = db.getAssets(projectId, { type: 'portrait' })
-        .filter(a => a.element_name);
-      if (portraitAssets.length > 0) {
+      const elementAssets = db.getAssets(projectId)
+        .filter(a => (a.type === 'portrait' || a.type === 'character_grid') && a.element_name);
+      if (elementAssets.length > 0) {
         restoredFromDb = true;
         this.state.cinematicElementNames = {};
-        for (const a of portraitAssets) {
+        this.state._outfitElements = this.state._outfitElements || {};
+        for (const a of elementAssets) {
           const name = a.element_name; // suffixed name e.g. "son_emeka_bpdr_0419"
           this.state.cinematicElementNames[name] = name;
           this.state.cinematicElementNames[`@${name}`] = name;
-          // Derive base name by stripping the suffix pattern (_xxxx_MMDD)
+          // Derive base name by stripping the suffix pattern (_xxxx_MMDD),
+          // keeping outfit id separate when present.
           // This allows blocking @mentions (which use base names) to resolve
-          const baseMatch = name.match(/^(.+)_[a-z]{2,5}_\d{4}$/);
+          const baseMatch = name.match(/^(.+?)(?:_(o\d+))?_[a-z]{2,5}_\d{4}$/);
           if (baseMatch) {
-            this.state.cinematicElementNames[baseMatch[1]] = name;
-            this.state.cinematicElementNames[`@${baseMatch[1]}`] = name;
+            const baseName = baseMatch[1];
+            const outfitId = baseMatch[2] || 'o1';
+            if (outfitId === 'o1') {
+              this.state.cinematicElementNames[baseName] = name;
+              this.state.cinematicElementNames[`@${baseName}`] = name;
+            }
+            if (!this.state._outfitElements[baseName]) this.state._outfitElements[baseName] = {};
+            this.state._outfitElements[baseName][outfitId] = name;
             // Extract suffix for consistency — all elements in a project should
             // share the same suffix even if resumed on a different day
             if (!restoredSuffix) {
-              restoredSuffix = name.slice(baseMatch[1].length + 1); // e.g. "bpdr_0419"
+              const suffixMatch = name.match(/_([a-z]{2,5}_\d{4})$/);
+              restoredSuffix = suffixMatch ? suffixMatch[1] : null; // e.g. "bpdr_0419"
             }
           }
           const char = characters.find(c => c.element_name_hint === name ||
             (baseMatch && c.element_name_hint === baseMatch[1]) ||
-            c.id === a.character_id);
+            c.id === a.character_id ||
+            (typeof a.character_id === 'string' && a.character_id.startsWith(`${c.id}_`)));
           if (char) {
-            this.state.cinematicElementNames[char.id] = name;
+            const outfitId = baseMatch?.[2] || 'o1';
+            if (outfitId === 'o1') this.state.cinematicElementNames[char.id] = name;
             // Also index by element_name_hint (base name from script)
             if (char.element_name_hint) {
               const hint = char.element_name_hint.toLowerCase().replace(/^@/, '');
-              this.state.cinematicElementNames[hint] = name;
-              this.state.cinematicElementNames[`@${hint}`] = name;
+              if (outfitId === 'o1') {
+                this.state.cinematicElementNames[hint] = name;
+                this.state.cinematicElementNames[`@${hint}`] = name;
+              }
+              if (!this.state._outfitElements[hint]) this.state._outfitElements[hint] = {};
+              this.state._outfitElements[hint][outfitId] = name;
             }
             if (char.description_label) {
               const labelSlug = char.description_label
@@ -3507,11 +3577,11 @@ class PipelineOrchestrator {
                 .replace(/^(the|a|an)\s+/i, '')
                 .replace(/[^a-z0-9]+/g, '_')
                 .replace(/^_+|_+$/g, '');
-              if (labelSlug) this.state.cinematicElementNames[labelSlug] = name;
+              if (labelSlug && outfitId === 'o1') this.state.cinematicElementNames[labelSlug] = name;
             }
           }
         }
-        this.log(`[CINEMATIC] Restored cinematicElementNames from DB on resume: ${portraitAssets.map(a => a.element_name).join(', ')}`);
+        this.log(`[CINEMATIC] Restored cinematicElementNames from DB on resume: ${elementAssets.map(a => a.element_name).join(', ')}`);
         if (restoredSuffix) {
           this.log(`[CINEMATIC] Extracted suffix from DB entries: _${restoredSuffix} (will reuse for consistency)`);
         }
@@ -3521,7 +3591,7 @@ class PipelineOrchestrator {
         // the element stage was incomplete. Clear and fall through to
         // re-create all elements (the @ button pre-check below will skip
         // any that still exist in Higgsfield).
-        const restoredCount = portraitAssets.length;
+        const restoredCount = new Set(Object.values(this.state.cinematicElementNames)).size;
         if (restoredCount < characters.length) {
           this.log(`[CINEMATIC] COUNT MISMATCH: DB has ${restoredCount} element names but bible has ${characters.length} characters — element stage was incomplete, re-running`);
           this.state.cinematicElementNames = null;
@@ -4049,6 +4119,16 @@ class PipelineOrchestrator {
         continue;
       }
 
+      const projectRoot = path.resolve(projectDir).toLowerCase();
+      const resolvedPortrait = path.resolve(portraitPath).toLowerCase();
+      const resolvedGrid = gridMap[unitKey] ? path.resolve(gridMap[unitKey]).toLowerCase() : null;
+      if (!resolvedPortrait.startsWith(projectRoot + path.sep.toLowerCase())) {
+        throw new Error(`[CINEMATIC] Refusing element @${elementName}: portrait path is outside current project (${portraitPath})`);
+      }
+      if (resolvedGrid && !resolvedGrid.startsWith(projectRoot + path.sep.toLowerCase())) {
+        throw new Error(`[CINEMATIC] Refusing element @${elementName}: grid path is outside current project (${gridMap[unitKey]})`);
+      }
+
       // Build description for element
       let description;
       if (outfit) {
@@ -4063,6 +4143,7 @@ class PipelineOrchestrator {
         outfitId,
         name: elementName,
         baseName,
+        unitKey,
         portraitPath,
         gridPath: gridMap[unitKey] || null,
         description,
@@ -4153,7 +4234,6 @@ class PipelineOrchestrator {
             description: p.description,
           });
           if (result.created) {
-            createdCount++;
             // ── Post-creation confirmation via @ button ──
             // Wait and verify the element actually exists using the authoritative
             // @ button check (types @name in prompt, checks autocomplete dropdown)
@@ -4164,11 +4244,14 @@ class PipelineOrchestrator {
               if (atCheck.available.length > 0) {
                 this.log(`[CINEMATIC] ✓ Element @${p.name} confirmed via @ button`);
                 existingElements.add(p.name.toLowerCase().trim());
+                createdCount++;
               } else {
-                this.log(`[CINEMATIC] Warn: @${p.name} not confirmed via @ button — trusting Save success`);
+                this.log(`[CINEMATIC] Warn: @${p.name} not confirmed via @ button — manual verification required`, 'warn');
+                if (!automationFailure) automationFailure = new Error(`Element @${p.name} saved but was not confirmed by @ autocomplete`);
               }
             } catch (verifyErr) {
-              this.log(`[CINEMATIC] @ button verification skipped for @${p.name}: ${verifyErr.message}`);
+              this.log(`[CINEMATIC] @ button verification failed for @${p.name}: ${verifyErr.message} — manual verification required`, 'warn');
+              if (!automationFailure) automationFailure = verifyErr;
             }
           } else {
             skippedCount++;
@@ -4278,10 +4361,40 @@ class PipelineOrchestrator {
         this.log(`[CINEMATIC] @ button re-verification failed: ${recheckErr.message} — proceeding on user authority`, 'warn');
       }
     } else {
-      // All elements created/skipped successfully — each was individually confirmed
-      // via @ button during the creation loop (Task #2 fix ensures existingElements
-      // is kept in sync). No redundant batch re-verification needed.
-      this.log(`[CINEMATIC] ✓ All ${pending.length} character elements created/confirmed — proceeding to scene image generation`);
+      // All elements created/skipped successfully. Run one final @ autocomplete
+      // verification because scraper-based skips are weaker than prompt-box
+      // availability, and downstream generation depends on @ autocomplete.
+      const allNames = pending.map(p => p.name);
+      this.log(`[CINEMATIC] Running final @ button verification on ${allNames.length} element(s)...`);
+      try {
+        const finalCheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
+        if (finalCheck.missing.length > 0) {
+          this.log(`[CINEMATIC] ⚠ Final check: ${finalCheck.missing.length} element(s) missing: ${finalCheck.missing.map(n => '@' + n).join(', ')}`, 'warn');
+          this.emit({ type: 'cinematic-manual-element-checklist', pending: finalCheck.missing.map(n => ({ name: n, description: '' })) });
+
+          this.state.status = 'waiting_approval';
+          this.emit({ type: 'waiting', gate: 'elements-ready' });
+          this.log(`[CINEMATIC] Waiting for manual confirmation after final element verification miss`);
+          await this.waitForApproval('elements-ready');
+
+          const recheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
+          if (recheck.missing.length > 0) {
+            this.log(`[CINEMATIC] ⚠ Still missing after approval — proceeding on user authority: ${recheck.missing.map(n => '@' + n).join(', ')}`, 'warn');
+          } else {
+            this.log(`[CINEMATIC] ✓ All ${allNames.length} elements confirmed via @ button after approval`);
+          }
+        } else {
+          this.log(`[CINEMATIC] ✓ All ${allNames.length} character elements confirmed via @ button — proceeding to scene image generation`);
+          this.state._cinematicElementsConfirmedViaAtButton = true;
+          this._lastMissingElements = [];
+        }
+      } catch (finalErr) {
+        this.log(`[CINEMATIC] Final @ button verification failed: ${finalErr.message} — manual confirmation required`, 'warn');
+        this.emit({ type: 'cinematic-manual-element-checklist', pending: allNames.map(n => ({ name: n, description: '' })) });
+        this.state.status = 'waiting_approval';
+        this.emit({ type: 'waiting', gate: 'elements-ready' });
+        await this.waitForApproval('elements-ready');
+      }
     }
 
     // ── CRITICAL: Switch from Elements panel to Generations view ──
@@ -4333,26 +4446,34 @@ class PipelineOrchestrator {
       this.log(`[CINEMATIC] Warn: Generations switch failed (non-fatal): ${e.message}`);
     }
 
-    // Persist element names on the character's portrait asset row for
-    // cross-run resolution (CRITICAL for resume — cinematicElementNames is
-    // rebuilt from these on restart). Missing element_name → @character refs
-    // fail to resolve → entire video generation phase breaks on resume.
+    // Persist element names for cross-run resolution. The master portrait row
+    // stores the default/o1 element for legacy fallback, while each character
+    // grid row stores the exact outfit-specific element name.
     let elementNamePersistFailures = 0;
     for (const p of pending) {
-      const portraitAsset = db.getAssets(projectId, { type: 'portrait' })
-        .find(a => a.character_id === p.char.id);
-      if (portraitAsset) {
+      const assets = db.getAssets(projectId);
+      const persistTargets = [];
+
+      if (!p.outfitId || p.outfitId === 'o1') {
+        const portraitAsset = assets.find(a => a.type === 'portrait' && a.character_id === p.char.id);
+        if (portraitAsset) persistTargets.push({ asset: portraitAsset, label: 'portrait' });
+      }
+
+      const gridAsset = assets.find(a => a.type === 'character_grid' && a.character_id === p.unitKey);
+      if (gridAsset) persistTargets.push({ asset: gridAsset, label: 'character_grid' });
+
+      for (const target of persistTargets) {
         try {
-          db.setAssetElementName(portraitAsset.id, p.name);
+          db.setAssetElementName(target.asset.id, p.name);
         } catch (enErr) {
-          this.log(`[CINEMATIC] ERROR: element_name write failed for ${p.name} (asset ${portraitAsset.id}): ${enErr.message}`, 'error');
+          this.log(`[CINEMATIC] ERROR: element_name write failed for ${p.name} (${target.label} asset ${target.asset.id}): ${enErr.message}`, 'error');
           // Retry up to 3 times with exponential backoff (500ms, 1000ms, 2000ms)
           let persistSucceeded = false;
           const retryDelays = [500, 1000, 2000];
           for (let ri = 0; ri < retryDelays.length; ri++) {
             try {
               await new Promise(r => setTimeout(r, retryDelays[ri]));
-              db.setAssetElementName(portraitAsset.id, p.name);
+              db.setAssetElementName(target.asset.id, p.name);
               this.log(`[CINEMATIC] ↳ Retry ${ri + 1}/${retryDelays.length} succeeded for ${p.name}`);
               persistSucceeded = true;
               break;
@@ -5297,17 +5418,38 @@ class PipelineOrchestrator {
     };
 
     // ── Helper: detect if shot has dialogue ──
-    const hasDialogue = (body) => /\[@[a-z0-9_]+[^]]*\]:\s*"[^"]+"/i.test(body);
+    const hasDialogue = (body) => {
+      const dialogues = extractDialogue(body);
+      return dialogues.some(d => !isFakeSilentDialogue(d, body));
+    };
 
     // ── Helper: extract dialogue text from shot body ──
     const extractDialogue = (body) => {
       const matches = [];
-      const re = /\[@([a-z0-9_]+)[^\]]*\]:\s*"([^"]+)"/gi;
+      const re = /\[@([a-z0-9_]+)([^\]]*)\]:\s*"([^"]*)"/gi;
       let dm;
       while ((dm = re.exec(body)) !== null) {
-        matches.push({ speaker: dm[1], text: dm[2], fullMatch: dm[0] });
+        matches.push({
+          speaker: dm[1],
+          descriptor: dm[2] || '',
+          text: dm[3],
+          fullMatch: dm[0],
+        });
       }
       return matches;
+    };
+
+    // ── Helper: identify fake "silent dialogue" that should be a no-dialogue marker ──
+    const isFakeSilentDialogue = (dialogue, body = '') => {
+      const text = (dialogue?.text || '').trim();
+      const descriptor = (dialogue?.descriptor || '').toLowerCase();
+      const shotText = (body || '').toLowerCase();
+      const punctuationOnly = text.length === 0 || /^[\s.,;:!?'"`~\-–—…]+$/.test(text);
+      const namedSilence = /^(?:silence|silent|no\s+dialogue|none|n\/a)$/i.test(text);
+      const explicitSilentDescriptor = /\bsilent\b|\bno\s+dialogue\b|\bnon[-\s]?speaking\b/.test(descriptor);
+      const explicitSilentDirection = /\btotal\s+silence\b|\bmouth\s+does\s+not\s+open\b|\bdoes\s+not\s+speak\b|\bno\s+dialogue\b|\blips?\s+mov(?:e|ing)\s+silently\b/.test(shotText);
+      const fakeText = punctuationOnly || namedSilence;
+      return fakeText || ((explicitSilentDescriptor || explicitSilentDirection) && fakeText);
     };
 
     // ── Helper: count words in a string ──
@@ -5377,6 +5519,23 @@ class PipelineOrchestrator {
       this.log(`[RULES-ENGINE] ${clipId}: no shots found in prompt — skipping validation`);
       return { prompt, fixes: [] };
     }
+
+    // Rule 0: Normalize fake silent dialogue into the canonical marker.
+    // Bad:  [@name, speaking in a silent accent]: "..."
+    // Good: [@name has no dialogue]
+    for (const shot of shots) {
+      const dialogues = extractDialogue(shot.body);
+      for (const dialogue of dialogues) {
+        if (!isFakeSilentDialogue(dialogue, shot.body)) continue;
+        const replacement = `[@${dialogue.speaker} has no dialogue]`;
+        fixed = fixed.replace(dialogue.fullMatch, replacement);
+        fixes.push(`RULE0: Shot ${shot.shotNum} — converted fake silent dialogue to no-dialogue marker for @${dialogue.speaker}`);
+        this.log(`[RULES-ENGINE] ${clipId} Shot ${shot.shotNum}: fake silent dialogue → no-dialogue marker for @${dialogue.speaker}`);
+      }
+    }
+
+    // Re-parse after silent-dialogue normalization
+    shots = parseShots(fixed);
 
     // ══════════════════════════════════════════════════════════════════════
     // RULE 1: Max 1 [@speaker] tag per shot direction
@@ -5692,6 +5851,71 @@ class PipelineOrchestrator {
   }
 
   /**
+   * Prepare an image for Claude Vision using magic-byte MIME detection.
+   * Higgsfield often saves WebP bytes under a .png filename; Claude rejects
+   * those when the media_type follows the extension instead of the actual file.
+   */
+  _prepareImageForClaudeVision(imagePath, logPrefix = '[VISION]') {
+    const fs = require('fs');
+    const path = require('path');
+    const { execSync } = require('child_process');
+
+    const detectMime = (buf) => {
+      if (buf.length >= 4) {
+        if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+        if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+        if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+            && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'image/webp';
+      }
+      const ext = path.extname(imagePath).toLowerCase();
+      if (ext === '.png') return 'image/png';
+      if (ext === '.webp') return 'image/webp';
+      return 'image/jpeg';
+    };
+
+    const findFfmpeg = () => {
+      for (const cmd of ['ffmpeg', 'C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe']) {
+        try {
+          execSync(`"${cmd}" -version`, { stdio: 'ignore' });
+          return cmd;
+        } catch (_) {}
+      }
+      return null;
+    };
+
+    let imageData = fs.readFileSync(imagePath);
+    const rawSize = imageData.length;
+    let mimeType = detectMime(imageData);
+    const needsConversion = mimeType === 'image/webp' || rawSize > 3 * 1024 * 1024;
+    this.log(`${logPrefix} Image: ${(rawSize / 1024).toFixed(0)}KB, detected format: ${mimeType}${needsConversion ? ' (will convert to JPEG)' : ''}`);
+
+    if (needsConversion) {
+      const ffmpegPath = findFfmpeg();
+      if (!ffmpegPath) {
+        if (mimeType === 'image/webp') {
+          throw new Error('Cannot send WebP to Claude Vision and ffmpeg is unavailable for conversion');
+        }
+      } else {
+        const tmpJpeg = path.join(path.dirname(imagePath), `_vision_tmp_${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`);
+        try {
+          execSync(`"${ffmpegPath}" -i "${imagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpJpeg}"`, { timeout: 15000, stdio: 'pipe' });
+          imageData = fs.readFileSync(tmpJpeg);
+          mimeType = 'image/jpeg';
+          this.log(`${logPrefix} Converted to JPEG (${(imageData.length / 1024).toFixed(0)}KB)`);
+        } finally {
+          try { fs.unlinkSync(tmpJpeg); } catch (_) {}
+        }
+      }
+    }
+
+    const base64 = imageData.toString('base64');
+    if (base64.length > 5 * 1024 * 1024) {
+      throw new Error(`Image too large for Claude Vision after prep (${(base64.length / 1024 / 1024).toFixed(1)}MB base64)`);
+    }
+    return { imageData, mimeType, base64 };
+  }
+
+  /**
    * Use Claude Vision to refine blocking for a single scene based on the actual
    * location image. Instead of generic frame-left/center/right positions, this
    * produces blocking grounded in the spatial layout of the real location.
@@ -5718,53 +5942,10 @@ class PipelineOrchestrator {
         return characters;
       }
 
-      // ── Resize image if too large for Claude Vision API (5MB base64 limit) ──
-      // Location images from Higgsfield can be 10-14MB PNGs. We scale down to
-      // max 1200px on the longest side and convert to JPEG for much smaller payloads.
-      // Claude only needs to see spatial layout, not pixel-perfect detail.
-      let imageData;
-      let mimeType = 'image/jpeg';
-      const rawSize = fs.statSync(locationImagePath).size;
-
-      if (rawSize > 3 * 1024 * 1024) { // > 3MB — resize to be safe under 5MB base64
-        const path = require('path');
-        const { execSync } = require('child_process');
-        // Inline FFmpeg lookup (same logic as assembler.js findFFmpeg)
-        let ffmpegPath = null;
-        for (const cmd of ['ffmpeg', 'C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe']) {
-          try { execSync(`"${cmd}" -version`, { stdio: 'ignore' }); ffmpegPath = cmd; break; } catch (_) {}
-        }
-
-        if (ffmpegPath) {
-          const tmpJpeg = path.join(path.dirname(locationImagePath), `_vision_tmp_${Date.now()}.jpg`);
-          try {
-            // Scale to max 1200px on longest side, JPEG quality 85
-            execSync(`"${ffmpegPath}" -i "${locationImagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpJpeg}"`, { timeout: 15000, stdio: 'pipe' });
-            imageData = fs.readFileSync(tmpJpeg);
-            this.log(`[VISION-BLOCKING] Resized image: ${(rawSize / 1024 / 1024).toFixed(1)}MB → ${(imageData.length / 1024).toFixed(0)}KB JPEG`);
-            try { fs.unlinkSync(tmpJpeg); } catch (_) {}
-          } catch (resizeErr) {
-            this.log(`[VISION-BLOCKING] FFmpeg resize failed: ${resizeErr.message} — trying raw`);
-            imageData = fs.readFileSync(locationImagePath);
-            mimeType = locationImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
-          }
-        } else {
-          this.log('[VISION-BLOCKING] FFmpeg not found — sending raw image (may exceed 5MB limit)');
-          imageData = fs.readFileSync(locationImagePath);
-          mimeType = locationImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
-        }
-      } else {
-        imageData = fs.readFileSync(locationImagePath);
-        mimeType = locationImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
-      }
-
-      const base64Image = imageData.toString('base64');
-
-      // Final size check — if still over 5MB base64, skip vision
-      if (base64Image.length > 5 * 1024 * 1024) {
-        this.log(`[VISION-BLOCKING] Image still too large after resize (${(base64Image.length / 1024 / 1024).toFixed(1)}MB base64) — falling back`);
-        return characters;
-      }
+      const preparedLocation = this._prepareImageForClaudeVision(locationImagePath, '[VISION-BLOCKING]');
+      const imageData = preparedLocation.imageData;
+      const mimeType = preparedLocation.mimeType;
+      const base64Image = preparedLocation.base64;
 
       // Use base names in Vision prompt — the LLM naturally shortens suffixed
       // names (e.g. "adanna_mseb_0419" → "adanna"), so we give it base names
@@ -5801,36 +5982,14 @@ class PipelineOrchestrator {
       let continuityClause = '';
       if (previousSceneImagePath && fs.existsSync(previousSceneImagePath)) {
         try {
-          let prevData = fs.readFileSync(previousSceneImagePath);
-          let prevMime = previousSceneImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
-          // Resize if too large (same logic as location image)
-          if (prevData.length > 4 * 1024 * 1024) {
-            const { execSync } = require('child_process');
-            const path = require('path');
-            const tmpPrev = path.join(path.dirname(previousSceneImagePath), `_prev_tmp_${Date.now()}.jpg`);
-            try {
-              let ffmpegPath = null;
-              for (const cmd of ['ffmpeg', 'C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe']) {
-                try { execSync(`"${cmd}" -version`, { stdio: 'ignore' }); ffmpegPath = cmd; break; } catch (_) {}
-              }
-              if (ffmpegPath) {
-                execSync(`"${ffmpegPath}" -i "${previousSceneImagePath}" -vf "scale='if(gt(iw,ih),1200,-2)':'if(gt(iw,ih),-2,1200)'" -q:v 2 -y "${tmpPrev}"`, { timeout: 15000, stdio: 'pipe' });
-                prevData = fs.readFileSync(tmpPrev);
-                prevMime = 'image/jpeg';
-                try { fs.unlinkSync(tmpPrev); } catch (_) {}
-              }
-            } catch (_) {}
-          }
-          const prevBase64 = prevData.toString('base64');
-          if (prevBase64.length <= 5 * 1024 * 1024) {
-            contentParts.push({
-              type: 'image',
-              source: { type: 'base64', media_type: prevMime, data: prevBase64 },
-            });
-            continuityClause = `
+          const previousPrepared = this._prepareImageForClaudeVision(previousSceneImagePath, '[VISION-BLOCKING] Previous scene');
+          contentParts.push({
+            type: 'image',
+            source: { type: 'base64', media_type: previousPrepared.mimeType, data: previousPrepared.base64 },
+          });
+          continuityClause = `
 CONTINUITY REFERENCE: The second image is the PREVIOUS SCENE at this same location. Characters who appear in both scenes MUST maintain the same spatial positions (same side of desk, same chair, same standing spot) UNLESS the script specifically calls for movement. Do NOT swap character positions between scenes.`;
-            this.log(`[VISION-BLOCKING] Including previous scene for continuity: ${previousSceneImagePath}`);
-          }
+          this.log(`[VISION-BLOCKING] Including previous scene for continuity: ${previousSceneImagePath}`);
         } catch (e) {
           this.log(`[VISION-BLOCKING] Could not load previous scene image: ${e.message} — proceeding without continuity ref`);
         }
@@ -7204,8 +7363,32 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const fs = require('fs');
     const path = require('path');
     const { KlingAutomation } = require('../automation/kling-automation');
+    const { CinemaVideoAutomation } = require('../automation/cinema-video-automation');
 
-    const kling = new KlingAutomation({
+    const rawSettings = db.getProject(projectId)?.settings;
+    const projectSettings = rawSettings ? (typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings) : {};
+    const cinematicVideoEngine = projectSettings.cinematicVideoEngine === 'cinema-studio-3.5'
+      ? 'cinema-studio-3.5'
+      : 'kling';
+    const videoEngineLabel = cinematicVideoEngine === 'cinema-studio-3.5'
+      ? 'Cinema Studio 3.5'
+      : 'Kling 3.0';
+    const videoModelName = cinematicVideoEngine === 'cinema-studio-3.5'
+      ? 'cinema-studio-3.5'
+      : 'kling-3.0';
+    this._autoApproveCinema35ClipReview = TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW && cinematicVideoEngine === 'cinema-studio-3.5';
+    const cinemaProjectId = this.state.higgsfield_project_id || projectSettings.higgsfield_cinema_project_id || null;
+    if (cinematicVideoEngine === 'cinema-studio-3.5' && !cinemaProjectId) {
+      this.log('[CINEMATIC] WARN: Cinema Studio 3.5 video selected but no Higgsfield project ID is available; using generic Cinema Studio page', 'warn');
+    }
+
+    const videoAutomation = cinematicVideoEngine === 'cinema-studio-3.5'
+      ? new CinemaVideoAutomation({
+        automation: this.automation,
+        logger: (m) => this.log(`[CINEMATIC] ${m}`),
+        projectId: cinemaProjectId,
+      })
+      : new KlingAutomation({
       automation: this.automation,
       logger: (m) => this.log(`[CINEMATIC] ${m}`),
     });
@@ -7274,7 +7457,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       return;
     }
 
-    this.log(`[CINEMATIC] Phase 4: ${allKlingClips.length} Kling clip(s) to generate`);
+    this.log(`[CINEMATIC] Phase 4: ${allKlingClips.length} clip(s) to generate via ${videoEngineLabel}`);
 
     // Resume-aware: identify clips already done or skipped by clip_id
     const existingClips = db.getAssets(projectId, { type: 'video_clip_cinematic' });
@@ -7405,7 +7588,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.log(`[CINEMATIC] ${clipId}: found existing file on disk (${(stat.size / 1024 / 1024).toFixed(2)} MB) — marking done`);
           const clipAssetForDisk = existingClips.find(a => a.kling_clip_id === clipId);
           if (clipAssetForDisk) {
-            db.markAssetDone(clipAssetForDisk.id, expectedOutputPath, { model: 'kling-3.0' });
+            db.markAssetDone(clipAssetForDisk.id, expectedOutputPath, { model: videoModelName });
           }
           generated++;
           skipped++;
@@ -7596,7 +7779,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
         const recoveryOutputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
         try {
-          const recovered = await kling.recoverTimedOutClip(recoveryPrompt, recoveryOutputPath, {
+          const recovered = await videoAutomation.recoverTimedOutClip(recoveryPrompt, recoveryOutputPath, {
             minSimilarity: 88,  // was 75 — raised to prevent false matches on same-location scenes
             maxTilesToCheck: 8,
             timeoutMs: 90000,
@@ -7607,7 +7790,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             const clipAssetForRecovery = existingClips.find(a => a.kling_clip_id === clipId);
             if (clipAssetForRecovery) {
               db.markAssetDone(clipAssetForRecovery.id, recovered.path, {
-                model: 'kling-3.0',
+                model: videoModelName,
                 sourceGenId: recovered.sourceGenId,
                 cdnUrl: recovered.cdnUrl,
               });
@@ -7620,7 +7803,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.emit({ type: 'clip-complete', index: i, path: recovered.path });
 
             // Approval gate after recovery
-            if (i < allKlingClips.length - 1) {
+            if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
               this.log(`[CINEMATIC] Waiting for clip approval (recovered): ${clipId}`);
               this.emit({
                 type: 'waiting',
@@ -7958,7 +8141,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           /(\]:\s*")([^"]*?)(")/gi,
           (match, prefix, dialogueText, suffix) => {
             const cleaned = dialogueText.replace(/@([a-z0-9_]+)/gi, (atMatch, name) => {
-              const baseName = name.replace(/_[a-z]{2,6}_\d{4}$/i, '');
+              const baseName = name
+                .replace(/_[a-z]{2,6}_\d{4}$/i, '')
+                .replace(/_o\d+$/i, '');
               const humanName = baseName.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
               this.log(`[CINEMATIC] ${clipId}: dialogue fix: @${name} → ${humanName}`);
               return humanName;
@@ -8137,9 +8322,16 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
 
       // ── PRE-GEN PROMPT PREVIEW GATE (TEMPORARY — remove when full production starts) ──
-      // Show the final multi_shot_prompt to the user before Playwright submits it
-      // to Kling. If the prompt looks wrong (bad blocking, weird phrasing), user
-      // can stop here without burning ~18 credits on a bad clip.
+      // Show the final multi_shot_prompt to the user before Playwright submits it.
+      // If the prompt looks wrong (bad blocking, weird phrasing), user can stop
+      // here without burning credits on a bad clip.
+      if (this._shouldSkipCinemaPromptPreview(cinematicVideoEngine)) {
+        if (!this._loggedCinema35PromptPreviewBypass) {
+          this.log('[CINEMATIC] TEMP: Cinema Studio 3.5 prompt preview gate disabled until Verify gate', 'warn');
+          this._loggedCinema35PromptPreviewBypass = true;
+        }
+        this.log(`[CINEMATIC] Prompt preview auto-approved for ${clipId} (${videoEngineLabel})`);
+      } else {
       this.log(`[CINEMATIC] Prompt preview gate for ${clipId}`);
       this.emit({
         type: 'waiting',
@@ -8151,13 +8343,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         prompt: finalMultiShotPrompt,
         startFramePath,
         durationSeconds: effectiveDuration,
+        videoEngine: cinematicVideoEngine,
+        videoEngineLabel,
       });
       const preGenDecision = await this.waitForApproval('prompt-preview');
       if (preGenDecision === 'stop') {
         this.log(`[CINEMATIC] User stopped before generating ${clipId} — skipping remaining clips`);
         break;
       }
-      this.log(`[CINEMATIC] Prompt approved for ${clipId} — proceeding to Kling generation`);
+      this.log(`[CINEMATIC] Prompt approved for ${clipId} — proceeding to ${videoEngineLabel} generation`);
+
+      }
 
       try {
         if (clipAsset) {
@@ -8188,13 +8384,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         // validElementNames is built above (before the sanitize step).
         // Pass it to generateClip so _typeMultiShotPrompt only triggers
         // @-autocomplete for real character elements.
-        const result = await kling.generateClip({
+        const result = await videoAutomation.generateClip({
           startFramePath,
           startFrameGenId,
           multiShotPrompt: finalMultiShotPrompt,
           durationSeconds: effectiveDuration,
           outputPath,
           validElements: validElementNames,
+          aspectRatio: this.state.aspectRatio || '16:9',
           onGenClicked: (creditCost) => {
             // Persist that Generate was clicked — survives app restart.
             // On resume, the pipeline will go straight to Asset recovery
@@ -8221,7 +8418,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         // Pause after each clip so the user can watch it and verify the
         // prompt structure before burning credits on the next one.
         // The gate auto-skips if this is the last clip (nothing to gate).
-        if (i < allKlingClips.length - 1) {
+        if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
           this.log(`[CINEMATIC] Waiting for clip approval: ${clipId} (${generated}/${allKlingClips.length - skipped})`);
           this.emit({
             type: 'waiting',
@@ -8241,6 +8438,25 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       } catch (e) {
         this.log(`[CINEMATIC] ${clipId} failed: ${e.message}`, 'warn');
+
+        if (e.code === 'CINEMA_ELIGIBILITY_FAILED') {
+          if (clipAsset) {
+            db.markAssetFailed(clipAsset.id, e.message);
+            db.resetAsset(clipAsset.id);
+          }
+          this.emit({
+            type: 'waiting',
+            gate: 'cinema-eligibility-failed',
+            clipId,
+            clipLabel: label,
+            failedAssets: e.failedAssets || [],
+          });
+          this.log(`[CINEMATIC] ${clipId}: Cinema Studio eligibility failed — pausing for human input`);
+          await this.waitForApproval('cinema-eligibility-failed');
+          if (this.cancelled) return;
+          i--;
+          continue;
+        }
 
         // ── SESSION EXPIRED: pause pipeline, relaunch browser, wait for login ──
         // Must be checked BEFORE any retry logic — no point retrying without auth.
@@ -8284,11 +8500,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                               e.message.includes('disconnected') || e.message.includes('Target');
 
         if (!isPreGen && isTimeout && !isBrowserDead && finalMultiShotPrompt) {
-          this.log(`[CINEMATIC] ${clipId}: timeout detected — waiting 120s for Kling to finish generating before recovery...`);
+          this.log(`[CINEMATIC] ${clipId}: timeout detected — waiting 120s for ${videoEngineLabel} to finish generating before recovery...`);
           await new Promise(r => setTimeout(r, 120000));
           this.log(`[CINEMATIC] ${clipId}: wait complete — attempting Asset library recovery...`);
           try {
-            const recovered = await kling.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
+            const recovered = await videoAutomation.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
               minSimilarity: 92,
               maxTilesToCheck: 6,
               timeoutMs: 60000,
@@ -8298,7 +8514,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               this.log(`[CINEMATIC] ✓ ${clipId} RECOVERED from Asset library (similarity=${recovered.similarity}%, uuid=${recovered.assetUuid || 'unknown'})`);
               if (clipAsset) {
                 db.markAssetDone(clipAsset.id, recovered.path, {
-                  model: 'kling-3.0',
+                  model: videoModelName,
                   sourceGenId: recovered.sourceGenId,
                   cdnUrl: recovered.cdnUrl,
                 });
@@ -8312,7 +8528,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
               // ── PER-CLIP APPROVAL GATE after recovery too ──
               // TEMPORARY — remove when full production starts.
-              if (i < allKlingClips.length - 1) {
+              if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
                 this.log(`[CINEMATIC] Waiting for clip approval (recovered): ${clipId}`);
                 this.emit({
                   type: 'waiting',
@@ -8332,12 +8548,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               continue; // skip the failure path — clip is done
             } else {
               // ── SECOND RECOVERY ATTEMPT ──
-              // Video may still be generating in Kling. Wait again, then retry recovery
+              // Video may still be generating. Wait again, then retry recovery
               // before burning credits on a re-generation.
               this.log(`[CINEMATIC] ${clipId}: recovery found no match — waiting 120s for second recovery attempt...`);
               await new Promise(r => setTimeout(r, 120000));
               this.log(`[CINEMATIC] ${clipId}: second recovery attempt (6 tiles, 92%)...`);
-              const recovered2 = await kling.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
+              const recovered2 = await videoAutomation.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
                 minSimilarity: 92,
                 maxTilesToCheck: 6,
                 timeoutMs: 60000,
@@ -8346,7 +8562,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                 this.log(`[CINEMATIC] ✓ ${clipId} RECOVERED on second attempt (similarity=${recovered2.similarity}%, uuid=${recovered2.assetUuid || 'unknown'})`);
                 if (clipAsset) {
                   db.markAssetDone(clipAsset.id, recovered2.path, {
-                    model: 'kling-3.0',
+                    model: videoModelName,
                     sourceGenId: recovered2.sourceGenId,
                     cdnUrl: recovered2.cdnUrl,
                   });
@@ -8358,7 +8574,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                 });
                 this.emit({ type: 'clip-complete', index: i, path: recovered2.path });
 
-                if (i < allKlingClips.length - 1) {
+                if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
                   this.log(`[CINEMATIC] Waiting for clip approval (2nd recovery): ${clipId}`);
                   this.emit({
                     type: 'waiting',
@@ -8393,10 +8609,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         } else if (isPreGen || isBrowserDead) {
           // Credit cost inflation = resolution is wrong. Pausing the pipeline
           // is the only safe move — retrying will hit the same 4K setting.
-          // User must fix resolution in Kling's UI, then resume.
+          // User must fix resolution in the Higgsfield UI, then resume.
           const isCostInflation = e.message.includes('Credit cost inflated');
           if (isCostInflation) {
-            this.log(`[CINEMATIC] ${clipId}: CREDIT COST INFLATED — pausing pipeline. Fix resolution in Kling UI, then resume.`, 'error');
+            this.log(`[CINEMATIC] ${clipId}: CREDIT COST INFLATED — pausing pipeline. Fix resolution in ${videoEngineLabel} UI, then resume.`, 'error');
             if (clipAsset) db.markAssetFailed(clipAsset.id, e.message);
             // Reset to pending so resume picks it up
             if (clipAsset) {
@@ -8439,13 +8655,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[CINEMATIC] Recreating browser context for ${clipId} retry...`);
             try { await this.automation.recreateContext(); } catch (_) {}
 
-            const retryResult = await kling.generateClip({
+            const retryResult = await videoAutomation.generateClip({
               startFramePath,
               startFrameGenId,
               multiShotPrompt: finalMultiShotPrompt,
               durationSeconds: effectiveDuration,
               outputPath,
               validElements: validElementNames,
+              aspectRatio: this.state.aspectRatio || '16:9',
               onGenClicked: (creditCost) => {
                 if (clipAsset) db.markAssetGenClicked(clipAsset.id, creditCost);
               },
@@ -8467,7 +8684,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[CINEMATIC] ✓ ${clipId} succeeded on retry`);
 
             // Approval gate after retry
-            if (i < allKlingClips.length - 1) {
+            if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
               this.log(`[CINEMATIC] Waiting for clip approval (retried): ${clipId}`);
               this.emit({
                 type: 'waiting',
@@ -8489,14 +8706,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
 
             // ── DOUBLE-TIMEOUT FINAL RECOVERY ──
-            // Both attempts timed out — videos may still be generating in Kling.
+            // Both attempts timed out — videos may still be generating.
             // Wait longer, then sweep more tiles with a slightly relaxed threshold.
             const isRetryTimeout = retryErr.message.includes('Timeout') || retryErr.message.includes('timeout');
             if (isRetryTimeout && finalMultiShotPrompt) {
               this.log(`[CINEMATIC] ${clipId}: double timeout — waiting 180s then final recovery sweep (6 tiles, 88%)...`);
               await new Promise(r => setTimeout(r, 180000)); // 3 minutes
               try {
-                const finalRecovered = await kling.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
+                const finalRecovered = await videoAutomation.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {
                   minSimilarity: 88,    // slightly relaxed — we know the video exists
                   maxTilesToCheck: 6,
                   timeoutMs: 90000,
@@ -8505,7 +8722,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                   this.log(`[CINEMATIC] ✓ ${clipId} RECOVERED on final sweep (similarity=${finalRecovered.similarity}%, uuid=${finalRecovered.assetUuid || 'unknown'})`);
                   if (clipAsset) {
                     db.markAssetDone(clipAsset.id, finalRecovered.path, {
-                      model: 'kling-3.0',
+                      model: videoModelName,
                       sourceGenId: finalRecovered.sourceGenId,
                       cdnUrl: finalRecovered.cdnUrl,
                     });
@@ -8518,7 +8735,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                   this.emit({ type: 'clip-complete', index: i, path: finalRecovered.path });
 
                   // Approval gate after final recovery
-                  if (i < allKlingClips.length - 1) {
+                  if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
                     this.log(`[CINEMATIC] Waiting for clip approval (final recovery): ${clipId}`);
                     this.emit({
                       type: 'waiting',
@@ -8599,7 +8816,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           const expectedPath = path.join(clipsDir, `${failedClipId}_cinematic.mp4`);
           if (fs.existsSync(expectedPath) && fs.statSync(expectedPath).size > 50000) {
             this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: file found on disk (${(fs.statSync(expectedPath).size / 1024 / 1024).toFixed(2)} MB) — marking done`);
-            db.markAssetDone(failedAsset.id, expectedPath, { model: 'kling-3.0' });
+            db.markAssetDone(failedAsset.id, expectedPath, { model: videoModelName });
             backfillSuccess++;
             continue;
           }
@@ -8619,38 +8836,41 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             await this.automation.recreateContext();
 
             const clipPath = path.join(clipsDir, `${failedClipId}_cinematic.mp4`);
-            const result = await this.klingAutomation.generateClip({
+            const result = await videoAutomation.generateClip({
               startFramePath: sfPath,
               startFrameGenId: item.startFrameGenId,
               multiShotPrompt: failedAsset.prompt ? JSON.parse(failedAsset.prompt).prompt || clipDef.multi_shot_prompt : clipDef.multi_shot_prompt,
-              durationSeconds: clipDef.duration_seconds || 10,
+              durationSeconds: cinematicVideoEngine === 'cinema-studio-3.5' ? 15 : (clipDef.duration_seconds || 10),
               outputPath: clipPath,
               validElements: clipDef.valid_elements || [],
+              aspectRatio: this.state.aspectRatio || '16:9',
             });
 
             db.markAssetDone(failedAsset.id, result.path, {
-              model: 'kling-3.0',
-              sourceGenId: result.generationId,
+              model: result.model || videoModelName,
+              sourceGenId: result.sourceGenId || result.generationId,
               cdnUrl: result.cdnUrl,
             });
             backfillSuccess++;
             this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: SUCCESS — ${(fs.statSync(result.path).size / 1024 / 1024).toFixed(2)} MB`);
 
-            // Show for approval
-            this.log(`[CINEMATIC] [BACKFILL] Waiting for clip approval: ${failedClipId}`);
-            this.emit({
-              type: 'waiting',
-              gate: 'clip-review',
-              clipId: failedClipId,
-              clipPath: result.path,
-              clipIndex: matchIdx,
-              clipTotal: allKlingClips.length,
-              clipLabel: `[BACKFILL] ${label}`,
-            });
-            const decision = await this.waitForApproval('clip-review');
-            if (decision === 'stop') {
-              this.log(`[CINEMATIC] [BACKFILL] User stopped after ${failedClipId}`);
-              break;
+            if (!this._autoApproveCinema35ClipReview) {
+              // Show for approval
+              this.log(`[CINEMATIC] [BACKFILL] Waiting for clip approval: ${failedClipId}`);
+              this.emit({
+                type: 'waiting',
+                gate: 'clip-review',
+                clipId: failedClipId,
+                clipPath: result.path,
+                clipIndex: matchIdx,
+                clipTotal: allKlingClips.length,
+                clipLabel: `[BACKFILL] ${label}`,
+              });
+              const decision = await this.waitForApproval('clip-review');
+              if (decision === 'stop') {
+                this.log(`[CINEMATIC] [BACKFILL] User stopped after ${failedClipId}`);
+                break;
+              }
             }
           } catch (backfillErr) {
             this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: retry failed — ${backfillErr.message}`, 'warn');
@@ -9156,6 +9376,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
       if (settings._cinematicElementNames && !this.state.cinematicElementNames) {
         this.state.cinematicElementNames = settings._cinematicElementNames;
+        this.state._cinematicMapsRestoredFromSettings = true;
         this.log(`[RESTORE] cinematicElementNames from DB settings (${Object.keys(settings._cinematicElementNames).length} entries)`);
       }
       if (settings._outfitElements && !this.state._outfitElements) {
@@ -9519,6 +9740,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   }
 
   waitForApproval(gate) {
+    if (gate === 'clip-review' && this._autoApproveCinema35ClipReview) {
+      if (!this._loggedCinema35VideoGateBypass) {
+        this.log('[CINEMATIC] TEMP: Cinema Studio 3.5 per-clip review gate disabled until Verify gate', 'warn');
+        this._loggedCinema35VideoGateBypass = true;
+      }
+      return Promise.resolve('continue');
+    }
+
     // Persist the pending gate to DB so it survives app restarts.
     // On resume, the pipeline checks for a pending gate and re-enters
     // the wait before continuing the stage.
@@ -10046,10 +10275,22 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this.log('Video clips approved');
   }
 
+  approveCinemaEligibilityFailed() {
+    if (this._approvalResolvers['cinema-eligibility-failed']) {
+      this._approvalResolvers['cinema-eligibility-failed']();
+      delete this._approvalResolvers['cinema-eligibility-failed'];
+    }
+    this.log('Cinema Studio eligibility issue resolved by operator');
+  }
+
+  _shouldSkipCinemaPromptPreview(videoEngine) {
+    return TEMP_SKIP_CINEMA35_PROMPT_PREVIEW && videoEngine === 'cinema-studio-3.5';
+  }
+
   /**
    * TEMPORARY — remove when full production starts.
    * Pre-generation prompt preview gate. User reads the final multi_shot_prompt
-   * and approves or stops before Kling burns credits.
+   * and approves or stops before cinematic video generation burns credits.
    * @param {'continue'|'stop'} decision
    */
   approvePromptPreview(decision = 'continue') {
@@ -10301,8 +10542,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     };
   }
 
-  async scoreSceneThumbnails() {
-    const project = this._getProjectForPublish(this._standalonePublishProjectId);
+  async scoreSceneThumbnails(projectId = null) {
+    const project = this._getProjectForPublish(projectId || this._standalonePublishProjectId);
     if (!project) return [];
     // Use hybrid DB+disk lookup for scene images
     const paths = this._getSceneImagePaths(project.id, project.project_dir);
@@ -10360,7 +10601,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   }
 
   async generateThumbnail(options = {}) {
-    const project = this._getProjectForPublish(this._standalonePublishProjectId);
+    const project = this._getProjectForPublish(options.projectId || this._standalonePublishProjectId);
     if (!project) return null;
 
     const projectDir = project.project_dir;
@@ -10514,8 +10755,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    * Get characters + suggested expression for the custom thumbnail picker.
    * Used by the renderer's "Custom close-up" mode.
    */
-  getPublishCharacters() {
-    const project = this._getProjectForPublish(this._standalonePublishProjectId);
+  getPublishCharacters(projectId = null) {
+    const project = this._getProjectForPublish(projectId || this._standalonePublishProjectId);
     if (!project) return { characters: [], suggestedExpression: 'intense determined' };
 
     const { ThumbnailGenerator } = require('../publish/thumbnailGenerator');
@@ -10525,9 +10766,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     if (!script) return { characters: [], suggestedExpression: 'intense determined' };
 
     const settings = project.settings ? JSON.parse(project.settings) : {};
-    const suffix = settings.element_name_suffix || null;
+    const activeProject = db.getActiveProject();
+    const canUseInMemoryMaps = activeProject && activeProject.id === project.id;
+    const characterOptions = {
+      elementSuffix: settings.element_name_suffix || null,
+      cinematicElementNames: settings._cinematicElementNames || (canUseInMemoryMaps ? this.state.cinematicElementNames : {}) || {},
+      outfitElements: settings._outfitElements || (canUseInMemoryMaps ? this.state._outfitElements : {}) || {},
+    };
 
-    const characters = thumbGen.getCharactersForThumbnail(script, suffix);
+    const characters = thumbGen.getCharactersForThumbnail(script, characterOptions);
     const suggestedExpression = thumbGen.suggestExpression(script);
 
     return { characters, suggestedExpression };
@@ -10537,7 +10784,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    * Generate custom close-up thumbnail (character portrait + title card composite).
    */
   async generateCustomThumbnail(options = {}) {
-    const project = this._getProjectForPublish(this._standalonePublishProjectId);
+    const project = this._getProjectForPublish(options.projectId || this._standalonePublishProjectId);
     if (!project) return null;
 
     const projectDir = project.project_dir;
@@ -10963,6 +11210,19 @@ REWRITTEN DESCRIPTION:`,
     this.state.status = 'running';
     const pid = this.state.project?.id;
     if (pid) db.logEvent(pid, 'resume', { stage: this.state.currentStage, detail: `Resumed in ${this.state.currentStage}` });
+
+    // Some operator-fix gates are intentionally surfaced as "fix the issue,
+    // then click Resume" in the renderer. They are approval waits, not pause
+    // waits, so the generic Resume button must resolve them explicitly.
+    const resumeResolvedGates = ['preflight-failed', 'credits-exhausted'];
+    for (const gate of resumeResolvedGates) {
+      if (this._approvalResolvers[gate]) {
+        this._approvalResolvers[gate]();
+        delete this._approvalResolvers[gate];
+        this.log(`Resume acknowledged "${gate}" gate`);
+      }
+    }
+
     if (this._pauseResolver) {
       this._pauseResolver();
       this._pauseResolver = null;
@@ -10999,4 +11259,3 @@ REWRITTEN DESCRIPTION:`,
 }
 
 module.exports = { PipelineOrchestrator, TIER_TEST, TIER_STANDARD, TIER_LONG_FORM, TIER_PRESTIGE, getDurationTier, DURATION_PRESETS, CINEMATIC_DURATION_PRESETS };
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
