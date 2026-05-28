@@ -2345,6 +2345,112 @@ class CinemaStudioAutomation {
     return match;
   }
 
+  async _inspectPromptMentionDom(expectedNames = [], context = 'prompt') {
+    const page = this._ensurePageAlive();
+    const names = [...new Set(expectedNames.map(n => this._normalizeElementOptionText(n)).filter(Boolean))];
+    return page.evaluate((expected) => {
+      const tb = document.querySelector('[role="textbox"][contenteditable="true"]');
+      if (!tb) return { ok: false, context: 'no-textbox' };
+
+      const normalize = (text) => String(text || '').trim().toLowerCase().replace(/^@+/, '');
+      const compact = (text, max = 240) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
+      const attr = (el, name) => el?.getAttribute?.(name) || '';
+      const rectOf = (el) => {
+        const r = el.getBoundingClientRect();
+        return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+      };
+      const pathOf = (node) => {
+        const parts = [];
+        let cur = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        while (cur && cur !== tb && parts.length < 6) {
+          parts.push({
+            tag: cur.tagName?.toLowerCase?.() || '',
+            role: attr(cur, 'role'),
+            className: compact(cur.className, 90),
+            contenteditable: attr(cur, 'contenteditable'),
+            text: compact(cur.textContent, 80),
+          });
+          cur = cur.parentElement;
+        }
+        return parts;
+      };
+      const looksLikeChip = (node) => {
+        let cur = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        while (cur && cur !== tb) {
+          const role = attr(cur, 'role').toLowerCase();
+          const cls = String(cur.className || '').toLowerCase();
+          const ce = attr(cur, 'contenteditable').toLowerCase();
+          const aria = attr(cur, 'aria-label').toLowerCase();
+          if (ce === 'false') return true;
+          if (/button|link|option/.test(role)) return true;
+          if (/mention|token|chip|pill|tag|element/.test(cls)) return true;
+          if (/mention|element|character/.test(aria)) return true;
+          cur = cur.parentElement;
+        }
+        return false;
+      };
+
+      const text = tb.textContent || '';
+      const html = tb.innerHTML || '';
+      const rawAtPattern = /@[a-z0-9][a-z0-9_-]*_[a-z0-9]+_\d{4}\b/gi;
+      const textNodes = [];
+      const walker = document.createTreeWalker(tb, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const value = node.nodeValue || '';
+        const rawMatches = value.match(rawAtPattern) || [];
+        const expectedMatches = expected.filter(name => normalize(value).includes(name));
+        if (rawMatches.length || expectedMatches.length) {
+          textNodes.push({
+            text: compact(value),
+            rawMatches,
+            expectedMatches,
+            chipLikeAncestor: looksLikeChip(node),
+            path: pathOf(node),
+          });
+        }
+      }
+
+      const candidateElements = [];
+      for (const el of tb.querySelectorAll('*')) {
+        const elText = normalize(el.textContent || '');
+        if (!expected.some(name => elText.includes(name))) continue;
+        const childWithSame = [...el.children].some(ch => expected.some(name => normalize(ch.textContent || '').includes(name)));
+        if (childWithSame) continue;
+        candidateElements.push({
+          tag: el.tagName.toLowerCase(),
+          role: attr(el, 'role'),
+          className: compact(el.className, 140),
+          ariaLabel: compact(attr(el, 'aria-label'), 140),
+          contenteditable: attr(el, 'contenteditable'),
+          text: compact(el.textContent, 140),
+          chipLike: looksLikeChip(el),
+          rect: rectOf(el),
+          html: compact(el.outerHTML, 300),
+        });
+      }
+
+      const byName = {};
+      for (const name of expected) {
+        byName[name] = {
+          rawTextNodes: textNodes.filter(n => n.rawMatches.some(m => normalize(m) === name) && !n.chipLikeAncestor).length,
+          chipLikeTextNodes: textNodes.filter(n => n.expectedMatches.includes(name) && n.chipLikeAncestor).length,
+          chipLikeElements: candidateElements.filter(e => normalize(e.text).includes(name) && e.chipLike).length,
+          candidateElements: candidateElements.filter(e => normalize(e.text).includes(name)).slice(0, 5),
+        };
+      }
+
+      return {
+        ok: true,
+        rawText: compact(text, 500),
+        rawAtMatches: [...new Set(text.match(rawAtPattern) || [])],
+        htmlSnippet: compact(html, 1000),
+        textNodes: textNodes.slice(0, 12),
+        byName,
+      };
+    }, names).then(result => ({ context, ...result })).catch(e => ({ context, ok: false, error: e.message }));
+  }
+
   async _attachLocationReference(locationImagePath) {
     const page = this._ensurePageAlive();
     await this._dismissOverlays();
@@ -3077,8 +3183,16 @@ class CinemaStudioAutomation {
           }
         }
         await page.waitForTimeout(1000); // post-selection settle — let Lexical update its state
+        const mentionDom = await this._inspectPromptMentionDom([cleanName], `after @${cleanName}`);
+        this.log(`[PROMPT-DOM] ${JSON.stringify(mentionDom).slice(0, 3000)}`);
       }
     }
+
+    const expectedMentions = [...new Set(segments
+      .filter(seg => seg && typeof seg === 'object' && seg.at)
+      .map(seg => seg.at.toLowerCase().replace(/^@+/, '')))];
+    const finalMentionDom = await this._inspectPromptMentionDom(expectedMentions, 'final prompt');
+    this.log(`[PROMPT-DOM] ${JSON.stringify(finalMentionDom).slice(0, 5000)}`);
 
     // Verify text was inserted
     const promptText = await page.evaluate(() => {
@@ -3086,6 +3200,10 @@ class CinemaStudioAutomation {
       return tb?.textContent?.trim() || '';
     }).catch(() => '');
     this.log(`Prompt text (${promptText.length} chars): "${promptText.slice(0, 80)}${promptText.length > 80 ? '...' : ''}"`);
+    const unresolvedRawMentions = [...new Set(promptText.match(/@[a-z0-9][a-z0-9_-]*_[a-z0-9]+_\d{4}\b/gi) || [])];
+    if (unresolvedRawMentions.length > 0) {
+      throw new Error(`[PRE-GEN] HARD GATE: Raw unresolved @element mention(s) remain in prompt text: ${unresolvedRawMentions.join(', ')}. No credits burned.`);
+    }
     if (promptText.length === 0) {
       throw new Error('[PRE-GEN] HARD GATE: Prompt textbox is EMPTY after typing — refusing to click GENERATE. No credits burned.');
     }
@@ -3389,11 +3507,11 @@ class CinemaStudioAutomation {
     }
     segments.push(closer);
 
-    // ── PRE-GENERATION GATE: auto-fix untagged character names in plain text segments ──
-    // Scans all string segments for bare character names (baseName and suffixedName
-    // variants) that aren't inside { at: name } objects. Instead of throwing, it
-    // splits the offending text segments into mixed text + { at: name } sequences
-    // so every character reference becomes a proper @element pill in the UI.
+    // ── PRE-GENERATION GATE: convert every character reference to @element segments ──
+    // Scans string segments for explicit @element references and bare character
+    // names. Instead of leaving them as raw prompt text, split them into mixed
+    // text + { at: name } sequences so every character reference becomes a
+    // proper Higgsfield element pill in the UI.
     {
       // Build name lookup: lowercase variant → canonical suffixed name
       const gateNames = {};
@@ -3411,18 +3529,21 @@ class CinemaStudioAutomation {
         if (typeof segments[si] !== 'string') continue; // skip { at: name } objects
         let text = segments[si];
 
-        // Check if this text segment contains any bare character names
-        let hasBare = false;
+        // Check if this text segment contains explicit @mentions or bare names.
+        let hasCharacterReference = false;
         for (const nv of sortedGateNames) {
           const esc = nv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          if (new RegExp(`(?<!@)\\b${esc}\\b`, 'gi').test(text)) {
-            hasBare = true;
+          if (
+            new RegExp(`@${esc}\\b`, 'gi').test(text) ||
+            new RegExp(`(?<!@)\\b${esc}\\b`, 'gi').test(text)
+          ) {
+            hasCharacterReference = true;
             break;
           }
         }
-        if (!hasBare) continue;
+        if (!hasCharacterReference) continue;
 
-        // Replace bare names with @@MARKER@@ delimiters, then split
+        // Replace explicit @mentions and bare names with @@MARKER@@ delimiters, then split.
         for (const nv of sortedGateNames) {
           const esc = nv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           // Handle possessives: "adanna's" → @@name@@'s
@@ -3448,7 +3569,7 @@ class CinemaStudioAutomation {
       }
 
       if (fixCount > 0) {
-        this.log(`[PRE-GEN GATE] AUTO-FIXED ${fixCount} untagged character name(s) → converted to @element segments`);
+        this.log(`[PRE-GEN GATE] AUTO-FIXED ${fixCount} character reference(s) → converted to @element segments`);
         this.log(`[PRE-GEN GATE] Fixed segments: ${JSON.stringify(segments, null, 2).substring(0, 2000)}`);
       } else {
         this.log(`[PRE-GEN GATE] PASSED — all character names already properly tagged`);
