@@ -12,7 +12,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { KlingAutomation } = require('./kling-automation');
+const { KlingAutomation, parsePromptSegments } = require('./kling-automation');
+
+const ELEMENT_ELIGIBILITY_CACHE_VERSION = 2;
 
 class CinemaEligibilityError extends Error {
   constructor(message, failedAssets = []) {
@@ -48,6 +50,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       const record = rawValue && typeof rawValue === 'object' ? rawValue : { status: rawValue };
       const status = String(record.status || '').toLowerCase();
       if (status !== 'eligible' && status !== 'not-eligible') continue;
+      if (record.version !== ELEMENT_ELIGIBILITY_CACHE_VERSION) continue;
       const key = rawKey.includes('::') ? rawKey : this._elementEligibilityCacheKey(rawKey);
       this._elementEligibilityCache.set(key, status);
       this._elementEligibilityProof.set(key, record);
@@ -68,6 +71,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       checkedAt: new Date().toISOString(),
       projectId: this._projectId || null,
       name: normalized,
+      version: ELEMENT_ELIGIBILITY_CACHE_VERSION,
       ...proof,
     };
     this._elementEligibilityCache.set(key, finalStatus);
@@ -131,6 +135,161 @@ class CinemaVideoAutomation extends KlingAutomation {
       await this._setGenerateSafetyLock(false).catch(() => {});
       throw err;
     }
+  }
+
+  async _typeMultiShotPrompt(promptText, validElements) {
+    const page = this.automation.page;
+    const textbox = page.locator('[role="textbox"]').first();
+    const tbVisible = await textbox.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!tbVisible) throw new Error('Prompt textbox (role="textbox") not found on page');
+
+    await textbox.click();
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Delete');
+    await page.waitForTimeout(200);
+
+    const validSet = new Set([...(validElements || [])].map(name => String(name || '').toLowerCase().replace(/^@/, '')));
+    const expectedMentionCounts = new Map();
+    const segments = parsePromptSegments(promptText);
+
+    for (const seg of segments) {
+      if (typeof seg === 'string') {
+        await page.keyboard.type(seg);
+        continue;
+      }
+      if (!seg || !seg.at) continue;
+
+      const name = String(seg.at || '').toLowerCase().replace(/^@+/, '');
+      if (validElements && !validSet.has(name)) {
+        this.log(`Skipping @-autocomplete for "${name}" — not a valid element, typing as plain text`);
+        await page.keyboard.type(name);
+        continue;
+      }
+
+      const lastChar = await page.evaluate(() => {
+        const tb = document.querySelector('[role="textbox"]');
+        const text = tb ? (tb.innerText || tb.textContent || '') : '';
+        return text.slice(-1);
+      }).catch(() => '');
+      if (lastChar && lastChar !== ' ' && lastChar !== '\n') {
+        await page.keyboard.type(' ');
+        await page.waitForTimeout(50);
+      }
+
+      this.log(`[PROMPT] Typing strict @mention: "@${name}"`);
+      await page.keyboard.type('@', { delay: 0 });
+      await page.waitForTimeout(500);
+      await page.keyboard.type(name, { delay: 85 });
+      await page.waitForTimeout(1700);
+
+      const selected = await this._selectExactMentionOption(name);
+      if (!selected.ok) {
+        throw new Error(`[PRE-GEN] HARD GATE: Exact @mention option not found for @${name}. Options: ${JSON.stringify(selected.options || [])}`);
+      }
+      this.log(`[PROMPT] Strict @mention selected: @${name} → "${selected.text}"`);
+      expectedMentionCounts.set(name, (expectedMentionCounts.get(name) || 0) + 1);
+
+      const audit = await this._auditPromptMentionChips(expectedMentionCounts);
+      if (!audit.ok) {
+        throw new Error(`[PRE-GEN] HARD GATE: @mention chip audit failed after @${name}: ${audit.reason}`);
+      }
+    }
+
+    const finalAudit = await this._auditPromptMentionChips(expectedMentionCounts);
+    if (!finalAudit.ok) {
+      throw new Error(`[PRE-GEN] HARD GATE: final @mention chip audit failed: ${finalAudit.reason}`);
+    }
+  }
+
+  async _selectExactMentionOption(name) {
+    const page = this.automation.page;
+    const target = String(name || '').toLowerCase().replace(/^@/, '');
+    const state = await page.evaluate((targetName) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const optionNodes = [
+        ...document.querySelectorAll('[role="option"]'),
+        ...document.querySelectorAll('[role="listbox"] *'),
+        ...document.querySelectorAll('[class*="dropdown"] *, [class*="autocomplete"] *, [class*="mention"] *'),
+      ];
+      const seen = new Set();
+      const options = [];
+      for (const el of optionNodes) {
+        if (!visible(el)) continue;
+        const text = clean(el.innerText || el.textContent || '');
+        if (!text || seen.has(el)) continue;
+        seen.add(el);
+        const normalized = normalize(text);
+        if (!/[a-z0-9_]/i.test(normalized)) continue;
+        const r = el.getBoundingClientRect();
+        options.push({
+          text,
+          normalized,
+          x: Math.round(r.x + r.width / 2),
+          y: Math.round(r.y + r.height / 2),
+          area: Math.round(r.width * r.height),
+        });
+      }
+      const exact = options
+        .filter(o => o.normalized === targetName || o.normalized.split(/\s+/).includes(targetName))
+        .sort((a, b) => a.area - b.area)[0];
+      return {
+        ok: !!exact,
+        exact,
+        options: options.slice(0, 12).map(o => o.normalized),
+      };
+    }, target).catch(err => ({ ok: false, options: [`eval-error: ${err.message}`] }));
+
+    if (!state.ok || !state.exact) return state;
+    await page.mouse.click(state.exact.x, state.exact.y);
+    await page.waitForTimeout(500);
+    return { ok: true, text: state.exact.text, options: state.options };
+  }
+
+  async _auditPromptMentionChips(expectedCounts) {
+    const page = this.automation.page;
+    const expected = Object.fromEntries([...expectedCounts.entries()]);
+    return page.evaluate((expectedByName) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const expectedNames = new Set(Object.keys(expectedByName));
+      const chipTexts = [];
+      const seenNodes = new Set();
+      const root = document.querySelector('[role="textbox"]') || document;
+      const primary = [...root.querySelectorAll('[data-beautiful-mention]')];
+      const fallback = [...root.querySelectorAll('[contenteditable="false"]')]
+        .filter(el => /[a-z0-9_]/i.test(clean(el.innerText || el.textContent || '')));
+      for (const el of [...primary, ...fallback]) {
+        const chipRoot = el.closest('[data-beautiful-mention]') || el.closest('[contenteditable="false"]') || el;
+        if (seenNodes.has(chipRoot)) continue;
+        seenNodes.add(chipRoot);
+        const text = clean(chipRoot.innerText || chipRoot.textContent || '').toLowerCase().replace(/^@/, '');
+        if (!text || !/[a-z0-9_]/.test(text)) continue;
+        chipTexts.push(text);
+      }
+      const counts = {};
+      for (const text of chipTexts) {
+        if (expectedNames.has(text)) counts[text] = (counts[text] || 0) + 1;
+      }
+      const unexpected = chipTexts.filter(text => !expectedNames.has(text));
+      if (unexpected.length > 0) {
+        return { ok: false, reason: `unexpected mention chip(s): ${unexpected.join(', ')}` };
+      }
+      const missing = [];
+      for (const [name, expectedCount] of Object.entries(expectedByName)) {
+        if ((counts[name] || 0) < expectedCount) {
+          missing.push(`${name} expected ${expectedCount}, found ${counts[name] || 0}`);
+        }
+      }
+      if (missing.length > 0) return { ok: false, reason: `missing mention chip(s): ${missing.join('; ')}` };
+      return { ok: true, chips: chipTexts };
+    }, expected).catch(err => ({ ok: false, reason: err.message }));
   }
 
   async _setGenerateSafetyLock(locked) {
@@ -1555,6 +1714,23 @@ class CinemaVideoAutomation extends KlingAutomation {
       const outfitIndex = parts.findIndex(part => /^o\d+$/i.test(part));
       const matchPrefix = outfitIndex >= 2 ? parts.slice(0, outfitIndex + 1).join('_') : target;
       const normalize = (value) => String(value || '').toLowerCase().replace(/^@/, '').trim();
+      const nameTokens = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) {
+          tokens.push(normalize(match[1]));
+        }
+        return tokens;
+      };
+      const tokenMatchesTarget = (token) => {
+        if (!token) return false;
+        if (token === target) return true;
+        // Truncated UI labels commonly end in "..."; allow a target prefix
+        // only when the rendered token itself is the beginning of the target.
+        if (token.endsWith('...')) return target.startsWith(token.replace(/\.+$/g, ''));
+        return false;
+      };
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1570,16 +1746,9 @@ class CinemaVideoAutomation extends KlingAutomation {
         const lower = text.toLowerCase();
         const r = el.getBoundingClientRect();
         if (r.width < 80 || r.width > 260 || r.height < 80 || r.height > 280) continue;
-        const matchesTarget = lower.includes(`@${target}`)
-          || lower.includes(target)
-          || lower.includes(`@${matchPrefix}`)
-          || lower.includes(matchPrefix);
-        if (!matchesTarget) continue;
-        const nameMatch = text.match(/@[a-z0-9_.-]+/i);
-        if (nameMatch) {
-          const normalizedName = normalize(nameMatch[0]);
-          if (normalizedName !== target && !normalizedName.startsWith(matchPrefix)) continue;
-        }
+        const tokens = nameTokens(text);
+        const exactToken = tokens.find(tokenMatchesTarget);
+        if (!exactToken) continue;
         const checkBtn = [...el.querySelectorAll('button, div, span')]
           .filter(visible)
           .find(child => /check eligibility/i.test(textOf(child)));
@@ -1595,7 +1764,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           text,
           checkX: Math.round(cr.x + cr.width / 2),
           checkY: Math.round(cr.y + cr.height / 2),
-          name: nameMatch ? nameMatch[0] : `@${target}`,
+          name: `@${exactToken}`,
           target,
           matchPrefix,
           status: statusText,
@@ -1605,7 +1774,6 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
       cards.sort((a, b) => {
         if (a.hasCharacterLabel !== b.hasCharacterLabel) return a.hasCharacterLabel ? -1 : 1;
-        if (a.name !== b.name) return a.name.localeCompare(b.name);
         return b.area - a.area || a.y - b.y || a.x - b.x;
       });
       return cards[0] || null;
@@ -1690,8 +1858,16 @@ class CinemaVideoAutomation extends KlingAutomation {
     const page = this.automation.page;
     return page.evaluate(({ name, target, matchPrefix }) => {
       const fullTarget = String(target || name || '').toLowerCase().replace(/^@/, '');
-      const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
+      const tokensOf = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
+        return tokens;
+      };
+      const exactNameIn = (text) => tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1704,8 +1880,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         .map(el => {
           const r = el.getBoundingClientRect();
           const text = textOf(el);
-          const lower = text.toLowerCase();
-          const matchesTarget = lower.includes(fullTarget) || (prefix && lower.includes(prefix));
+          const matchesTarget = exactNameIn(text);
           return { el, r, text, matchesTarget };
         })
         .filter(o => o.matchesTarget && o.r.width >= 80 && o.r.width <= 280 && o.r.height >= 70 && o.r.height <= 320)
@@ -1752,8 +1927,16 @@ class CinemaVideoAutomation extends KlingAutomation {
 
     const domClicked = await page.evaluate(({ name, target, matchPrefix }) => {
       const fullTarget = String(target || name || '').toLowerCase().replace(/^@/, '');
-      const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
+      const tokensOf = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
+        return tokens;
+      };
+      const exactNameIn = (text) => tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1765,9 +1948,8 @@ class CinemaVideoAutomation extends KlingAutomation {
         .filter(visible)
         .filter(el => {
           const r = el.getBoundingClientRect();
-          const lower = textOf(el).toLowerCase();
           return r.width >= 80 && r.width <= 280 && r.height >= 70 && r.height <= 320
-            && (lower.includes(fullTarget) || (prefix && lower.includes(prefix)));
+            && exactNameIn(textOf(el));
         });
       for (const cardEl of cards) {
         const button = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
@@ -1832,8 +2014,16 @@ class CinemaVideoAutomation extends KlingAutomation {
     return page.evaluate(({ x, y, checkX, checkY, name, target, matchPrefix, status: fallbackStatus, allowFallback }) => {
       const cardName = String(name || '').toLowerCase().replace(/^@/, '');
       const fullTarget = String(target || cardName || '').toLowerCase().replace(/^@/, '');
-      const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
       const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/^@/, '');
+      const tokensOf = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
+        return tokens;
+      };
+      const exactNameIn = (text) => !fullTarget || tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
       const pointEls = [
         document.elementFromPoint(x, y),
         checkX && checkY ? document.elementFromPoint(checkX, checkY) : null,
@@ -1843,9 +2033,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         for (let node = pointEl; node; node = node.parentElement) {
           const r = node.getBoundingClientRect();
           const text = textOf(node);
-          const lower = text.toLowerCase();
-          const matchesTarget = !fullTarget || lower.includes(`@${fullTarget}`) || lower.includes(fullTarget)
-            || (prefix && (lower.includes(`@${prefix}`) || lower.includes(prefix)));
+          const matchesTarget = exactNameIn(text);
           if (
             r.width >= 80 && r.width <= 260
             && r.height >= 50 && r.height <= 280
@@ -1862,11 +2050,10 @@ class CinemaVideoAutomation extends KlingAutomation {
         const matches = [...document.querySelectorAll('figure, [role="button"], button, div')].filter(node => {
           const r = node.getBoundingClientRect();
           const text = textOf(node);
-          const lower = text.toLowerCase();
           return r.width >= 80 && r.width <= 260
             && r.height >= 50 && r.height <= 280
             && r.top < innerHeight && r.bottom > 0
-            && (lower.includes(fullTarget) || (prefix && lower.includes(prefix)))
+            && exactNameIn(text)
             && /eligible|eligibility|checking/i.test(text);
         });
         cardEl = matches[0] || pointEls[0];
@@ -1888,8 +2075,16 @@ class CinemaVideoAutomation extends KlingAutomation {
     if (card) await this._hoverPoint(card, 900).catch(() => {});
     return page.evaluate((arg) => {
       const target = String(arg?.target || arg?.name || arg || '').toLowerCase().replace(/^@/, '');
-      const prefix = String(arg?.matchPrefix || '').toLowerCase().replace(/^@/, '');
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
+      const tokensOf = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
+        return tokens;
+      };
+      const exactNameIn = (text) => !target || tokensOf(text).some(token => token === target || (token.endsWith('...') && target.startsWith(token.replace(/\.+$/g, ''))));
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1901,8 +2096,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         .map(el => {
           const r = el.getBoundingClientRect();
           const text = clean(el.innerText || el.textContent || '');
-          const lower = text.toLowerCase();
-          const matches = !target || lower.includes(target) || (prefix && lower.includes(prefix));
+          const matches = exactNameIn(text);
           const status = /not eligible/i.test(text) ? 'not-eligible'
             : /checking content|checking/i.test(text) ? 'checking'
               : /check eligibility/i.test(text) ? 'check'
