@@ -39,7 +39,7 @@ const KLING_CREDITS_PER_CLIP = 11;   // ~11 credits per Kling multi-shot clip
 const KLING_CREDITS_PER_SCENE = 2;   // ~2 credits per scene image (Nano Banana Pro)
 const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
 const TEMP_SKIP_CINEMA35_PROMPT_PREVIEW = true;
-const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = true;
+const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = false;
 
 /**
  * Duration presets. Each defines the target and matching story structures.
@@ -4156,12 +4156,53 @@ class PipelineOrchestrator {
       });
     }
 
+    const slugFromLabel = (label, fallback) => {
+      const primary = String(label || '').split(/[—-]/)[0] || fallback || '';
+      const tokens = primary.toLowerCase()
+        .replace(/^(the|a|an)\s+/i, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 3);
+      return tokens.join('_') || fallback || '';
+    };
+    const hasElementNameSubstringCollision = (item, all) =>
+      all.some(other => other !== item && String(other.name || '').includes(String(item.name || '')));
+    for (const item of pending) {
+      if (!hasElementNameSubstringCollision(item, pending)) continue;
+      const originalName = item.name;
+      const originalBase = item.baseName;
+      let candidateBase = slugFromLabel(item.char?.description_label, originalBase);
+      if (!candidateBase || candidateBase === originalBase) candidateBase = `${originalBase}_${String(item.char?.id || item.unitKey || 'char').replace(/^character_/, 'c')}`;
+      candidateBase = candidateBase.replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '');
+      let candidateName = item.outfitId
+        ? `${candidateBase}_${item.outfitId}_${elementSuffix}`
+        : `${candidateBase}_${elementSuffix}`;
+      let n = 2;
+      while (pending.some(other => other !== item && (String(other.name || '').includes(candidateName) || candidateName.includes(String(other.name || ''))))) {
+        const disambiguatedBase = `${candidateBase}_${n++}`;
+        candidateName = item.outfitId
+          ? `${disambiguatedBase}_${item.outfitId}_${elementSuffix}`
+          : `${disambiguatedBase}_${elementSuffix}`;
+      }
+      item.baseName = candidateBase;
+      item.name = candidateName;
+      item.aliasBaseName = originalBase;
+      item.aliasElementName = originalName;
+      this.log(`[CINEMATIC] Element name collision avoided: @${originalName} → @${candidateName} (base @${originalBase} → @${candidateBase})`);
+    }
+
     // Verify: cross-check that blocking text @mentions match derived element base names
     // Note: blocking uses bare @baseName (e.g. @claire_obi) — the orchestrator resolves
     // to the outfit-specific element at prompt-transform time. So we check that every
     // blocking @mention has at least one element with that baseName prefix.
     const elementNames = new Set(pending.map(p => p.name));
     const elementBaseNames = new Set(pending.map(p => p.baseName));
+    const elementAliasNames = new Set(pending.flatMap(p => [
+      p.char?.element_name_hint,
+      String(p.char?.element_name_hint || '').replace(/^@/, ''),
+    ].filter(Boolean).map(n => String(n).toLowerCase().replace(/^@/, ''))));
     const blockingMentions = new Set();
     for (const ch of script.chapters || []) {
       for (const sc of ch.scenes || []) {
@@ -4175,7 +4216,7 @@ class PipelineOrchestrator {
     }
     // A blocking @mention is valid if it matches either a full element name OR a baseName
     const unmatchedMentions = [...blockingMentions].filter(m =>
-      !elementNames.has(m) && !elementBaseNames.has(m)
+      !elementNames.has(m) && !elementBaseNames.has(m) && !elementAliasNames.has(m)
     );
     if (unmatchedMentions.length > 0) {
       this.log(`[CINEMATIC] WARN: blocking text has @mentions not matching any element: ${unmatchedMentions.map(m => '@' + m).join(', ')}. Available base names: ${[...elementBaseNames].map(n => '@' + n).join(', ')}`, 'warn');
@@ -4529,6 +4570,14 @@ class PipelineOrchestrator {
           acc[p.baseName] = p.name;                  // "son_emeka" → o1 element
           acc[`@${p.baseName}`] = p.name;            // "@son_emeka" → o1 element
         }
+        if (p.aliasBaseName) {
+          acc[p.aliasBaseName] = p.name;             // original hint alias → renamed o1 element
+          acc[`@${p.aliasBaseName}`] = p.name;
+        }
+        if (p.aliasElementName) {
+          acc[p.aliasElementName] = p.name;          // old full element name → renamed element
+          acc[`@${p.aliasElementName}`] = p.name;
+        }
         // description_label slug for any other lookups
         if (p.char.description_label) {
           const labelSlug = p.char.description_label
@@ -4549,6 +4598,10 @@ class PipelineOrchestrator {
       if (!acc[p.baseName]) acc[p.baseName] = {};
       const oid = p.outfitId || 'o1';
       acc[p.baseName][oid] = p.name;
+      if (p.aliasBaseName) {
+        if (!acc[p.aliasBaseName]) acc[p.aliasBaseName] = {};
+        acc[p.aliasBaseName][oid] = p.name;
+      }
       // Also index by char.id for legacy lookups
       if (!acc[p.char.id]) acc[p.char.id] = {};
       acc[p.char.id][oid] = p.name;
@@ -7580,6 +7633,52 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     let skipped = 0;
     let failed = 0;
     let dialogueSkipped = 0;
+    const MIN_LOCAL_VIDEO_BYTES = 50_000;
+    const getSafeLocalClip = ({ clipId, clipPath, clipAsset }) => {
+      if (cinematicVideoEngine !== 'cinema-studio-3.5') return { ok: false, reason: 'not-cinema-studio-3.5' };
+      if (!clipPath) return { ok: false, reason: 'missing clip path' };
+      let stat;
+      try {
+        stat = fs.statSync(clipPath);
+      } catch (_) {
+        return { ok: false, reason: 'local file missing' };
+      }
+      if (!stat.isFile() || stat.size <= MIN_LOCAL_VIDEO_BYTES) {
+        return { ok: false, reason: `local file too small (${stat.size || 0} bytes)` };
+      }
+      const freshAsset = db.getAssets(projectId, { type: 'video_clip_cinematic' })
+        .find(a => (clipAsset?.id && a.id === clipAsset.id) || (clipId && a.kling_clip_id === clipId));
+      if (!freshAsset || freshAsset.status !== 'done' || freshAsset.file_path !== clipPath) {
+        return { ok: false, reason: `DB asset not persisted done for ${clipId || 'clip'}` };
+      }
+      return { ok: true, size: stat.size };
+    };
+    const runClipReviewIfNeeded = async ({ clipId, clipPath, clipIndex, clipLabel, clipAsset, context = '' }) => {
+      if (clipIndex >= allKlingClips.length - 1) return 'continue';
+      const safeLocal = getSafeLocalClip({ clipId, clipPath, clipAsset });
+      if (safeLocal.ok) {
+        this.log(`[CINEMATIC] Auto-approved clip review${context ? ` (${context})` : ''}: ${clipId} — local file persisted (${(safeLocal.size / 1024 / 1024).toFixed(2)} MB)`);
+        return 'continue';
+      }
+
+      this.log(`[CINEMATIC] Waiting for clip approval${context ? ` (${context})` : ''}: ${clipId} — auto-approve blocked: ${safeLocal.reason}`);
+      this.emit({
+        type: 'waiting',
+        gate: 'clip-review',
+        clipId,
+        clipPath,
+        clipIndex,
+        clipTotal: allKlingClips.length,
+        clipLabel,
+      });
+      const decision = await this.waitForApproval('clip-review');
+      if (decision === 'stop') {
+        this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
+        return 'stop';
+      }
+      this.log(`[CINEMATIC] Clip ${clipId} approved — continuing to next`);
+      return 'continue';
+    };
     const clipGenStartTime = Date.now();
 
     // ── LAZY VISION VERIFICATION CACHE ──
@@ -7849,24 +7948,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             });
             this.emit({ type: 'clip-complete', index: i, path: recovered.path });
 
-            // Approval gate after recovery
-            if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
-              this.log(`[CINEMATIC] Waiting for clip approval (recovered): ${clipId}`);
-              this.emit({
-                type: 'waiting',
-                gate: 'clip-review',
-                clipId,
-                clipPath: recovered.path,
-                clipIndex: i,
-                clipTotal: allKlingClips.length,
-                clipLabel: label,
-              });
-              const decision = await this.waitForApproval('clip-review');
-              if (decision === 'stop') {
-                this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
-                break;
-              }
-            }
+            const recoveryReview = await runClipReviewIfNeeded({
+              clipId,
+              clipPath: recovered.path,
+              clipIndex: i,
+              clipLabel: label,
+              clipAsset: clipAssetForRecovery,
+              context: 'recovered',
+            });
+            if (recoveryReview === 'stop') break;
             continue;
           } else {
             this.log(`[CINEMATIC] ${clipId}: recovery found no match — will re-generate (credits may be wasted)`);
@@ -8461,28 +8551,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         });
         this.emit({ type: 'clip-complete', index: i, path: result.path });
 
-        // ── PER-CLIP APPROVAL GATE (credit-saving measure) ──
-        // Pause after each clip so the user can watch it and verify the
-        // prompt structure before burning credits on the next one.
-        // The gate auto-skips if this is the last clip (nothing to gate).
-        if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
-          this.log(`[CINEMATIC] Waiting for clip approval: ${clipId} (${generated}/${allKlingClips.length - skipped})`);
-          this.emit({
-            type: 'waiting',
-            gate: 'clip-review',
-            clipId,
-            clipPath: result.path,
-            clipIndex: i,
-            clipTotal: allKlingClips.length,
-            clipLabel: label,
-          });
-          const decision = await this.waitForApproval('clip-review');
-          if (decision === 'stop') {
-            this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
-            break;
-          }
-          this.log(`[CINEMATIC] Clip ${clipId} approved — continuing to next`);
-        }
+        const reviewDecision = await runClipReviewIfNeeded({
+          clipId,
+          clipPath: result.path,
+          clipIndex: i,
+          clipLabel: label,
+          clipAsset,
+        });
+        if (reviewDecision === 'stop') break;
       } catch (e) {
         this.log(`[CINEMATIC] ${clipId} failed: ${e.message}`, 'warn');
 
@@ -8576,25 +8652,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               });
               this.emit({ type: 'clip-complete', index: i, path: recovered.path });
 
-              // ── PER-CLIP APPROVAL GATE after recovery too ──
-              // TEMPORARY — remove when full production starts.
-              if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
-                this.log(`[CINEMATIC] Waiting for clip approval (recovered): ${clipId}`);
-                this.emit({
-                  type: 'waiting',
-                  gate: 'clip-review',
-                  clipId,
-                  clipPath: recovered.path,
-                  clipIndex: i,
-                  clipTotal: allKlingClips.length,
-                  clipLabel: label,
-                });
-                const decision = await this.waitForApproval('clip-review');
-                if (decision === 'stop') {
-                  this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
-                  break;
-                }
-              }
+              const recoveryReview = await runClipReviewIfNeeded({
+                clipId,
+                clipPath: recovered.path,
+                clipIndex: i,
+                clipLabel: label,
+                clipAsset,
+                context: 'recovered',
+              });
+              if (recoveryReview === 'stop') break;
               continue; // skip the failure path — clip is done
             } else {
               // ── SECOND RECOVERY ATTEMPT ──
@@ -8624,23 +8690,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                 });
                 this.emit({ type: 'clip-complete', index: i, path: recovered2.path });
 
-                if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
-                  this.log(`[CINEMATIC] Waiting for clip approval (2nd recovery): ${clipId}`);
-                  this.emit({
-                    type: 'waiting',
-                    gate: 'clip-review',
-                    clipId,
-                    clipPath: recovered2.path,
-                    clipIndex: i,
-                    clipTotal: allKlingClips.length,
-                    clipLabel: label,
-                  });
-                  const decision = await this.waitForApproval('clip-review');
-                  if (decision === 'stop') {
-                    this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
-                    break;
-                  }
-                }
+                const recoveryReview = await runClipReviewIfNeeded({
+                  clipId,
+                  clipPath: recovered2.path,
+                  clipIndex: i,
+                  clipLabel: label,
+                  clipAsset,
+                  context: '2nd recovery',
+                });
+                if (recoveryReview === 'stop') break;
                 continue; // second recovery succeeded
               } else {
                 this.log(`[CINEMATIC] ${clipId}: second recovery also found no match — will re-generate`);
@@ -8661,8 +8719,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           // is the only safe move — retrying will hit the same 4K setting.
           // User must fix resolution in the Higgsfield UI, then resume.
           const isCostInflation = e.message.includes('Credit cost inflated');
-          if (isCostInflation) {
-            this.log(`[CINEMATIC] ${clipId}: CREDIT COST INFLATED — pausing pipeline. Fix resolution in ${videoEngineLabel} UI, then resume.`, 'error');
+          const isCinemaCreditGateFailure = cinematicVideoEngine === 'cinema-studio-3.5' && (
+            e.message.includes('Generate button has no credit cost') ||
+            e.message.includes('Generate click was not confirmed') ||
+            e.message.includes('credit history') ||
+            e.message.includes('credit ledger')
+          );
+          if (isCostInflation || isCinemaCreditGateFailure) {
+            const pauseReason = isCostInflation ? 'cost-inflation' : 'cinema-credit-confirmation';
+            this.log(`[CINEMATIC] ${clipId}: ${isCostInflation ? 'CREDIT COST INFLATED' : 'CINEMA CREDIT/GENERATE CONFIRMATION FAILED'} — pausing pipeline before any next clip. Fix/check ${videoEngineLabel} UI, then resume.`, 'error');
             if (clipAsset) db.markAssetFailed(clipAsset.id, e.message);
             // Reset to pending so resume picks it up
             if (clipAsset) {
@@ -8676,7 +8741,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             // Pause — user resumes after fixing resolution
             this.paused = true;
             this.state.status = 'paused';
-            this.emit({ type: 'paused', reason: 'cost-inflation' });
+            this.emit({ type: 'paused', reason: pauseReason });
             this.log('[CINEMATIC] Pipeline paused — waiting for resume...');
             await this.checkPause();
             if (this.cancelled) return;
@@ -8701,9 +8766,13 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               db.markAssetGenerating(clipAsset.id, JSON.stringify(retryPayload));
             }
 
-            // Fresh browser context for clean slate
-            this.log(`[CINEMATIC] Recreating browser context for ${clipId} retry...`);
-            try { await this.automation.recreateContext(); } catch (_) {}
+            if (isPreGen && cinematicVideoEngine !== 'cinema-studio-3.5') {
+              this.log(`[CINEMATIC] ${clipId}: retrying pre-gen failure in existing context (no browser reset)`);
+            } else {
+              // Cinema Studio and browser-dead/post-click retry paths need a clean page.
+              this.log(`[CINEMATIC] Recreating browser context for ${clipId} retry...`);
+              try { await this.automation.recreateContext(); } catch (_) {}
+            }
 
             const retryResult = await videoAutomation.generateClip({
               startFramePath,
@@ -8733,24 +8802,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.emit({ type: 'clip-complete', index: i, path: retryResult.path });
             this.log(`[CINEMATIC] ✓ ${clipId} succeeded on retry`);
 
-            // Approval gate after retry
-            if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
-              this.log(`[CINEMATIC] Waiting for clip approval (retried): ${clipId}`);
-              this.emit({
-                type: 'waiting',
-                gate: 'clip-review',
-                clipId,
-                clipPath: retryResult.path,
-                clipIndex: i,
-                clipTotal: allKlingClips.length,
-                clipLabel: label,
-              });
-              const decision = await this.waitForApproval('clip-review');
-              if (decision === 'stop') {
-                this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
-                break;
-              }
-            }
+            const retryReview = await runClipReviewIfNeeded({
+              clipId,
+              clipPath: retryResult.path,
+              clipIndex: i,
+              clipLabel: label,
+              clipAsset,
+              context: 'retried',
+            });
+            if (retryReview === 'stop') break;
             continue; // retry succeeded — skip failure path
           } catch (retryErr) {
             this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
@@ -8784,24 +8844,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                   });
                   this.emit({ type: 'clip-complete', index: i, path: finalRecovered.path });
 
-                  // Approval gate after final recovery
-                  if (i < allKlingClips.length - 1 && !this._autoApproveCinema35ClipReview) {
-                    this.log(`[CINEMATIC] Waiting for clip approval (final recovery): ${clipId}`);
-                    this.emit({
-                      type: 'waiting',
-                      gate: 'clip-review',
-                      clipId,
-                      clipPath: finalRecovered.path,
-                      clipIndex: i,
-                      clipTotal: allKlingClips.length,
-                      clipLabel: label,
-                    });
-                    const decision = await this.waitForApproval('clip-review');
-                    if (decision === 'stop') {
-                      this.log(`[CINEMATIC] User stopped after ${clipId} — skipping remaining clips`);
-                      break;
-                    }
-                  }
+                  const finalRecoveryReview = await runClipReviewIfNeeded({
+                    clipId,
+                    clipPath: finalRecovered.path,
+                    clipIndex: i,
+                    clipLabel: label,
+                    clipAsset,
+                    context: 'final recovery',
+                  });
+                  if (finalRecoveryReview === 'stop') break;
                   continue; // final recovery succeeded
                 } else {
                   this.log(`[CINEMATIC] ${clipId}: final recovery sweep found no match — marking failed`);
@@ -8814,6 +8865,26 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               }
             }
           }
+        }
+
+        if (cinematicVideoEngine === 'cinema-studio-3.5') {
+          this.log(`[CINEMATIC] ${clipId}: Cinema Studio 3.5 clip failed after retry — pausing instead of advancing to the next clip`, 'error');
+          if (clipAsset) {
+            db.markAssetFailed(clipAsset.id, e.message);
+            db.resetAsset(clipAsset.id);
+          }
+          this.paused = true;
+          this.state.status = 'paused';
+          this.emit({
+            type: 'paused',
+            reason: 'cinema-clip-failed',
+            clipId,
+            message: e.message,
+          });
+          await this.checkPause();
+          if (this.cancelled) return;
+          i--;
+          continue;
         }
 
         if (clipAsset) db.markAssetFailed(clipAsset.id, e.message);
@@ -8904,24 +8975,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             backfillSuccess++;
             this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: SUCCESS — ${(fs.statSync(result.path).size / 1024 / 1024).toFixed(2)} MB`);
 
-            if (!this._autoApproveCinema35ClipReview) {
-              // Show for approval
-              this.log(`[CINEMATIC] [BACKFILL] Waiting for clip approval: ${failedClipId}`);
-              this.emit({
-                type: 'waiting',
-                gate: 'clip-review',
-                clipId: failedClipId,
-                clipPath: result.path,
-                clipIndex: matchIdx,
-                clipTotal: allKlingClips.length,
-                clipLabel: `[BACKFILL] ${label}`,
-              });
-              const decision = await this.waitForApproval('clip-review');
-              if (decision === 'stop') {
-                this.log(`[CINEMATIC] [BACKFILL] User stopped after ${failedClipId}`);
-                break;
-              }
-            }
+            const backfillReview = await runClipReviewIfNeeded({
+              clipId: failedClipId,
+              clipPath: result.path,
+              clipIndex: matchIdx,
+              clipLabel: `[BACKFILL] ${label}`,
+              clipAsset: failedAsset,
+              context: 'backfill',
+            });
+            if (backfillReview === 'stop') break;
           } catch (backfillErr) {
             this.log(`[CINEMATIC] [BACKFILL] ${failedClipId}: retry failed — ${backfillErr.message}`, 'warn');
             db.markAssetFailed(failedAsset.id, `backfill: ${backfillErr.message}`);
