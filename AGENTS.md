@@ -237,7 +237,7 @@ HIGH:
 MEDIUM:
 - R5 (long-form regression): Prestige branch inserted ABOVE long-form with strict `=== 'prestige'` gating
 - R6 (renderer preset desync): Update both PRESET_STRUCTURES objects in index.html
-- R7 (Higgsfield session exhaustion): Document 8-16hr expected time, existing checkpoint/resume is adequate
+- R7 (Higgsfield session exhaustion): Document 8-16hr expected time, existing checkpoint/resume is adequate. **Update 2026-05-28 live run:** a single Higgsfield/Cinema Studio session stayed active and usable all day while generating scene images (observed ~7h+ continuous run, 53/58 scenes, still uploading/processing references correctly). For future full-auto planning, "losing the session during a same-day run" should not be treated as a primary blocker; keep checkpoint/resume for crash recovery, but session longevity itself is not currently a major concern.
 - R8 (verify batch duration): Document 20-30min verify time, optionally bump concurrency to 5
 - R9 (auto-split clip_id cascade): Tighten 3-line constraint in prestige cinematic scaffolding
 - R10 (five-act language leak): Strict `=== 'prestige'` gating, same as R5

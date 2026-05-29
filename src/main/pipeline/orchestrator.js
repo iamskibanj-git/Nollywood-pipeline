@@ -960,6 +960,7 @@ class PipelineOrchestrator {
           // path). The generic resume can't reconstruct this — clear the gate
           // and let the video gen loop re-encounter the clip naturally.
           const PER_CLIP_GATES = ['prompt-preview', 'clip-review'];
+          const RECONSTRUCTIBLE_STAGE_GATES = ['scene-images-ready'];
 
           // ── STALE GATE CHECK ──
           // If clips have already been generated, earlier gates (scenes, dialogue-triage)
@@ -971,8 +972,13 @@ class PipelineOrchestrator {
           const STALE_GATES_WHEN_CLIPS_EXIST = ['dialogue-triage', 'scenes'];
           const isStaleGate = existingDoneClips.length > 0 && STALE_GATES_WHEN_CLIPS_EXIST.includes(pendingGate);
 
-          if (PER_CLIP_GATES.includes(pendingGate) || isStaleGate) {
-            this.log(`[RESUME] Pending ${isStaleGate ? 'stale' : 'per-clip'} gate "${pendingGate}" — clearing (${isStaleGate ? existingDoneClips.length + ' clips already done' : 'video loop will re-fire with clip data'})`);
+          if (PER_CLIP_GATES.includes(pendingGate) || RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate) || isStaleGate) {
+            const clearReason = isStaleGate
+              ? `${existingDoneClips.length} clips already done`
+              : (RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate)
+                ? 'stage will recompute missing assets and re-enter the retry/manual path'
+                : 'video loop will re-fire with clip data');
+            this.log(`[RESUME] Pending ${isStaleGate ? 'stale' : (RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate) ? 'reconstructible' : 'per-clip')} gate "${pendingGate}" — clearing (${clearReason})`);
             let gateClearSucceeded = false;
             try {
               delete settings.pending_approval_gate;
@@ -6798,6 +6804,33 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
     }
 
+    // If the app was closed at the manual scene-image gate and the operator
+    // completed files on disk before resuming, recover those files immediately
+    // instead of spending credits to regenerate them.
+    let recoveredSceneFiles = 0;
+    for (const { chapter, scene } of allScenes) {
+      const key = `${chapter}_${scene.scene_number}`;
+      if (existingByKey[key]) continue;
+      const expectedPath = path.join(sceneDir, `ch${String(chapter).padStart(2, '0')}_sc${String(scene.scene_number).padStart(2, '0')}_cinematic.png`);
+      if (!fs.existsSync(expectedPath)) continue;
+
+      let asset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+        .find(a => a.chapter === chapter && a.scene === scene.scene_number);
+      if (!asset) {
+        db.insertExpectedAssets(projectId, [{ type: 'scene_image_cinematic', chapter, scene: scene.scene_number }]);
+        asset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .find(a => a.chapter === chapter && a.scene === scene.scene_number);
+      }
+      if (asset) {
+        db.markAssetDone(asset.id, expectedPath, { model: 'cinematic-cameras-disk-recovered', sourceGenId: null });
+        existingByKey[key] = expectedPath;
+        recoveredSceneFiles++;
+      }
+    }
+    if (recoveredSceneFiles > 0) {
+      this.log(`[CINEMATIC] Recovered ${recoveredSceneFiles} scene image(s) already present on disk`);
+    }
+
     // ── STALE ASSET CLEANUP ──
     // Remove scene_image_cinematic assets that don't match any scene in the
     // current script. These accumulate from previous runs with different scripts
@@ -7260,9 +7293,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
     }
 
-    this.log(`[CINEMATIC] Scene image stage: ${allScenes.length - missingScenes.length}/${allScenes.length} done${missingScenes.length ? `, ${missingScenes.length} missing — pausing for manual completion` : ''}`);
+    this.log(`[CINEMATIC] Scene image stage: ${allScenes.length - missingScenes.length}/${allScenes.length} done${missingScenes.length ? `, ${missingScenes.length} missing` : ''}`);
 
     if (missingScenes.length > 0) {
+      if (!this._cinematicSceneFallbackRetryAttempted && !browserDead && !this.cancelled) {
+        this._cinematicSceneFallbackRetryAttempted = true;
+        this.log(`[CINEMATIC] ${missingScenes.length} scene image(s) still missing after primary pass — running one bounded retry pass before manual fallback`, 'warn');
+        try {
+          await cinema.resetFormForNextGeneration();
+        } catch (resetErr) {
+          this.log(`[CINEMATIC] WARN: fallback retry reset failed: ${resetErr.message} — retry pass will still proceed`, 'warn');
+        }
+        await new Promise(r => setTimeout(r, 5000));
+        return await this._runCinematicSceneImageStage(projectId, projectDir);
+      }
+
       // Build a clear checklist + emit to UI
       const checklistLines = [
         '',
