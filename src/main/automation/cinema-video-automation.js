@@ -1309,13 +1309,15 @@ class CinemaVideoAutomation extends KlingAutomation {
         this._lastClipElementEligibility.eligible.push(name);
         continue;
       }
-      if (cached && cached !== 'eligible') {
-        failed.push({ type: 'element', name, status: cached });
+      if (cached === 'not-eligible' || cached === 'Not eligible') {
+        failed.push({ type: 'element', name, status: 'Not eligible' });
         continue;
       }
 
       const status = await this._checkOneElementEligibility(name);
-      this._elementEligibilityCache.set(cacheKey, status === 'eligible' ? 'eligible' : (status === 'not-eligible' ? 'Not eligible' : status));
+      if (status === 'eligible' || status === 'not-eligible') {
+        this._elementEligibilityCache.set(cacheKey, status === 'eligible' ? 'eligible' : 'Not eligible');
+      }
       if (status === 'eligible') {
         this._lastClipElementEligibility.eligible.push(name);
       } else {
@@ -1323,7 +1325,12 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
     }
     if (failed.length > 0) {
-      throw new CinemaEligibilityError(`${failed.length} Cinema Studio element(s) are not eligible`, failed);
+      const notEligible = failed.filter(item => item.status === 'Not eligible').length;
+      const unresolved = failed.length - notEligible;
+      const parts = [];
+      if (notEligible) parts.push(`${notEligible} not eligible`);
+      if (unresolved) parts.push(`${unresolved} unresolved`);
+      throw new CinemaEligibilityError(`${failed.length} Cinema Studio element eligibility issue(s): ${parts.join(', ')}`, failed);
     }
   }
 
@@ -1338,8 +1345,10 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
     let status = await this._waitForElementEligibility(card, 60000);
     if (status === 'check') {
+      this.log(`Element ${card.name || `@${name}`} eligibility check clicked — waiting for Higgsfield content review`);
       await page.mouse.click(card.checkX, card.checkY);
-      status = await this._waitForElementEligibility(card, 180000);
+      await page.waitForTimeout(2000);
+      status = await this._waitForElementEligibility(card, 300000, { returnOnCheck: false, useFallbackStatus: false });
     }
     await this._closePickerAndReturnToComposer();
     return status;
@@ -1401,6 +1410,30 @@ class CinemaVideoAutomation extends KlingAutomation {
     if (!atButton) throw new Error('@ element button next to Sound/Audio control not found');
     await page.mouse.click(atButton.x, atButton.y);
     await page.waitForTimeout(1200);
+  }
+
+  async _isElementsPickerOpen() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const body = clean(document.body?.innerText || '');
+      if (!/(Uploads|Image Generations|Video Generations)[\s\S]{0,160}\bElements\b/i.test(body)) return false;
+      return [...document.querySelectorAll('button, [role="tab"], div, span')]
+        .filter(visible)
+        .some(el => clean(el.innerText || el.textContent || '') === 'Elements');
+    }).catch(() => false);
+  }
+
+  async _ensureElementsPickerOpen() {
+    if (await this._isElementsPickerOpen()) return true;
+    await this._openElementsPickerViaAtButton();
+    return this._isElementsPickerOpen();
   }
 
   async _closePickerAndReturnToComposer() {
@@ -1515,6 +1548,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     const page = this.automation.page;
     const start = Date.now();
     let attempt = 0;
+    await this._scrollElementPicker('top').catch(() => null);
     while (Date.now() - start < timeoutMs) {
       const card = await this._findElementCard(name);
       if (card) return card;
@@ -1522,65 +1556,164 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (attempt === 0 || attempt % 5 === 4) {
         this.log(`Element @${String(name).replace(/^@/, '')} card not visible yet (${Math.round((Date.now() - start) / 1000)}s)`);
       }
+      await this._scrollElementPicker('next').catch(() => null);
       await page.waitForTimeout(waitMs);
       attempt++;
     }
     return null;
   }
 
-  async _waitForElementEligibility(card, timeoutMs) {
+  async _scrollElementPicker(action = 'next') {
+    const page = this.automation.page;
+    const state = await page.evaluate((scrollAction) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (el === document.body || el === document.documentElement) return false;
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 120 && r.height > 120 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const candidates = [...document.querySelectorAll('div, section, main, [role="dialog"], [data-radix-scroll-area-viewport]')]
+        .filter(el => visible(el) && el.scrollHeight > el.clientHeight + 40)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const score = (/(Uploads|Image Generations|Video Generations|Elements|Liked)/i.test(text) ? 5 : 0)
+            + (/Check eligibility|Checking content|Character/i.test(text) ? 5 : 0)
+            + (r.width > 600 && r.height > 300 ? 3 : 0)
+            + Math.min(4, Math.floor((el.scrollHeight - el.clientHeight) / 300));
+          return { el, r, score };
+        })
+        .filter(o => o.score >= 5)
+        .sort((a, b) => b.score - a.score || (b.r.width * b.r.height) - (a.r.width * a.r.height));
+      const target = candidates[0]?.el;
+      if (!target) return null;
+      if (scrollAction === 'top') {
+        target.scrollTop = 0;
+      } else {
+        const before = target.scrollTop;
+        target.scrollTop = Math.min(target.scrollHeight, target.scrollTop + Math.max(180, Math.floor(target.clientHeight * 0.75)));
+        if (target.scrollTop === before && target.scrollTop + target.clientHeight >= target.scrollHeight - 4) {
+          target.scrollTop = 0;
+        }
+      }
+      return {
+        scrollTop: Math.round(target.scrollTop),
+        clientHeight: Math.round(target.clientHeight),
+        scrollHeight: Math.round(target.scrollHeight),
+      };
+    }, action).catch(() => null);
+    await page.waitForTimeout(500);
+    return state;
+  }
+
+  async _reacquireElementCard(card) {
+    const name = card?.target || card?.name;
+    if (!name) return null;
+    let current = await this._findElementCard(name).catch(() => null);
+    if (current) return current;
+    const opened = await this._ensureElementsPickerOpen().catch(() => false);
+    if (!opened) return null;
+    return this._waitForElementCard(name, 45000).catch(() => null);
+  }
+
+  async _waitForElementEligibility(card, timeoutMs, { returnOnCheck = true, useFallbackStatus = true } = {}) {
     const page = this.automation.page;
     const start = Date.now();
     let attempt = 0;
     let lastStatus = null;
+    let lastProgressLogAt = 0;
+    let currentCard = card;
     while (Date.now() - start < timeoutMs) {
       const waitMs = this._progressiveWaitMs(attempt, { min: 700, max: 4500, step: 350 });
-      const status = await this._readElementCardStatus(card, { hoverMs: waitMs });
-      const effectiveStatus = status === 'unknown' && card.status && card.status !== 'unknown' ? card.status : status;
-      if (effectiveStatus !== lastStatus) {
-        this.log(`Element ${card.name || ''} eligibility status: ${effectiveStatus} (${Math.round((Date.now() - start) / 1000)}s)`);
-        lastStatus = effectiveStatus;
+      const reacquired = await this._reacquireElementCard(currentCard).catch(() => null);
+      if (reacquired) {
+        currentCard = reacquired;
+      } else if (!returnOnCheck) {
+        const elapsedSeconds = Math.round((Date.now() - start) / 1000);
+        if (lastStatus !== 'picker-closed') {
+          this.log(`Element ${currentCard.name || card.name || ''} eligibility picker/card not visible (${elapsedSeconds}s)`);
+          lastStatus = 'picker-closed';
+          lastProgressLogAt = Date.now();
+        } else if (Date.now() - lastProgressLogAt > 15000) {
+          this.log(`Element ${currentCard.name || card.name || ''} eligibility picker/card still not visible; reopening @ picker (${elapsedSeconds}s)`);
+          lastProgressLogAt = Date.now();
+        }
+        await page.waitForTimeout(waitMs);
+        attempt++;
+        continue;
       }
-      if (effectiveStatus === 'eligible' || effectiveStatus === 'not-eligible' || effectiveStatus === 'check') return effectiveStatus;
+      const status = await this._readElementCardStatus(currentCard, { hoverMs: waitMs, useFallbackStatus });
+      const effectiveStatus = status === 'unknown' && useFallbackStatus && currentCard.status && currentCard.status !== 'unknown' ? currentCard.status : status;
+      const elapsedSeconds = Math.round((Date.now() - start) / 1000);
+      if (effectiveStatus !== lastStatus) {
+        this.log(`Element ${currentCard.name || card.name || ''} eligibility status: ${effectiveStatus} (${elapsedSeconds}s)`);
+        lastStatus = effectiveStatus;
+        lastProgressLogAt = Date.now();
+      } else if (!returnOnCheck && Date.now() - lastProgressLogAt > 15000) {
+        this.log(`Element ${currentCard.name || card.name || ''} eligibility still ${effectiveStatus}; waiting for final hover status (${elapsedSeconds}s)`);
+        lastProgressLogAt = Date.now();
+      }
+      if (effectiveStatus === 'eligible' || effectiveStatus === 'not-eligible' || (returnOnCheck && effectiveStatus === 'check')) return effectiveStatus;
       await page.waitForTimeout(waitMs);
       attempt++;
     }
     return 'timeout';
   }
 
-  async _readElementCardStatus(card, { hoverMs = 500 } = {}) {
+  async _readElementCardStatus(card, { hoverMs = 500, useFallbackStatus = true } = {}) {
     const page = this.automation.page;
     await this._hoverPoint(card, hoverMs);
-    return page.evaluate(({ x, y, name, target, matchPrefix, status: fallbackStatus }) => {
+    return page.evaluate(({ x, y, checkX, checkY, name, target, matchPrefix, status: fallbackStatus, allowFallback }) => {
       const cardName = String(name || '').toLowerCase().replace(/^@/, '');
       const fullTarget = String(target || cardName || '').toLowerCase().replace(/^@/, '');
       const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
       const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
-      const el = document.elementFromPoint(x, y);
-      let cardEl = el;
-      for (let node = el; node; node = node.parentElement) {
-        const r = node.getBoundingClientRect();
-        const text = textOf(node);
-        const lower = text.toLowerCase();
-        const matchesTarget = !fullTarget || lower.includes(`@${fullTarget}`) || lower.includes(fullTarget)
-          || (prefix && (lower.includes(`@${prefix}`) || lower.includes(prefix)));
-        if (
-          r.width >= 80 && r.width <= 260
-          && r.height >= 80 && r.height <= 280
-          && matchesTarget
-          && /eligible|checking/i.test(text)
-        ) {
-          cardEl = node;
-          break;
+      const pointEls = [
+        document.elementFromPoint(x, y),
+        checkX && checkY ? document.elementFromPoint(checkX, checkY) : null,
+      ].filter(Boolean);
+      let cardEl = null;
+      for (const pointEl of pointEls) {
+        for (let node = pointEl; node; node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = textOf(node);
+          const lower = text.toLowerCase();
+          const matchesTarget = !fullTarget || lower.includes(`@${fullTarget}`) || lower.includes(fullTarget)
+            || (prefix && (lower.includes(`@${prefix}`) || lower.includes(prefix)));
+          if (
+            r.width >= 80 && r.width <= 260
+            && r.height >= 50 && r.height <= 280
+            && matchesTarget
+            && /eligible|checking/i.test(text)
+          ) {
+            cardEl = node;
+            break;
+          }
         }
+        if (cardEl && /eligible|checking/i.test(textOf(cardEl))) break;
+      }
+      if (!cardEl && fullTarget) {
+        const matches = [...document.querySelectorAll('figure, [role="button"], button, div')].filter(node => {
+          const r = node.getBoundingClientRect();
+          const text = textOf(node);
+          const lower = text.toLowerCase();
+          return r.width >= 80 && r.width <= 260
+            && r.height >= 50 && r.height <= 280
+            && r.top < innerHeight && r.bottom > 0
+            && (lower.includes(fullTarget) || (prefix && lower.includes(prefix)))
+            && /eligible|checking/i.test(text);
+        });
+        cardEl = matches[0] || pointEls[0];
       }
       const text = textOf(cardEl);
       if (/not eligible/i.test(text)) return 'not-eligible';
       if (/checking content|checking/i.test(text)) return 'checking';
       if (/check eligibility/i.test(text)) return 'check';
       if (/\beligible\b/i.test(text)) return 'eligible';
-      return fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
-    }, card).catch(() => 'unknown');
+      return allowFallback && fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
+    }, { ...card, allowFallback: useFallbackStatus }).catch(() => 'unknown');
   }
 
   _parseCinemaCreditRowsFromText(text) {
