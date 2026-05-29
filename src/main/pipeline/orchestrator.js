@@ -7432,6 +7432,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         automation: this.automation,
         logger: (m) => this.log(`[CINEMATIC] ${m}`),
         projectId: cinemaProjectId,
+        elementEligibilityCache: projectSettings._cinemaElementEligibility || {},
+        onElementEligibilityUpdate: (cacheKey, record) => this._persistCinemaElementEligibility(projectId, cacheKey, record),
       })
       : new KlingAutomation({
       automation: this.automation,
@@ -8499,6 +8501,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.log(`[CINEMATIC] ${clipId}: Cinema Studio eligibility failed — pausing for human input`);
           await this.waitForApproval('cinema-eligibility-failed');
           if (this.cancelled) return;
+          if (cinematicVideoEngine === 'cinema-studio-3.5') {
+            await this._repairCinemaElementEligibilityFailures(projectId, projectDir, e.failedAssets || [], videoAutomation);
+          }
           i--;
           continue;
         }
@@ -9408,6 +9413,162 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     } catch (e) {
       this.log(`[PERSIST] WARN: Could not persist cinematic maps: ${e.message}`, 'warn');
     }
+  }
+
+  _persistCinemaElementEligibility(projectId, cacheKey, record) {
+    if (!projectId || !cacheKey) return;
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+      settings._cinemaElementEligibility = settings._cinemaElementEligibility || {};
+      if (record && (record.status === 'eligible' || record.status === 'not-eligible')) {
+        settings._cinemaElementEligibility[cacheKey] = record;
+      } else {
+        delete settings._cinemaElementEligibility[cacheKey];
+      }
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist Cinema Studio element eligibility: ${e.message}`, 'warn');
+    }
+  }
+
+  _findCinemaElementRepairSpec(projectId, projectDir, elementName) {
+    const fs = require('fs');
+    const path = require('path');
+    const cleanName = String(elementName || '').replace(/^@/, '').toLowerCase();
+    const assets = db.getAssets(projectId);
+    const projectRoot = path.resolve(projectDir).toLowerCase();
+    const inProject = (filePath) => {
+      if (!filePath) return false;
+      const resolved = path.resolve(filePath).toLowerCase();
+      return resolved === projectRoot || resolved.startsWith(projectRoot + path.sep.toLowerCase());
+    };
+
+    const gridAsset = assets.find(a =>
+      a.type === 'character_grid'
+      && String(a.element_name || '').toLowerCase() === cleanName
+      && a.file_path
+      && fs.existsSync(a.file_path)
+      && inProject(a.file_path)
+    );
+    const directPortrait = assets.find(a =>
+      a.type === 'portrait'
+      && String(a.element_name || '').toLowerCase() === cleanName
+      && a.file_path
+      && fs.existsSync(a.file_path)
+      && inProject(a.file_path)
+    );
+
+    const unitKey = gridAsset?.character_id || directPortrait?.character_id || '';
+    let characterId = unitKey;
+    let outfitId = null;
+    const outfitMatch = String(unitKey).match(/^(.+?)_(o\d+)$/i);
+    if (outfitMatch) {
+      characterId = outfitMatch[1];
+      outfitId = outfitMatch[2].toLowerCase();
+    }
+
+    let portraitPath = directPortrait?.file_path || null;
+    if (!portraitPath && outfitId && outfitId !== 'o1') {
+      const outfitPortraitPath = path.join(projectDir, 'assets', 'portraits', `portrait_${unitKey}.png`);
+      if (fs.existsSync(outfitPortraitPath) && inProject(outfitPortraitPath)) portraitPath = outfitPortraitPath;
+    }
+    if (!portraitPath && characterId) {
+      const masterPortrait = assets.find(a =>
+        a.type === 'portrait'
+        && a.character_id === characterId
+        && a.file_path
+        && fs.existsSync(a.file_path)
+        && inProject(a.file_path)
+      );
+      portraitPath = masterPortrait?.file_path || null;
+    }
+
+    if (!portraitPath) {
+      const fallbackPortrait = path.join(projectDir, 'assets', 'portraits', `portrait_${characterId || unitKey}.png`);
+      if (fs.existsSync(fallbackPortrait) && inProject(fallbackPortrait)) portraitPath = fallbackPortrait;
+    }
+
+    const character = (this.state.script?.character_bible || []).find(c => c.id === characterId)
+      || (this.state.script?.character_bible || []).find(c => {
+        const hint = String(c.element_name_hint || '').toLowerCase().replace(/^@/, '');
+        return hint && cleanName.includes(hint);
+      });
+    const outfit = character?.outfits?.find(o => String(o.outfit_id || '').toLowerCase() === outfitId);
+    const description = outfit
+      ? `${character?.physical_description || ''}. Wearing: ${outfit.description || ''}`
+      : (character?.full_prompt_description || character?.physical_description || character?.description_label || cleanName);
+
+    if (!portraitPath || !fs.existsSync(portraitPath) || !inProject(portraitPath)) return null;
+    const gridPath = gridAsset?.file_path && fs.existsSync(gridAsset.file_path) && inProject(gridAsset.file_path)
+      ? gridAsset.file_path
+      : null;
+
+    return {
+      name: cleanName,
+      portraitPath,
+      gridPath,
+      description,
+      characterId,
+      unitKey,
+    };
+  }
+
+  async _repairCinemaElementEligibilityFailures(projectId, projectDir, failedAssets, videoAutomation) {
+    const elementFailures = [...new Map((failedAssets || [])
+      .filter(a => (a.type || '').toLowerCase() === 'element' && a.name)
+      .map(a => [String(a.name).replace(/^@/, '').toLowerCase(), a])).values()];
+    if (elementFailures.length === 0 || !videoAutomation) return;
+
+    const names = elementFailures.map(a => a.name);
+    videoAutomation.invalidateElementEligibility?.(names);
+
+    const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+    const elements = new HiggsfieldElements({
+      automation: this.automation,
+      logger: (m) => this.log(`[CINEMATIC] [ELEMENT-REPAIR] ${m}`),
+    });
+
+    for (const failure of elementFailures) {
+      const name = String(failure.name || '').replace(/^@/, '');
+      const status = String(failure.status || '').toLowerCase();
+      const visible = await videoAutomation.isElementVisibleInPicker(name).catch(err => ({
+        exists: true,
+        proof: { text: `visibility check failed: ${err.message}` },
+      }));
+
+      if (status.includes('not') && visible.exists) {
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} is still present after approval; delete it in Higgsfield before approving again. Proof: ${(visible.proof?.text || '').slice(0, 180)}`, 'warn');
+        continue;
+      }
+
+      if (visible.exists && !status.includes('not')) {
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} exists; leaving it in place and retrying eligibility.`);
+        continue;
+      }
+
+      const spec = this._findCinemaElementRepairSpec(projectId, projectDir, name);
+      if (!spec) {
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] No local portrait/grid spec found for @${name}; manual recreation is required.`, 'warn');
+        continue;
+      }
+
+      this.log(`[CINEMATIC] [ELEMENT-REPAIR] Recreating deleted/missing @${name} from ${spec.unitKey || spec.characterId || 'local assets'}...`);
+      try {
+        elements.invalidateCache();
+        const result = await elements.createCharacterElement({
+          name: spec.name,
+          portraitPath: spec.portraitPath,
+          gridPath: spec.gridPath,
+          description: spec.description,
+        });
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} ${result.created ? 'created' : 'already existed'}; retry will re-check Cinema Studio eligibility.`);
+      } catch (err) {
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] Failed to recreate @${name}: ${err.message}`, 'warn');
+      }
+    }
+
+    videoAutomation.invalidateElementEligibility?.(names);
   }
 
   /**

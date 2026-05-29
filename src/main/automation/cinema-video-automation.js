@@ -24,13 +24,77 @@ class CinemaEligibilityError extends Error {
 }
 
 class CinemaVideoAutomation extends KlingAutomation {
-  constructor({ automation, logger, projectId }) {
+  constructor({ automation, logger, projectId, elementEligibilityCache, onElementEligibilityUpdate } = {}) {
     super({ automation, logger: logger || ((msg) => console.log(`[CINEMA-VIDEO] ${msg}`)) });
     this.modelName = 'cinema-studio-3.5';
     this.creditLedgerModelRe = /cinema\s*studio\s*3\.5/i;
     this._projectId = projectId || null;
     this._elementEligibilityCache = new Map();
+    this._elementEligibilityProof = new Map();
+    this._onElementEligibilityUpdate = typeof onElementEligibilityUpdate === 'function'
+      ? onElementEligibilityUpdate
+      : null;
     this._lastClipElementEligibility = { required: [], eligible: [] };
+    this._hydrateElementEligibilityCache(elementEligibilityCache);
+  }
+
+  _elementEligibilityCacheKey(name) {
+    return `${this._projectId || 'default'}::${String(name || '').trim().replace(/^@/, '').toLowerCase()}`;
+  }
+
+  _hydrateElementEligibilityCache(cache) {
+    if (!cache || typeof cache !== 'object') return;
+    for (const [rawKey, rawValue] of Object.entries(cache)) {
+      const record = rawValue && typeof rawValue === 'object' ? rawValue : { status: rawValue };
+      const status = String(record.status || '').toLowerCase();
+      if (status !== 'eligible' && status !== 'not-eligible') continue;
+      const key = rawKey.includes('::') ? rawKey : this._elementEligibilityCacheKey(rawKey);
+      this._elementEligibilityCache.set(key, status);
+      this._elementEligibilityProof.set(key, record);
+    }
+  }
+
+  _getCachedElementEligibility(name) {
+    return this._elementEligibilityCache.get(this._elementEligibilityCacheKey(name));
+  }
+
+  _rememberElementEligibility(name, status, proof = {}) {
+    const normalized = String(name || '').trim().replace(/^@/, '');
+    const finalStatus = String(status || '').toLowerCase();
+    if (!normalized || (finalStatus !== 'eligible' && finalStatus !== 'not-eligible')) return;
+    const key = this._elementEligibilityCacheKey(normalized);
+    const record = {
+      status: finalStatus,
+      checkedAt: new Date().toISOString(),
+      projectId: this._projectId || null,
+      name: normalized,
+      ...proof,
+    };
+    this._elementEligibilityCache.set(key, finalStatus);
+    this._elementEligibilityProof.set(key, record);
+    if (this._onElementEligibilityUpdate) {
+      try {
+        this._onElementEligibilityUpdate(key, record);
+      } catch (err) {
+        this.log(`Warn: could not persist element eligibility for @${normalized}: ${err.message}`);
+      }
+    }
+  }
+
+  invalidateElementEligibility(names) {
+    const list = Array.isArray(names) ? names : [names];
+    for (const name of list.filter(Boolean)) {
+      const key = this._elementEligibilityCacheKey(name);
+      this._elementEligibilityCache.delete(key);
+      this._elementEligibilityProof.delete(key);
+      if (this._onElementEligibilityUpdate) {
+        try {
+          this._onElementEligibilityUpdate(key, null);
+        } catch (err) {
+          this.log(`Warn: could not clear element eligibility for @${String(name).replace(/^@/, '')}: ${err.message}`);
+        }
+      }
+    }
   }
 
   async generateClip({ startFramePath, multiShotPrompt, durationSeconds = 15, outputPath, validElements, aspectRatio = '16:9', onGenClicked }) {
@@ -1303,21 +1367,19 @@ class CinemaVideoAutomation extends KlingAutomation {
 
     const failed = [];
     for (const name of names) {
-      const cacheKey = name.toLowerCase();
-      const cached = this._elementEligibilityCache.get(cacheKey);
+      const cached = this._getCachedElementEligibility(name);
       if (cached === 'eligible') {
+        this.log(`Element @${name} eligibility cache hit: eligible`);
         this._lastClipElementEligibility.eligible.push(name);
         continue;
       }
-      if (cached === 'not-eligible' || cached === 'Not eligible') {
+      if (cached === 'not-eligible') {
+        this.log(`Element @${name} eligibility cache hit: not-eligible`);
         failed.push({ type: 'element', name, status: 'Not eligible' });
         continue;
       }
 
       const status = await this._checkOneElementEligibility(name);
-      if (status === 'eligible' || status === 'not-eligible') {
-        this._elementEligibilityCache.set(cacheKey, status === 'eligible' ? 'eligible' : 'Not eligible');
-      }
       if (status === 'eligible') {
         this._lastClipElementEligibility.eligible.push(name);
       } else {
@@ -1345,10 +1407,16 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
     let status = await this._waitForElementEligibility(card, 60000);
     if (status === 'check') {
-      this.log(`Element ${card.name || `@${name}`} eligibility check clicked — waiting for Higgsfield content review`);
-      await page.mouse.click(card.checkX, card.checkY);
+      const clicked = await this._clickElementCheckEligibility(card);
+      this.log(`Element ${card.name || `@${name}`} eligibility check ${clicked ? 'clicked' : 'click target not confirmed'} — waiting for Higgsfield content review`);
       await page.waitForTimeout(2000);
       status = await this._waitForElementEligibility(card, 300000, { returnOnCheck: false, useFallbackStatus: false });
+    }
+    if (status === 'eligible' || status === 'not-eligible') {
+      const proof = await this._snapshotElementCardProof(name).catch(() => ({}));
+      const textProof = proof.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
+      this.log(`Element @${name} final eligibility persisted: ${status}${textProof}`);
+      this._rememberElementEligibility(name, status, proof);
     }
     await this._closePickerAndReturnToComposer();
     return status;
@@ -1618,6 +1686,102 @@ class CinemaVideoAutomation extends KlingAutomation {
     return this._waitForElementCard(name, 45000).catch(() => null);
   }
 
+  async _findElementCheckButton(card) {
+    const page = this.automation.page;
+    return page.evaluate(({ name, target, matchPrefix }) => {
+      const fullTarget = String(target || name || '').toLowerCase().replace(/^@/, '');
+      const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const textOf = (el) => clean(el?.innerText || el?.textContent || '');
+      const candidates = [...document.querySelectorAll('figure, [role="button"], button, div')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = textOf(el);
+          const lower = text.toLowerCase();
+          const matchesTarget = lower.includes(fullTarget) || (prefix && lower.includes(prefix));
+          return { el, r, text, matchesTarget };
+        })
+        .filter(o => o.matchesTarget && o.r.width >= 80 && o.r.width <= 280 && o.r.height >= 70 && o.r.height <= 320)
+        .sort((a, b) => (a.r.width * a.r.height) - (b.r.width * b.r.height));
+      for (const candidate of candidates) {
+        const buttons = [...candidate.el.querySelectorAll('button, [role="button"], div, span')]
+          .filter(visible)
+          .map(el => ({ el, r: el.getBoundingClientRect(), text: textOf(el) }))
+          .filter(o => /^check eligibility$/i.test(o.text) || /check eligibility/i.test(o.text))
+          .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+        const button = buttons[0];
+        if (!button) continue;
+        button.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const br = button.el.getBoundingClientRect();
+        return {
+          x: Math.round(br.x + br.width / 2),
+          y: Math.round(br.y + br.height / 2),
+          text: button.text,
+          cardText: candidate.text,
+        };
+      }
+      return null;
+    }, card).catch(() => null);
+  }
+
+  async _clickElementCheckEligibility(card) {
+    const page = this.automation.page;
+    await this._ensureElementsPickerOpen().catch(() => false);
+    let currentCard = await this._reacquireElementCard(card).catch(() => null) || card;
+    await this._hoverPoint(currentCard, 800);
+
+    let button = await this._findElementCheckButton(currentCard);
+    if (!button) {
+      currentCard = await this._reacquireElementCard(currentCard).catch(() => null) || currentCard;
+      await this._hoverPoint(currentCard, 800);
+      button = await this._findElementCheckButton(currentCard);
+    }
+    if (!button) return false;
+
+    await page.mouse.click(button.x, button.y);
+    await page.waitForTimeout(1500);
+    const status = await this._readElementCardStatus(currentCard, { hoverMs: 800, useFallbackStatus: false });
+    if (status !== 'check' && status !== 'unknown') return true;
+
+    const domClicked = await page.evaluate(({ name, target, matchPrefix }) => {
+      const fullTarget = String(target || name || '').toLowerCase().replace(/^@/, '');
+      const prefix = String(matchPrefix || '').toLowerCase().replace(/^@/, '');
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const textOf = (el) => clean(el?.innerText || el?.textContent || '');
+      const cards = [...document.querySelectorAll('figure, [role="button"], button, div')]
+        .filter(visible)
+        .filter(el => {
+          const r = el.getBoundingClientRect();
+          const lower = textOf(el).toLowerCase();
+          return r.width >= 80 && r.width <= 280 && r.height >= 70 && r.height <= 320
+            && (lower.includes(fullTarget) || (prefix && lower.includes(prefix)));
+        });
+      for (const cardEl of cards) {
+        const button = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
+          .filter(visible)
+          .find(el => /check eligibility/i.test(textOf(el)));
+        if (!button) continue;
+        button.click();
+        return true;
+      }
+      return false;
+    }, currentCard).catch(() => false);
+    return !!domClicked;
+  }
+
   async _waitForElementEligibility(card, timeoutMs, { returnOnCheck = true, useFallbackStatus = true } = {}) {
     const page = this.automation.page;
     const start = Date.now();
@@ -1686,13 +1850,13 @@ class CinemaVideoAutomation extends KlingAutomation {
             r.width >= 80 && r.width <= 260
             && r.height >= 50 && r.height <= 280
             && matchesTarget
-            && /eligible|checking/i.test(text)
+            && /eligible|eligibility|checking/i.test(text)
           ) {
             cardEl = node;
             break;
           }
         }
-        if (cardEl && /eligible|checking/i.test(textOf(cardEl))) break;
+        if (cardEl && /eligible|eligibility|checking/i.test(textOf(cardEl))) break;
       }
       if (!cardEl && fullTarget) {
         const matches = [...document.querySelectorAll('figure, [role="button"], button, div')].filter(node => {
@@ -1703,7 +1867,7 @@ class CinemaVideoAutomation extends KlingAutomation {
             && r.height >= 50 && r.height <= 280
             && r.top < innerHeight && r.bottom > 0
             && (lower.includes(fullTarget) || (prefix && lower.includes(prefix)))
-            && /eligible|checking/i.test(text);
+            && /eligible|eligibility|checking/i.test(text);
         });
         cardEl = matches[0] || pointEls[0];
       }
@@ -1714,6 +1878,61 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (/\beligible\b/i.test(text)) return 'eligible';
       return allowFallback && fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
     }, { ...card, allowFallback: useFallbackStatus }).catch(() => 'unknown');
+  }
+
+  async _snapshotElementCardProof(nameOrCard) {
+    const page = this.automation.page;
+    const card = typeof nameOrCard === 'object'
+      ? nameOrCard
+      : await this._findElementCard(nameOrCard).catch(() => null);
+    if (card) await this._hoverPoint(card, 900).catch(() => {});
+    return page.evaluate((arg) => {
+      const target = String(arg?.target || arg?.name || arg || '').toLowerCase().replace(/^@/, '');
+      const prefix = String(arg?.matchPrefix || '').toLowerCase().replace(/^@/, '');
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 20 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const candidates = [...document.querySelectorAll('figure, [role="button"], button, div')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const lower = text.toLowerCase();
+          const matches = !target || lower.includes(target) || (prefix && lower.includes(prefix));
+          const status = /not eligible/i.test(text) ? 'not-eligible'
+            : /checking content|checking/i.test(text) ? 'checking'
+              : /check eligibility/i.test(text) ? 'check'
+                : /\beligible\b/i.test(text) ? 'eligible'
+                  : 'unknown';
+          const score = (matches ? 10 : 0)
+            + (status !== 'unknown' ? 8 : 0)
+            + (/\bCharacter\b/i.test(text) ? 2 : 0)
+            - Math.abs((r.width * r.height) - 26000) / 10000;
+          return { text, status, score, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
+        })
+        .filter(o => o.score >= 8)
+        .sort((a, b) => b.score - a.score);
+      const best = candidates[0] || null;
+      return best ? {
+        status: best.status,
+        text: best.text.slice(0, 500),
+        source: 'hover-card',
+        rect: best.rect,
+      } : { status: 'unknown', text: '', source: 'not-found' };
+    }, card || nameOrCard).catch(() => ({ status: 'unknown', text: '', source: 'snapshot-error' }));
+  }
+
+  async isElementVisibleInPicker(name) {
+    await this._closePickerAndReturnToComposer().catch(() => {});
+    await this._openElementsPickerViaAtButton();
+    const card = await this._waitForElementCard(name, 45000);
+    const proof = card ? await this._snapshotElementCardProof(card).catch(() => ({})) : {};
+    await this._closePickerAndReturnToComposer().catch(() => {});
+    return { exists: !!card, proof };
   }
 
   _parseCinemaCreditRowsFromText(text) {
