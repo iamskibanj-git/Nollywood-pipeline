@@ -112,11 +112,14 @@ class CinemaVideoAutomation extends KlingAutomation {
     try {
       await this.automation.ensureBrowser();
       await this._ensureCinemaStudio35VideoActive(aspectRatio);
+      await this._assertCurrentCinemaProjectUrl('before start-frame upload');
       await this._attachStartFrameFromLocalUpload(startFramePath);
+      await this._assertCurrentCinemaProjectUrl('after start-frame upload');
       await this._ensureElementEligibility(validElements);
       await this._armGenerateNetworkKillSwitch();
       await this._setGenerateSafetyLock(true);
       await this._typeMultiShotPrompt(multiShotPrompt, validElements);
+      await this._assertCurrentCinemaProjectUrl('after prompt typing');
       await this._setGenerateSafetyLock(true);
       await this.automation.page.waitForTimeout(800);
     } catch (setupErr) {
@@ -139,11 +142,7 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _typeMultiShotPrompt(promptText, validElements) {
     const page = this.automation.page;
-    const textbox = page.locator('[role="textbox"]').first();
-    const tbVisible = await textbox.isVisible({ timeout: 5000 }).catch(() => false);
-    if (!tbVisible) throw new Error('Prompt textbox (role="textbox") not found on page');
-
-    await textbox.click();
+    await this._focusPromptTextboxForTyping();
     await page.waitForTimeout(200);
     await page.keyboard.press('Control+A');
     await page.keyboard.press('Delete');
@@ -168,7 +167,14 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
 
       const lastChar = await page.evaluate(() => {
-        const tb = document.querySelector('[role="textbox"]');
+        const active = document.activeElement;
+        const selection = window.getSelection?.();
+        const selectedNode = selection?.anchorNode?.nodeType === Node.ELEMENT_NODE
+          ? selection.anchorNode
+          : selection?.anchorNode?.parentElement;
+        const tb = active?.closest?.('[role="textbox"]')
+          || selectedNode?.closest?.('[role="textbox"]')
+          || document.querySelector('[data-cinema-prompt-target="typing"]');
         const text = tb ? (tb.innerText || tb.textContent || '') : '';
         return text.slice(-1);
       }).catch(() => '');
@@ -499,21 +505,161 @@ class CinemaVideoAutomation extends KlingAutomation {
     this.log('[CINEMA-SAFETY] Generation network kill switch disarmed for intentional Generate click');
   }
 
+  _cinemaProjectUrl() {
+    return this._projectId
+      ? `https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`
+      : 'https://higgsfield.ai/cinema-studio';
+  }
+
+  _isCurrentCinemaProjectUrl(url) {
+    const value = String(url || '');
+    if (!value.includes('/cinema-studio')) return false;
+    if (!this._projectId) return true;
+    try {
+      const parsed = new URL(value);
+      return parsed.pathname.includes('/cinema-studio')
+        && parsed.searchParams.get('cinematic-project-id') === this._projectId;
+    } catch (_) {
+      return value.includes('/cinema-studio') && value.includes(`cinematic-project-id=${this._projectId}`);
+    }
+  }
+
+  async _navigateToCinemaProject() {
+    const page = this.automation.page;
+    const targetUrl = this._cinemaProjectUrl();
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1500);
+    if (this._isCurrentCinemaProjectUrl(page.url())) return;
+
+    this.log(`[CINEMA-VIDEO] Wrong URL after Cinema Studio navigation (${page.url()}); retrying direct project URL`, 'warn');
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1500);
+  }
+
+  async _assertCurrentCinemaProjectUrl(label = 'Cinema Studio navigation') {
+    const page = this.automation.page;
+    if (!page) throw new Error('Playwright page not ready');
+    if (this._isCurrentCinemaProjectUrl(page.url())) return;
+
+    if (this._projectId) {
+      this.log(`[CINEMA-VIDEO] Wrong URL ${label}: ${page.url()} — retrying project ${this._projectId}`, 'warn');
+      await this._navigateToCinemaProject();
+      if (this._isCurrentCinemaProjectUrl(page.url())) return;
+    }
+
+    throw new Error(`Wrong Cinema Studio project URL ${label}: ${page.url()}`);
+  }
+
+  async _focusPromptTextboxForTyping() {
+    const page = this.automation.page;
+    const target = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > window.innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const boxes = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea')]
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || el.value || '') }))
+        .filter(({ el, r }) => (
+          r.width > 100
+          && r.height > 18
+          && r.y > window.innerHeight * 0.45
+          && r.y < window.innerHeight - 40
+          && inCinemaComposer(el)
+        ))
+        .sort((a, b) => {
+          const aEmpty = a.text.length === 0 ? 0 : 1;
+          const bEmpty = b.text.length === 0 ? 0 : 1;
+          if (aEmpty !== bEmpty) return aEmpty - bEmpty;
+          return a.r.y - b.r.y;
+        });
+      const chosen = boxes[0];
+      if (!chosen) {
+        return {
+          ok: false,
+          reason: 'no visible Cinema Studio prompt textbox candidate',
+          candidates: boxes.length,
+          scrollY: window.scrollY,
+        };
+      }
+      for (const el of document.querySelectorAll('[data-cinema-prompt-target]')) {
+        el.removeAttribute('data-cinema-prompt-target');
+      }
+      chosen.el.setAttribute('data-cinema-prompt-target', 'typing');
+      return {
+        ok: true,
+        x: Math.round(chosen.r.x + Math.min(120, chosen.r.width / 2)),
+        y: Math.round(chosen.r.y + Math.min(24, chosen.r.height / 2)),
+        rect: {
+          x: Math.round(chosen.r.x),
+          y: Math.round(chosen.r.y),
+          w: Math.round(chosen.r.width),
+          h: Math.round(chosen.r.height),
+        },
+        textLength: chosen.text.length,
+        scrollY: window.scrollY,
+      };
+    });
+    if (!target?.ok) {
+      throw new Error(`Prompt textbox did not resolve for typing: ${JSON.stringify(target || {})}`);
+    }
+
+    await page.mouse.click(target.x, target.y);
+    await page.waitForTimeout(250);
+
+    const focused = await page.evaluate(() => {
+      const targetEl = document.querySelector('[data-cinema-prompt-target="typing"]');
+      const active = document.activeElement;
+      const selection = window.getSelection?.();
+      const selectedNode = selection?.anchorNode?.nodeType === Node.ELEMENT_NODE
+        ? selection.anchorNode
+        : selection?.anchorNode?.parentElement;
+      const activeTextbox = active?.closest?.('[role="textbox"]') || null;
+      const selectionTextbox = selectedNode?.closest?.('[role="textbox"]') || null;
+      const ownsFocus = !!targetEl && (targetEl === activeTextbox || targetEl.contains(active) || targetEl === selectionTextbox || targetEl.contains(selectedNode));
+      const r = targetEl?.getBoundingClientRect?.();
+      return {
+        ok: ownsFocus,
+        activeTag: active?.tagName || '',
+        activeRole: active?.getAttribute?.('role') || '',
+        activeText: String(active?.innerText || active?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+        selectionRole: selectionTextbox?.getAttribute?.('role') || '',
+        targetRect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
+        scrollY: window.scrollY,
+      };
+    });
+    if (!focused.ok) {
+      throw new Error(`Prompt textbox did not receive focus: ${JSON.stringify(focused)}`);
+    }
+    this.log(`[PROMPT] Focused Cinema prompt textbox at ${JSON.stringify(target.rect)} (scrollY=${target.scrollY})`);
+  }
+
   async _ensureCinemaStudio35VideoActive(aspectRatio = '16:9') {
     const page = this.automation.page;
     if (!page) throw new Error('Playwright page not ready');
     const targetAspect = aspectRatio === '9:16' ? '9:16' : '16:9';
     this._targetAspect = targetAspect;
 
-    if (this._projectId && !page.url().includes(this._projectId)) {
+    if (this._projectId && !this._isCurrentCinemaProjectUrl(page.url())) {
       this.log(`Navigating to Cinema Studio project ${this._projectId}...`);
-      await page.goto(`https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this._navigateToCinemaProject();
     } else if (!page.url().includes('/cinema-studio')) {
       this.log('Navigating to Cinema Studio...');
       await page.goto('https://higgsfield.ai/cinema-studio', { waitUntil: 'domcontentloaded', timeout: 30000 });
     }
     await this._dismissAdsWithPatience('[CINEMA-VIDEO]');
     await page.waitForTimeout(2500);
+    await this._assertCurrentCinemaProjectUrl('after Cinema Studio navigation');
 
     await this._ensureVideoMode();
     await this._selectCinemaStudio35Model();
@@ -2567,6 +2713,7 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _generateAndDownload(outputPath, durationSeconds, onGenClicked) {
     const page = this.automation.page;
+    await this._assertCurrentCinemaProjectUrl('before Generate');
     const initialFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null);
     const expectedDuration = this._selectedDuration || '15s';
     const expectedResolution = this._selectedResolution || '480p';
