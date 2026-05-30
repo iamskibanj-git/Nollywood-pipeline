@@ -110,6 +110,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     try {
+      this._cinemaGeneratePhase = 'setup';
       await this.automation.ensureBrowser();
       await this._ensureCinemaStudio35VideoActive(aspectRatio);
       await this._assertCurrentCinemaProjectUrl('before start-frame upload');
@@ -117,13 +118,17 @@ class CinemaVideoAutomation extends KlingAutomation {
       await this._assertCurrentCinemaProjectUrl('after start-frame upload');
       await this._ensureElementEligibility(validElements);
       await this._armGenerateNetworkKillSwitch();
+      await this._armCinemaGenerationEndpointBlocker();
       await this._setGenerateSafetyLock(true);
+      this._expectedCinemaPromptText = multiShotPrompt;
+      this._cinemaGeneratePhase = 'typing';
       await this._typeMultiShotPrompt(multiShotPrompt, validElements);
       await this._assertCurrentCinemaProjectUrl('after prompt typing');
+      this._cinemaGeneratePhase = 'preBaseline';
       await this._setGenerateSafetyLock(true);
       await this.automation.page.waitForTimeout(800);
     } catch (setupErr) {
-      await this._disarmGenerateNetworkKillSwitch().catch(() => {});
+      await this._cleanupCinemaSafetyAfterFailure('setup').catch(() => {});
       await this._setGenerateSafetyLock(false).catch(() => {});
       if (setupErr.code === 'CINEMA_ELIGIBILITY_FAILED') throw setupErr;
       if (setupErr.message && setupErr.message.includes('SESSION_EXPIRED')) throw setupErr;
@@ -134,7 +139,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       const result = await this._generateAndDownload(outputPath, durationSeconds, onGenClicked);
       return { ...result, model: this.modelName };
     } catch (err) {
-      await this._disarmGenerateNetworkKillSwitch().catch(() => {});
+      await this._cleanupCinemaSafetyAfterFailure('generate').catch(() => {});
       await this._setGenerateSafetyLock(false).catch(() => {});
       throw err;
     }
@@ -440,7 +445,7 @@ class CinemaVideoAutomation extends KlingAutomation {
   }
 
   async _allowNextGenerateClick() {
-    await this._disarmGenerateNetworkKillSwitch();
+    await this._disarmGenerateNetworkKillSwitch('intentional Generate click');
     const page = this.automation.page;
     if (!page || page.isClosed?.()) return;
     await page.evaluate(() => {
@@ -496,13 +501,78 @@ class CinemaVideoAutomation extends KlingAutomation {
     this.log('[CINEMA-SAFETY] Generation network kill switch armed for prompt typing');
   }
 
-  async _disarmGenerateNetworkKillSwitch() {
+  async _disarmGenerateNetworkKillSwitch(reason = 'cleanup') {
     const page = this.automation.page;
     if (!page || page.isClosed?.() || !this._generateNetworkKillSwitchHandler) return;
     const handler = this._generateNetworkKillSwitchHandler;
     this._generateNetworkKillSwitchHandler = null;
     await page.unroute('**/*', handler).catch(() => {});
-    this.log('[CINEMA-SAFETY] Generation network kill switch disarmed for intentional Generate click');
+    this.log(`[CINEMA-SAFETY] Generation network kill switch disarmed for ${reason}`);
+  }
+
+  async _cleanupCinemaSafetyAfterFailure(reason = 'failure') {
+    const phase = this._cinemaGeneratePhase || 'unknown';
+    if (phase === 'intentionalGenerate' || phase === 'postGenerate') {
+      await this._disarmCinemaGenerationEndpointBlocker().catch(() => {});
+    } else if (this._cinemaGenerationEndpointBlocker) {
+      this.log(`[CINEMA-SAFETY] Keeping generation endpoint blocker armed after pre-baseline ${reason} failure (phase=${phase})`, 'warn');
+    }
+    await this._disarmGenerateNetworkKillSwitch(reason).catch(() => {});
+  }
+
+  async _armCinemaGenerationEndpointBlocker() {
+    const page = this.automation.page;
+    const context = page?.context();
+    if (!page || !context) return;
+    await this._disarmCinemaGenerationEndpointBlocker().catch(() => {});
+    this._lastCinemaEndpointBlockAt = 0;
+    this._cinemaEndpointBlockCount = 0;
+    const pattern = '**/jobs/v2/cinematic_studio_video_3_5**';
+    const handler = async (route, request) => {
+      this._lastCinemaEndpointBlockAt = Date.now();
+      this._cinemaEndpointBlockCount = (this._cinemaEndpointBlockCount || 0) + 1;
+      this.log(`[CINEMA-SAFETY] Endpoint blocked pre-baseline Cinema generation request #${this._cinemaEndpointBlockCount}: ${request.method()} ${request.url()}`, 'warn');
+      await route.abort('blockedbyclient').catch(() => {});
+    };
+    this._cinemaGenerationEndpointBlocker = { context, page, pattern, handler };
+    await context.route(pattern, handler);
+    await page.route(pattern, handler);
+    this.log('[CINEMA-SAFETY] Generation endpoint blocker armed until usage baseline is captured');
+  }
+
+  async _waitForCinemaEndpointQuietPeriod({ quietMs = 10000, timeoutMs = 30000, label = 'pre-baseline' } = {}) {
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) return;
+    const startedAt = Date.now();
+    const initialCount = this._cinemaEndpointBlockCount || 0;
+    if (this._lastCinemaEndpointBlockAt) {
+      this.log(`[CINEMA-SAFETY] Waiting for ${Math.round(quietMs / 1000)}s Cinema endpoint quiet period before ${label} (${initialCount} blocked submit(s) so far)`);
+    }
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const lastBlockAt = this._lastCinemaEndpointBlockAt || 0;
+      if (!lastBlockAt || Date.now() - lastBlockAt >= quietMs) {
+        const finalCount = this._cinemaEndpointBlockCount || 0;
+        if (finalCount > initialCount || lastBlockAt) {
+          this.log(`[CINEMA-SAFETY] Cinema endpoint quiet period satisfied before ${label} (${finalCount} blocked submit(s), ${Math.round((Date.now() - Math.max(lastBlockAt, startedAt)) / 1000)}s quiet)`);
+        }
+        return;
+      }
+
+      const remainingQuietMs = quietMs - (Date.now() - lastBlockAt);
+      await page.waitForTimeout(Math.min(1000, Math.max(250, remainingQuietMs)));
+    }
+
+    this.log(`[CINEMA-SAFETY] Warn: Cinema endpoint quiet period timed out before ${label}; continuing with endpoint blocker still armed`, 'warn');
+  }
+
+  async _disarmCinemaGenerationEndpointBlocker() {
+    const blocker = this._cinemaGenerationEndpointBlocker;
+    if (!blocker) return;
+    this._cinemaGenerationEndpointBlocker = null;
+    await blocker.page?.unroute(blocker.pattern, blocker.handler).catch(() => {});
+    await blocker.context.unroute(blocker.pattern, blocker.handler).catch(() => {});
+    this.log('[CINEMA-SAFETY] Generation endpoint blocker disarmed');
   }
 
   _cinemaProjectUrl() {
@@ -642,6 +712,115 @@ class CinemaVideoAutomation extends KlingAutomation {
       throw new Error(`Prompt textbox did not receive focus: ${JSON.stringify(focused)}`);
     }
     this.log(`[PROMPT] Focused Cinema prompt textbox at ${JSON.stringify(target.rect)} (scrollY=${target.scrollY})`);
+  }
+
+  async _readCinemaPromptText() {
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) return '';
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > window.innerHeight * 0.40
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const marked = document.querySelector('[data-cinema-prompt-target="typing"]');
+      if (marked && inCinemaComposer(marked)) {
+        return marked.innerText || marked.textContent || marked.value || '';
+      }
+      const boxes = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea')]
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: el.innerText || el.textContent || el.value || '' }))
+        .filter(({ el, r }) => (
+          r.width > 100
+          && r.height > 18
+          && r.y > window.innerHeight * 0.40
+          && inCinemaComposer(el)
+        ))
+        .sort((a, b) => {
+          const aLen = clean(a.text).length;
+          const bLen = clean(b.text).length;
+          if (aLen !== bLen) return bLen - aLen;
+          return a.r.y - b.r.y;
+        });
+      return boxes[0]?.text || '';
+    }).catch(() => '');
+  }
+
+  async _assertCinemaPromptComplete(expectedPrompt) {
+    const expected = String(expectedPrompt || '');
+    const actualRaw = await this._readCinemaPromptText();
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const actual = normalize(actualRaw);
+    const expectedNormalized = normalize(expected);
+    const sentinel = 'NO SUBTITLES.';
+    const issues = [];
+    if (!actual.endsWith(sentinel)) {
+      issues.push(`missing final sentinel "${sentinel}"`);
+    }
+    if (expectedNormalized.length > 100 && actual.length < Math.floor(expectedNormalized.length * 0.75)) {
+      issues.push(`prompt length too short (${actual.length}/${expectedNormalized.length} chars)`);
+    }
+    if (issues.length > 0) {
+      throw new Error(`[PRE-GEN] Prompt typing incomplete before usage baseline: ${issues.join('; ')}; tail=${JSON.stringify(actual.slice(-180))}`);
+    }
+    this.log(`[PROMPT] Prompt completion confirmed before usage baseline (${actual.length}/${expectedNormalized.length} chars, sentinel present)`);
+  }
+
+  async _readGenerateButtonWithCreditCost({ timeoutMs = 20000, expectedMaxCost = 70 } = {}) {
+    const page = this.automation.page;
+    const startedAt = Date.now();
+    let lastButtonText = '';
+    let lastParsedCost = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const genBtnBox = await page.evaluate(() => {
+        for (const b of document.querySelectorAll('button[type="submit"], button')) {
+          const text = b.textContent?.trim() || '';
+          if (/generate/i.test(text) && b.getBoundingClientRect().width > 0) {
+            const r = b.getBoundingClientRect();
+            const textParts = [];
+            const walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+              const part = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+              if (part) textParts.push(part);
+            }
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2, text, textParts };
+          }
+        }
+        return null;
+      });
+
+      if (!genBtnBox) {
+        lastButtonText = 'not found';
+      } else {
+        lastButtonText = genBtnBox.text || '';
+        lastParsedCost = this._parseGenerateCreditCost(genBtnBox);
+        if (Number.isFinite(lastParsedCost)) {
+          if (lastParsedCost > expectedMaxCost) {
+            throw new Error(`[PRE-GEN] Credit cost inflated: ${lastParsedCost} credits for Cinema Studio 3.5 (expected <= ${expectedMaxCost})`);
+          }
+          if (Date.now() - startedAt > 1000) {
+            this.log(`[CINEMA-SAFETY] Generate button credit cost recovered after UI settle: ${lastParsedCost}`);
+          }
+          return { genBtnBox, creditCost: lastParsedCost };
+        }
+      }
+
+      await this._waitForCinemaEndpointQuietPeriod({ quietMs: 3000, timeoutMs: 3500, label: 'Generate credit read' });
+      await page.waitForTimeout(500);
+    }
+
+    throw new Error(`[PRE-GEN] Generate button has no credit cost after setup (last text=${JSON.stringify(lastButtonText)}, parsed=${lastParsedCost})`);
   }
 
   async _ensureCinemaStudio35VideoActive(aspectRatio = '16:9') {
@@ -2767,34 +2946,13 @@ class CinemaVideoAutomation extends KlingAutomation {
       throw new Error(`[PRE-GEN] Pre-generation check failed: ${preGenCheck.issues.join('; ')}`);
     }
 
-    const genBtnBox = await page.evaluate(() => {
-      for (const b of document.querySelectorAll('button[type="submit"], button')) {
-        const text = b.textContent?.trim() || '';
-        if (/generate/i.test(text) && b.getBoundingClientRect().width > 0) {
-          const r = b.getBoundingClientRect();
-          const textParts = [];
-          const walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
-          let node;
-          while ((node = walker.nextNode())) {
-            const part = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
-            if (part) textParts.push(part);
-          }
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2, text, textParts };
-        }
-      }
-      return null;
-    });
-    if (!genBtnBox) throw new Error('GENERATE button not found on page');
+    await this._assertCinemaPromptComplete(this._expectedCinemaPromptText);
+    await this._waitForCinemaEndpointQuietPeriod({ quietMs: 10000, timeoutMs: 30000, label: 'usage baseline' });
 
-    const creditCost = this._parseGenerateCreditCost(genBtnBox);
-    if (!Number.isFinite(creditCost)) {
-      throw new Error('[PRE-GEN] Generate button has no credit cost after setup');
-    }
-    if (creditCost > 70) {
-      throw new Error(`[PRE-GEN] Credit cost inflated: ${creditCost} credits for Cinema Studio 3.5 ${expectedResolution}/${expectedDuration} (expected <= 70)`);
-    }
+    const { genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 20000, expectedMaxCost: 70 });
 
     let baselineLedgerSignatures = [];
+    this._cinemaGeneratePhase = 'baseline';
     try {
       const baselineRows = await this._readCinemaCreditLedger(page.context(), 15000);
       baselineLedgerSignatures = baselineRows.map(row => row.signature);
@@ -2803,9 +2961,14 @@ class CinemaVideoAutomation extends KlingAutomation {
       this.log(`Warn: could not capture credit ledger baseline before click: ${ledgerErr.message}`, 'warn');
     }
 
+    await this._waitForCinemaEndpointQuietPeriod({ quietMs: 5000, timeoutMs: 15000, label: 'intentional Generate click' });
+    this._cinemaGeneratePhase = 'readyToGenerate';
+    await this._disarmCinemaGenerationEndpointBlocker();
     await this._allowNextGenerateClick();
     const clickedAt = new Date();
+    this._cinemaGeneratePhase = 'intentionalGenerate';
     await page.mouse.click(genBtnBox.x, genBtnBox.y);
+    this._cinemaGeneratePhase = 'postGenerate';
     await this._setGenerateSafetyLock(true);
     this.log(`GENERATE clicked once at ${clickedAt.toLocaleTimeString()} - confirming Cinema Studio credit ledger`);
 
