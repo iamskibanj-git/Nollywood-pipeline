@@ -1102,25 +1102,235 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _openSceneUploadPicker() {
     const page = this.automation.page;
-    const plus = await page.evaluate(() => {
-      const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"]');
-      if (!tb) return null;
-      const tbRect = tb.getBoundingClientRect();
-      const candidates = [];
-      for (const b of document.querySelectorAll('button')) {
-        const r = b.getBoundingClientRect();
-        if (r.width > 25 && r.width <= 80 && r.height > 25 && r.height <= 80 &&
-            r.x < tbRect.x && Math.abs((r.y + r.height / 2) - (tbRect.y + tbRect.height / 2)) < 90) {
-          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height });
+    const pickerAlreadyOpen = async () => page.evaluate(() => {
+      const body = document.body?.innerText || '';
+      return /\bUploads\b/i.test(body) && /\bUpload media\b/i.test(body);
+    }).catch(() => false);
+
+    if (await pickerAlreadyOpen()) return;
+
+    const explicitTarget = await this._findAddReferenceMediaControl();
+    if (explicitTarget) {
+      this.log(`[CINEMA-VIDEO] Opening scene upload picker via Add reference media control: ${JSON.stringify(explicitTarget)}`);
+      await page.mouse.click(explicitTarget.x, explicitTarget.y);
+      await page.waitForTimeout(1500);
+      if (await pickerAlreadyOpen()) return;
+      throw new Error(`Scene upload picker did not open after clicking Add reference media: ${JSON.stringify(explicitTarget)}`);
+    }
+
+    const hoverTarget = await this._findAddReferenceMediaControlByTooltip();
+    if (hoverTarget) {
+      this.log(`[CINEMA-VIDEO] Opening scene upload picker via Add reference media tooltip control: ${JSON.stringify(hoverTarget)}`);
+      await page.mouse.click(hoverTarget.x, hoverTarget.y);
+      await page.waitForTimeout(1500);
+      if (await pickerAlreadyOpen()) return;
+      throw new Error(`Scene upload picker did not open after clicking tooltip-confirmed Add reference media: ${JSON.stringify(hoverTarget)}`);
+    }
+
+    const promptLeftTargets = await this._findPromptLeftReferenceMediaControls();
+    for (const target of promptLeftTargets) {
+      this.log(`[CINEMA-VIDEO] Opening scene upload picker via prompt-left media control: ${JSON.stringify(target)}`);
+      await page.mouse.click(target.x, target.y);
+      await page.waitForTimeout(1500);
+      if (await pickerAlreadyOpen()) return;
+    }
+
+    const diagnostics = await this._diagnoseReferenceMediaControls();
+    throw new Error(`Add reference media control not found; refusing unsafe scene upload click: ${JSON.stringify(diagnostics)}`);
+  }
+
+  async _findAddReferenceMediaControl() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const targetText = /\badd reference media\b/i;
+      const visibleRect = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 20 || r.height < 20) return null;
+        if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return null;
+        return r;
+      };
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
         }
+        return false;
+      };
+
+      const matches = [];
+      for (const el of document.querySelectorAll('button, [role="button"], [aria-label], [title]')) {
+        const r = visibleRect(el);
+        if (!r || !inCinemaComposer(el)) continue;
+        const aria = clean(el.getAttribute('aria-label'));
+        const title = clean(el.getAttribute('title'));
+        const label = [aria, title].filter(Boolean).join(' ');
+        if (!targetText.test(label)) continue;
+        matches.push({
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          aria,
+          title,
+        });
       }
-      candidates.sort((a, b) => b.w * b.h - a.w * a.h);
-      const c = candidates[0];
-      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2) } : null;
-    });
-    if (!plus) throw new Error('Scene upload + button not found');
-    await page.mouse.click(plus.x, plus.y);
-    await page.waitForTimeout(1500);
+      matches.sort((a, b) => b.y - a.y || a.x - b.x);
+      return matches[0] || null;
+    }).catch(() => null);
+  }
+
+  async _findAddReferenceMediaControlByTooltip() {
+    const page = this.automation.page;
+    const candidates = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const promptLike = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea, [contenteditable="true"]')]
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.textContent || el.getAttribute('placeholder')) }))
+        .filter(({ el, r }) => r.width > 100 && r.height > 20 && r.y > innerHeight * 0.45 && inCinemaComposer(el))
+        .sort((a, b) => b.r.y - a.r.y)[0];
+      if (!promptLike) return [];
+
+      const tb = promptLike.r;
+      const tbCenterY = tb.top + tb.height / 2;
+      const results = [];
+      for (const el of document.querySelectorAll('button, [role="button"]')) {
+        const r = el.getBoundingClientRect();
+        const centerY = r.top + r.height / 2;
+        const label = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' '));
+        if (r.width < 25 || r.width > 90 || r.height < 25 || r.height > 90) continue;
+        if (r.left < tb.left - 180 || r.right > tb.left + 12) continue;
+        if (Math.abs(centerY - tbCenterY) > 95) continue;
+        if (/copy prompt|delete|generate|decrement|increment|video|image/i.test(label)) continue;
+        results.push({
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          label: label.slice(0, 80),
+        });
+      }
+      results.sort((a, b) => b.y - a.y || b.x - a.x);
+      return results.slice(0, 6);
+    }).catch(() => []);
+
+    for (const candidate of candidates) {
+      await page.mouse.move(candidate.x, candidate.y);
+      await page.waitForTimeout(450);
+      const tooltip = await page.evaluate(() => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        return [...document.querySelectorAll('[role="tooltip"], [data-radix-popper-content-wrapper], div')]
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            return { text: clean(el.textContent), w: r.width, h: r.height, y: r.y };
+          })
+          .filter(item => item.w > 20 && item.h > 10 && item.y >= 0 && /\badd reference media\b/i.test(item.text))
+          .map(item => item.text)
+          .sort((a, b) => a.length - b.length)[0] || '';
+      }).catch(() => '');
+      if (tooltip) return { ...candidate, tooltip };
+    }
+    return null;
+  }
+
+  async _findPromptLeftReferenceMediaControls() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const inCinemaComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 300 && r.height > 80
+            && r.y > innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const promptBoxes = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea, [contenteditable="true"]')]
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.textContent || el.getAttribute('placeholder')) }))
+        .filter(({ el, r }) => r.width > 100 && r.height > 18 && r.y > innerHeight * 0.45 && inCinemaComposer(el))
+        .sort((a, b) => {
+          const aScene = /describe your scene/i.test(a.text) ? 1 : 0;
+          const bScene = /describe your scene/i.test(b.text) ? 1 : 0;
+          if (aScene !== bScene) return bScene - aScene;
+          return a.r.y - b.r.y;
+        });
+      const tb = promptBoxes[0]?.r;
+      if (!tb) return [];
+
+      const textboxCenterY = tb.top + tb.height / 2;
+      const targets = [];
+      for (const el of document.querySelectorAll('button, [role="button"], div')) {
+        const r = el.getBoundingClientRect();
+        const label = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' '));
+        if (/copy prompt|delete|generate|decrement|increment|video|image|ai director/i.test(label)) continue;
+        if (r.width < 28 || r.width > 90 || r.height < 28 || r.height > 90) continue;
+        if (r.left < tb.left - 88 || r.right > tb.left - 4) continue;
+        if (Math.abs((r.top + r.height / 2) - textboxCenterY) > 80 && Math.abs(r.top - tb.bottom) > 60) continue;
+        targets.push({
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          label,
+          prompt: clean(promptBoxes[0].text).slice(0, 80),
+        });
+      }
+      targets.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+      return targets.slice(0, 3);
+    }).catch(() => []);
+  }
+
+  async _diagnoseReferenceMediaControls() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const items = [];
+      for (const el of document.querySelectorAll('button, [role="button"], [aria-label], [title]')) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 20 || r.height < 20 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+        const label = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' '));
+        if (r.y < innerHeight * 0.45 && !/reference|upload|media/i.test(label)) continue;
+        items.push({
+          x: Math.round(r.left),
+          y: Math.round(r.top),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          label: label.slice(0, 100),
+        });
+      }
+      items.sort((a, b) => b.y - a.y || a.x - b.x);
+      return {
+        viewport: { w: innerWidth, h: innerHeight },
+        bottomControls: items.slice(0, 30),
+        bodySnippet: clean(document.body?.innerText).slice(0, 800),
+      };
+    }).catch(error => ({ error: error.message }));
   }
 
   async _clickPickerTab(tabName) {

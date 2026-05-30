@@ -5421,6 +5421,34 @@ class PipelineOrchestrator {
   // PRE-GENERATION RULES ENGINE — Upstream Prompt Fixes (150-clip observations)
   // ══════════════════════════════════════════════════════════════════════════
 
+  _sanitizeCinemaDialogueForPrompt(prompt) {
+    let replacements = 0;
+    const sanitizeDialogueText = (text) => {
+      let out = text;
+      const apply = (pattern, replacement) => {
+        const before = out;
+        out = out.replace(pattern, replacement);
+        if (out !== before) replacements++;
+      };
+
+      apply(/\bAllah\s+ya\s+kiyaye\b/gi, 'Heaven help me');
+      apply(/\bAllah\b/gi, 'Heaven');
+      apply(/\bGod\s+forbid\b/gi, 'No, please');
+      apply(/\bcurse(?:d|s)?\b/gi, 'trouble');
+      apply(/\bblood\s+ritual\b/gi, 'secret ritual');
+      apply(/\britual\s+blood\b/gi, 'secret ritual');
+      apply(/\bkill(?:ed|ing|s)?\b/gi, 'hurt');
+      return out;
+    };
+
+    const sanitized = String(prompt || '').replace(
+      /(\]:\s*")([^"]*?)(")/gi,
+      (match, prefix, dialogueText, suffix) => prefix + sanitizeDialogueText(dialogueText) + suffix
+    );
+
+    return { prompt: sanitized, replacements };
+  }
+
   /**
    * Validate and fix a Kling multi_shot_prompt against known failure patterns
    * observed across 150 clips. Runs AFTER all 3 vision passes and sanitization,
@@ -7727,6 +7755,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // ── RESUME: Check if the clip file already exists on disk ──
       // Covers the gap where the file was downloaded but the DB wasn't updated
       // (crash between file write and markAssetDone).
+      const existingAsset = existingClips.find(a => a.kling_clip_id === clipId);
+      const isPreGenError = existingAsset?.error_message?.includes('[PRE-GEN]');
+
       const expectedOutputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
       if (fs.existsSync(expectedOutputPath)) {
         const stat = fs.statSync(expectedOutputPath);
@@ -7882,8 +7913,6 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       //   2. prompt_used is set AND error is NOT a [PRE-GEN] error
       //      (markAssetGenerating sets prompt_used before generateClip, but
       //       [PRE-GEN] errors mean Generate was never clicked — no credits burned)
-      const existingAsset = existingClips.find(a => a.kling_clip_id === clipId);
-      const isPreGenError = existingAsset?.error_message?.includes('[PRE-GEN]');
       const genWasClicked = existingAsset && existingAsset.status !== 'done' && (
         existingAsset.gen_clicked_at ||
         (existingAsset.prompt_used && !isPreGenError)
@@ -8290,6 +8319,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         );
         if (finalMultiShotPrompt !== beforeDialogueFix) {
           this.log(`[CINEMATIC] ${clipId}: stripped @element references from dialogue → human names`);
+        }
+      }
+
+      // ── SANITIZE DIALOGUE BEFORE SUBMISSION ──
+      // Keep prompt compilation deterministic: remove likely backend trigger
+      // phrases inside spoken dialogue before Cinema Studio ever sees them.
+      {
+        const sanitized = this._sanitizeCinemaDialogueForPrompt(finalMultiShotPrompt);
+        if (sanitized.replacements > 0) {
+          finalMultiShotPrompt = sanitized.prompt;
+          this.log(`[CINEMATIC] ${clipId}: sanitized ${sanitized.replacements} risky dialogue phrase(s) before video prompt submission`);
         }
       }
 
