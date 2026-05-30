@@ -1934,6 +1934,50 @@ class CinemaVideoAutomation extends KlingAutomation {
     return { status: statusResult.status || 'pending', card: statusResult.card || current };
   }
 
+  async _clickSceneCheckEligibility(card) {
+    const page = this.automation.page;
+    const current = await this._reacquireSceneUploadCard(card) || card;
+    if (!current?.x || !current?.y) return false;
+
+    await this._hoverPoint(current, 700);
+    const target = await page.evaluate(({ x, y, checkX, checkY }) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const near = (r) => {
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        return Math.abs(cx - x) < 220 && Math.abs(cy - y) < 180;
+      };
+
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, [role="button"], div, span')) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 18 || r.height < 12 || r.bottom < 0 || r.top > innerHeight) continue;
+        const text = clean(el.innerText || el.textContent || '');
+        if (!/check eligibility/i.test(text)) continue;
+        if (!near(r)) continue;
+        candidates.push({
+          x: Math.round(r.x + r.width / 2),
+          y: Math.round(r.y + r.height / 2),
+          text,
+          area: r.width * r.height,
+          dist: Math.hypot((r.x + r.width / 2) - x, (r.y + r.height / 2) - y),
+        });
+      }
+      candidates.sort((a, b) => a.dist - b.dist || b.area - a.area);
+      if (candidates[0]) return candidates[0];
+
+      if (Number.isFinite(checkX) && Number.isFinite(checkY)) {
+        return { x: checkX, y: checkY, text: 'card check target' };
+      }
+      return null;
+    }, current).catch(() => null);
+
+    if (!target?.x || !target?.y) return false;
+    await page.mouse.click(target.x, target.y);
+    this.log(`Scene image eligibility check clicked manually (${target.text || 'check target'})`);
+    return true;
+  }
+
   async _waitForSceneEligibility(card, timeoutMs) {
     const page = this.automation.page;
     const start = Date.now();
@@ -1943,6 +1987,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     let sawChecking = false;
     let lastStatus = null;
     let attempt = 0;
+    let manualCheckClicked = false;
     while (Date.now() < deadline) {
       const waitMs = this._progressiveWaitMs(attempt, { min: 700, max: 4500, step: 350 });
       const result = await this._readSceneCardStatus(card, { hoverMs: waitMs });
@@ -1953,6 +1998,14 @@ class CinemaVideoAutomation extends KlingAutomation {
         lastStatus = status;
       }
       if (status === 'checking') sawChecking = true;
+      if (status === 'check' && !manualCheckClicked) {
+        const clicked = await this._clickSceneCheckEligibility(result.card || card);
+        manualCheckClicked = clicked;
+        this.log(`Scene image eligibility check ${clicked ? 'clicked manually' : 'manual click target not confirmed'} - waiting for Higgsfield content review`);
+        await page.waitForTimeout(2000);
+        attempt++;
+        continue;
+      }
       if (status === 'eligible' || status === 'not-eligible') return status;
       if (!extended && Date.now() > start + (timeoutMs * 0.90)) {
         deadline = Math.min(maxDeadline, deadline + 180000);
