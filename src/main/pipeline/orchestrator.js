@@ -41,6 +41,87 @@ const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
 const TEMP_SKIP_CINEMA35_PROMPT_PREVIEW = true;
 const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = false;
 
+function sanitizeCinemaVideoPrompt(prompt) {
+  if (!prompt) return { prompt, removedCount: 0, markers: [] };
+
+  const original = String(prompt).replace(/\r\n/g, '\n');
+  const markers = new Set();
+  let removedCount = 0;
+
+  const mark = (label) => {
+    removedCount++;
+    markers.add(label);
+  };
+
+  const classifyMetaLine = (line, beforeFirstShot = false) => {
+    const trimmed = String(line || '').trim();
+    if (!trimmed) return null;
+    if (/^```/.test(trimmed)) return 'code-fence';
+    if (/^---+$/.test(trimmed)) return 'divider';
+    if (/^\*\*.*\*\*:?\s*$/.test(trimmed)) return 'markdown-heading';
+    if (/^\*\*Shot\s*\d+\s*:/i.test(trimmed)) return 'shot-analysis';
+    if (/^STEP\s*\d+\b/i.test(trimmed) || /^\*\*STEP\s*\d+\b/i.test(trimmed)) return 'step-analysis';
+    if (/\b(?:PROP|PROPS)\s+(?:ANALYSIS|IN HAND)\b/i.test(trimmed)) return 'prop-analysis';
+    if (/\bSHOT[-\s]*BY[-\s]*SHOT\s+ANALYSIS\b|\bSHOT\s+ANALYSIS\b/i.test(trimmed)) return 'shot-analysis';
+    if (/\b(?:VISUAL-STATE|PHYSICALLY IMPOSSIBLE|OUTPUT FORMAT|GUARDRAILS?|BLOCKING_MISMATCH)\b/i.test(trimmed)) return 'vision-meta';
+    if (/\bClaimed positions?\b|\bCONFIRMED\b|\bProceeding to Step\b/i.test(trimmed)) return 'position-analysis';
+    if (/^\s*[-*]\s+/.test(line) && beforeFirstShot) return 'analysis-bullet';
+    if (/^\s*[-*]\s+.*\b(?:matches|contradiction|contradicts|claimed|actual|image shows|visible|not holding|not visible)\b/i.test(line)) return 'analysis-bullet';
+    return null;
+  };
+
+  const firstShotIndex = original.search(/^Shot\s*1\s*\([^)]*\)\s*:/m);
+  let sanitized = original;
+
+  if (firstShotIndex >= 0) {
+    const beforeShots = original.slice(0, firstShotIndex);
+    const shotBody = original.slice(firstShotIndex);
+    const beforeLines = beforeShots.split('\n');
+    const cleanBefore = [];
+    let seenCharPositions = false;
+
+    for (const line of beforeLines) {
+      const trimmed = line.trim();
+      if (/^CHARACTER POSITIONS\b/i.test(trimmed)) seenCharPositions = true;
+      const marker = classifyMetaLine(line, seenCharPositions);
+      if (marker) {
+        mark(marker);
+        continue;
+      }
+      cleanBefore.push(line);
+    }
+
+    sanitized = `${cleanBefore.join('\n').trimEnd()}\n\n${shotBody.trimStart()}`;
+  }
+
+  const bodyLines = sanitized.split('\n');
+  const cleanLines = [];
+  let hasSeenFirstShot = false;
+  for (const line of bodyLines) {
+    if (/^Shot\s*1\s*\([^)]*\)\s*:/i.test(line.trim())) hasSeenFirstShot = true;
+    const marker = classifyMetaLine(line, !hasSeenFirstShot);
+    if (marker) {
+      mark(marker);
+      continue;
+    }
+    cleanLines.push(line);
+  }
+
+  sanitized = cleanLines
+    .join('\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  sanitized = sanitized.replace(/\s*NO SUBTITLES\.?\s*$/i, '').trimEnd() + '\n\nNO SUBTITLES.';
+
+  return {
+    prompt: sanitized,
+    removedCount,
+    markers: [...markers],
+  };
+}
+
 /**
  * Duration presets. Each defines the target and matching story structures.
  * Structures are tried in order — first one that meets or exceeds targetClips wins.
@@ -8498,6 +8579,25 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
       }
 
+      // ── FINAL VIDEO PROMPT SANITIZER ──
+      // Vision reconciliation can occasionally return audit prose mixed with the
+      // usable prompt (STEP/PROP/SHOT analysis). Strip that meta text before it
+      // is persisted or typed into Cinema Studio; keep logs compact so the full
+      // prompt does not leak to terminal/UI logs.
+      {
+        let totalRemoved = 0;
+        const allMarkers = new Set();
+        for (let pass = 1; pass <= 2; pass++) {
+          const sanitizeResult = sanitizeCinemaVideoPrompt(finalMultiShotPrompt);
+          finalMultiShotPrompt = sanitizeResult.prompt;
+          totalRemoved += sanitizeResult.removedCount;
+          for (const marker of sanitizeResult.markers) allMarkers.add(marker);
+        }
+        if (totalRemoved > 0) {
+          this.log(`[CINEMATIC] ${clipId}: sanitized ${totalRemoved} leaked vision-analysis line(s) before video prompt submission (${[...allMarkers].join(', ')})`);
+        }
+      }
+
       // ── PRE-GEN PROMPT PREVIEW GATE (TEMPORARY — remove when full production starts) ──
       // Show the final multi_shot_prompt to the user before Playwright submits it.
       // If the prompt looks wrong (bad blocking, weird phrasing), user can stop
@@ -11566,4 +11666,4 @@ REWRITTEN DESCRIPTION:`,
   }
 }
 
-module.exports = { PipelineOrchestrator, TIER_TEST, TIER_STANDARD, TIER_LONG_FORM, TIER_PRESTIGE, getDurationTier, DURATION_PRESETS, CINEMATIC_DURATION_PRESETS };
+module.exports = { PipelineOrchestrator, TIER_TEST, TIER_STANDARD, TIER_LONG_FORM, TIER_PRESTIGE, getDurationTier, DURATION_PRESETS, CINEMATIC_DURATION_PRESETS, sanitizeCinemaVideoPrompt };
