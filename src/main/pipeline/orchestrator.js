@@ -1122,12 +1122,27 @@ class PipelineOrchestrator {
           this.log(`[RESUME] Found ${pendingRedoClips.length} pending ${redoType} clip(s) at stage '${resumeStage}' — resetting to scenes-done for redo`);
           db.updateProjectStage(projectId, 'scenes-done');
           resumeStage = 'scenes-done';
-          // Clear stale gen_clicked_at on pending redo clips so the video stage
-          // generates fresh instead of trying to recover old clips from Higgsfield
+          // Clear stale metadata only on true redo clips. If Generate was
+          // already clicked, gen_clicked_at is the primary credit-spend recovery
+          // signal. Legacy rows may have lost that timestamp but still retain a
+          // credit_cost + submitted prompt; preserve those as submitted too.
+          let clearedFreshRedo = 0;
+          let preservedSubmitted = 0;
           for (const clip of pendingRedoClips) {
+            const hasSubmittedSignal = !!clip.gen_clicked_at || (!!clip.credit_cost && !!clip.prompt_used);
+            if (hasSubmittedSignal) {
+              preservedSubmitted++;
+              continue;
+            }
             db.clearAssetGenerationMeta(clip.id);
+            clearedFreshRedo++;
           }
-          this.log(`[RESUME] Cleared gen_clicked_at on ${pendingRedoClips.length} pending clip(s) — will generate fresh`);
+          if (preservedSubmitted > 0) {
+            this.log(`[RESUME] Preserved gen_clicked_at on ${preservedSubmitted} submitted pending clip(s) — will attempt recovery`);
+          }
+          if (clearedFreshRedo > 0) {
+            this.log(`[RESUME] Cleared gen_clicked_at on ${clearedFreshRedo} fresh redo clip(s) — will generate fresh`);
+          }
         }
       }
 

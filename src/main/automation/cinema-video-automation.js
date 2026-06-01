@@ -145,6 +145,14 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
   }
 
+  async recoverTimedOutClip(submittedPrompt, outputPath, opts = {}) {
+    this.log('[RECOVERY] Cinema Studio recovery requires dialogue match');
+    return super.recoverTimedOutClip(submittedPrompt, outputPath, {
+      ...opts,
+      requireDialogueMatch: true,
+    });
+  }
+
   async _typeMultiShotPrompt(promptText, validElements) {
     const page = this.automation.page;
     await this._focusPromptTextboxForTyping();
@@ -3046,24 +3054,16 @@ class CinemaVideoAutomation extends KlingAutomation {
 
     const maxWaitMs = 12 * 60 * 1000;
     const startedAt = Date.now();
+    this.log(`Cinema Studio generation submitted; waiting ${Math.round(maxWaitMs / 60000)}min before Asset Library recovery (direct UI video-source download disabled for identity safety)`);
+    let lastSeenSrc = initialFirstSrc;
     while (Date.now() - startedAt < maxWaitMs) {
-      await page.waitForTimeout(3000);
-      const currentFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null);
+      await page.waitForTimeout(30000);
+      const currentFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null).catch(() => null);
       if (currentFirstSrc && currentFirstSrc !== initialFirstSrc) {
-        const buffer = await page.evaluate(async (url) => {
-          const res = await fetch(url);
-          const blob = await res.blob();
-          const arrayBuffer = await blob.arrayBuffer();
-          return Array.from(new Uint8Array(arrayBuffer));
-        }, currentFirstSrc);
-        fs.writeFileSync(outputPath, Buffer.from(buffer));
-        this.log(`Downloaded Cinema Studio clip to ${outputPath} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
-        return {
-          path: outputPath,
-          sourceGenId: this._extractGenId(currentFirstSrc),
-          cdnUrl: currentFirstSrc,
-          sizeBytes: buffer.length,
-        };
+        if (currentFirstSrc !== lastSeenSrc) {
+          lastSeenSrc = currentFirstSrc;
+          this.log('[CINEMA-VIDEO] Candidate video source appeared during mandatory wait; ignoring direct UI source and deferring to Asset Library recovery');
+        }
       }
     }
     throw new Error(`Timeout waiting for Cinema Studio 3.5 generation (${maxWaitMs / 1000}s)`);

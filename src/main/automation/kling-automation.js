@@ -1318,6 +1318,43 @@ class KlingAutomation {
     return Math.round((2 * intersection / totalBigrams) * 100);
   }
 
+  _extractDialogueLinesFromPrompt(prompt) {
+    const text = String(prompt || '');
+    const lines = [];
+    const patterns = [
+      /\[[^\]]*speaking[^\]]*\]\s*:\s*"([^"]+)"/gi,
+      /\[[^\]]*speaking[^\]]*\]\s*:\s*'([^']+)'/gi,
+    ];
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const line = this._normalizePrompt(match[1] || '');
+        if (line) lines.push(line);
+      }
+    }
+    return [...new Set(lines)];
+  }
+
+  _dialogueMatch(submittedPrompt, copiedPrompt) {
+    const expected = this._extractDialogueLinesFromPrompt(submittedPrompt);
+    if (expected.length === 0) {
+      return { ok: true, expected: [], matched: [], missing: [], required: 0 };
+    }
+
+    const copied = this._normalizePrompt(copiedPrompt);
+    const matched = expected.filter(line => copied.includes(line));
+    const required = expected.length <= 2 ? expected.length : expected.length - 1;
+    const missing = expected.filter(line => !matched.includes(line));
+
+    return {
+      ok: matched.length >= required,
+      expected,
+      matched,
+      missing,
+      required,
+    };
+  }
+
   /**
    * Recover a timed-out Kling video clip from the Higgsfield Asset library.
    *
@@ -1334,6 +1371,7 @@ class KlingAutomation {
    * @param {number} [opts.minSimilarity=92] - minimum prompt similarity (0-100)
    * @param {number} [opts.maxTilesToCheck=8] - max tiles to click before giving up
    * @param {number} [opts.timeoutMs=60000]   - total recovery timeout
+   * @param {boolean} [opts.requireDialogueMatch=false] - require copied prompt to contain submitted dialogue lines
    * @returns {Promise<{path, sourceGenId, cdnUrl, assetUuid}|null>}
    */
   async recoverTimedOutClip(submittedPrompt, outputPath, opts = {}) {
@@ -1574,8 +1612,15 @@ class KlingAutomation {
         this.log(`[RECOVERY] Tile ${i + 1} similarity: ${similarity}% (need ≥${minSimilarity}%)`);
         this.log(`[RECOVERY]   Submitted (first 80): "${submittedPrompt.slice(0, 80)}..."`);
         this.log(`[RECOVERY]   Copied    (first 80): "${copiedPrompt.slice(0, 80)}..."`);
+        const dialogue = opts.requireDialogueMatch ? this._dialogueMatch(submittedPrompt, copiedPrompt) : null;
+        if (dialogue) {
+          this.log(`[RECOVERY] Tile ${i + 1} dialogue match: ${dialogue.matched.length}/${dialogue.expected.length} (need ${dialogue.required})`);
+          if (!dialogue.ok && dialogue.missing.length > 0) {
+            this.log(`[RECOVERY]   Missing dialogue: ${dialogue.missing.map(line => `"${line.slice(0, 80)}"`).join('; ')}`);
+          }
+        }
 
-        if (similarity < minSimilarity) {
+        if (similarity < minSimilarity || (dialogue && !dialogue.ok)) {
           // Not a match — close overlay and try next tile
           await page.keyboard.press('Escape').catch(() => {});
           await page.waitForTimeout(1000);
