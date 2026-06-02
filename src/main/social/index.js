@@ -2,6 +2,8 @@ const { SocialPlanner } = require('./social-planner');
 const { SocialCopyGenerator } = require('./social-copy-generator');
 const { SocialFacebookUploader } = require('./social-facebook-uploader');
 
+const ENGAGEMENT_POST_TYPES = new Set(['character_intro', 'pre_short_teaser', 'post_short_recap']);
+
 class SocialPostsController {
   constructor(db, options = {}) {
     this.db = db;
@@ -54,6 +56,7 @@ class SocialPostsController {
 
     const assets = this.db.getAssets(projectId);
     const posts = this.db.getSocialPostsForProject(projectId)
+      .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type))
       .filter(p => p.status === 'planned')
       .filter(p => !targetDate || p.scheduled_date === targetDate);
 
@@ -136,6 +139,7 @@ class SocialPostsController {
     this.db.backup('pre-social-upload');
 
     const posts = this.db.getPendingSocialUploads(projectId)
+      .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type))
       .filter(p => p.status === 'content_done' || p.status === 'upload_failed')
       .filter(p => !targetDate || p.scheduled_date === targetDate);
     if (posts.length === 0) {

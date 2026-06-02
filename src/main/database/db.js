@@ -1835,9 +1835,12 @@ function getSocialPostProjects() {
          AND s.status = 'scheduled'
          AND date(s.scheduled_date) >= date('now')) as future_short_count,
       (SELECT COUNT(*) FROM social_posts sp
-       WHERE sp.project_id = p.id) as social_post_count,
+       WHERE sp.project_id = p.id
+         AND sp.post_type IN ('character_intro', 'pre_short_teaser', 'post_short_recap')) as social_post_count,
       (SELECT COUNT(*) FROM social_posts sp
-       WHERE sp.project_id = p.id AND sp.status = 'scheduled') as social_scheduled_count
+       WHERE sp.project_id = p.id
+         AND sp.status = 'scheduled'
+         AND sp.post_type IN ('character_intro', 'pre_short_teaser', 'post_short_recap')) as social_scheduled_count
     FROM projects p
     WHERE EXISTS (
       SELECT 1 FROM shorts s

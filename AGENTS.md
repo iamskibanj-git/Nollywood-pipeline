@@ -3596,3 +3596,27 @@ Goal: keep the existing cinematic pipeline and add Cinema Studio 3.5 as a select
 15. **Downstream verification:** Confirm Cinema Studio clips work with existing clip review, verify flow, FFmpeg assembly, and 480p-to-4K upscale. Add normalization only if FFmpeg concat/upscale fails.
 
 16. **Regression tests:** Confirm existing Kling cinematic remains unchanged, staged/Veo remains untouched, and run a 1-minute Cinema Studio 3.5 test first. Test `+` scene upload, scoped scene eligibility, `@` element eligibility, not-eligible pause, ledger confirmation, download/recovery, verify, and assembly.
+
+## Standalone Promo Character Spotlights (Session 2026-06-02)
+
+Standalone Promo posts live in the Promo tab and reuse existing Publish + Engagement surfaces instead of inventing separate social machinery.
+
+- **Post rows:** Promo uses `social_posts` with `post_type = 'standalone_character_spotlight'`. Engagement helpers must filter their own post types so Promo rows do not appear in normal engagement counts, copy generation, or scheduling.
+- **Planning:** One planned Facebook post per unique speaking character. The planned post count is determined by the number of unique characters, not by a fixed 1/2/3/4 engagement window.
+- **Schedule:** Default happy path is one post per day at 10:00, outside the normal engagement type 1/2/3/4 timing window.
+- **Aspect ratio:** Promo image generation must use the project aspect ratio from project settings. Do not hardcode 9:16 except as a display example or fallback.
+- **Image workflow:** Reuse Publish standalone thumbnail generation semantics:
+  ```text
+  character element portrait/key art -> title card -> composite with both images as references
+  ```
+  Output paths are per character under the project `output/promo/<character_id>/` folder:
+  ```text
+  key-art-custom.png
+  title-card.png
+  thumbnail-custom.png
+  ```
+  If `key-art-custom.png` and `title-card.png` already exist and are non-trivial files, `Generate Images` should reuse them and continue directly to `thumbnail-custom.png` composite.
+- **Composite safety:** Composite must attach the existing key art and title card as the two reference images before clicking Generate. If reference upload fails before Generate, do not run Asset Library recovery because no new generation was submitted; retry composite from a fresh context instead.
+- **Higgsfield fresh-page upload drift:** On the current Nano Banana Pro fresh image page, reference upload may show `totalSlots: 0` with one bare `input[type=file]` whose `accept` attribute is empty or not explicitly `image/*`. Promo composite opts into accepting this bare input while Publish defaults stay strict. The upload routine must still use trusted click/filechooser handling and abort before Generate if the backend upload is not confirmed.
+- **Copy:** Captions should be spoiler-free "meet the case/cast" copy based on character description and role, never a plot reveal.
+- **Scheduling:** After images and copy are ready, schedule through the existing Engagement Playwright/Facebook flow using the Promo rows and media paths.

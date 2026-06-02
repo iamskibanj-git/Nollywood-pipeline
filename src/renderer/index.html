@@ -168,6 +168,7 @@
       <button class="header-btn" onclick="openStandalonePublish()" id="btn-publish-standalone" title="Open Publish for any completed project" style="border-color:var(--accent2);color:var(--accent2);">Publish</button>
       <button class="header-btn" onclick="openShortsTab()" id="btn-shorts-standalone" title="Repurpose clips as Facebook Reels" style="border-color:#f59e0b;color:#f59e0b;">Shorts</button>
       <button class="header-btn" onclick="openSocialTab()" id="btn-social-standalone" title="Schedule engagement posts around Reels" style="border-color:#22c55e;color:#22c55e;">Engagement</button>
+      <button class="header-btn" onclick="openPromoTab()" id="btn-promo-standalone" title="Schedule standalone character spotlight posts" style="border-color:#38bdf8;color:#38bdf8;">Promo</button>
       <button class="header-btn" onclick="toggleSettings()">Settings</button>
     </div>
 
@@ -911,6 +912,62 @@
                   </thead>
                   <tbody id="social-posts-body">
                     <tr><td colspan="6" style="padding:12px;color:var(--muted);text-align:center;">Select a project to see engagement posts</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STANDALONE PROMO VIEW -->
+      <div id="view-promo" style="display:none">
+        <div class="card">
+          <div id="promo-project-bar" style="margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border);">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <select id="promo-project-selector" onchange="switchPromoProject(this.value)" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;">
+                <option value="">Select a project...</option>
+              </select>
+              <button class="btn btn-ghost" onclick="exitPromoTab()" style="font-size:11px;padding:6px 10px;">Back</button>
+            </div>
+            <div id="promo-project-status" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
+          </div>
+
+          <h2>Promo - Character Spotlights</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Plan one spoiler-free Facebook cast post per unique character using the project aspect ratio.</p>
+
+          <div id="promo-tools" style="display:none;">
+            <div style="margin-bottom:20px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Workflow</h3>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+                <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;">
+                  Start date
+                  <input id="promo-start-date" type="date" onchange="updatePromoActionButtons()" style="background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:5px 8px;font-size:12px;">
+                </label>
+                <button class="btn btn-primary" onclick="planPromoPosts()" id="btn-plan-promo" style="font-size:12px;">Plan Spotlights</button>
+                <button class="btn btn-primary" onclick="generatePromoAssets()" id="btn-assets-promo" style="font-size:12px;background:#0ea5e9;border-color:#0ea5e9;" disabled>Generate Images</button>
+                <button class="btn btn-primary" onclick="generatePromoCopy()" id="btn-copy-promo" style="font-size:12px;background:#8b5cf6;border-color:#8b5cf6;" disabled>Generate Copy</button>
+                <button class="btn btn-primary" onclick="scheduleAllPromoPosts()" id="btn-schedule-promo" style="font-size:12px;background:#22c55e;border-color:#22c55e;" disabled>Schedule All</button>
+              </div>
+              <div id="promo-progress" style="font-size:11px;color:var(--muted);"></div>
+              <div id="promo-stats" style="display:none;margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:6px;font-size:12px;gap:20px;flex-wrap:wrap;"></div>
+            </div>
+
+            <div style="margin-bottom:20px;">
+              <h3 style="font-size:13px;margin-bottom:10px;">Character Posts</h3>
+              <div style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">
+                <table style="width:100%;font-size:11px;border-collapse:collapse;">
+                  <thead>
+                    <tr style="background:var(--bg3);position:sticky;top:0;">
+                      <th style="padding:6px 8px;text-align:left;">Date</th>
+                      <th style="padding:6px 8px;text-align:left;">Time</th>
+                      <th style="padding:6px 8px;text-align:left;">Character</th>
+                      <th style="padding:6px 8px;text-align:left;">Media</th>
+                      <th style="padding:6px 8px;text-align:left;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="promo-posts-body">
+                    <tr><td colspan="5" style="padding:12px;color:var(--muted);text-align:center;">Select a project to see promo posts</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -3473,6 +3530,275 @@
         if (!progressEl) return;
         if (data.message) progressEl.textContent = data.message;
         else if (data.phase === 'generate' && data.status === 'done') {
+          progressEl.textContent = `Generated ${data.generated || 0}; failed ${data.failed || 0}.`;
+        } else if (data.phase === 'upload' && data.status === 'done') {
+          progressEl.textContent = `Scheduled ${data.uploaded || 0}; failed ${data.failed || 0}.`;
+        }
+      });
+    }
+
+    // PROMO TAB
+    let promoProjectId = null;
+    let promoCurrentPosts = [];
+
+    async function openPromoTab() {
+      document.getElementById('stepper').style.display = 'none';
+      showView('view-promo');
+      document.getElementById('promo-tools').style.display = 'none';
+      document.getElementById('promo-progress').textContent = '';
+      promoCurrentPosts = [];
+      renderPromoPosts([]);
+      renderPromoStats(null);
+
+      const selector = document.getElementById('promo-project-selector');
+      selector.innerHTML = '<option value="">Select a project...</option>';
+      const statusEl = document.getElementById('promo-project-status');
+      statusEl.textContent = 'Loading projects with completed portraits...';
+
+      try {
+        const projects = await window.api.getPromoProjects();
+        if (!projects || projects.length === 0) {
+          statusEl.innerHTML = '<span style="color:var(--yellow);">No projects with completed character portraits found.</span>';
+          return;
+        }
+        projects.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = `${p.id} - ${p.title || 'Untitled'} (${p.character_count || 0} characters)`;
+          selector.appendChild(opt);
+        });
+        statusEl.textContent = `${projects.length} eligible project${projects.length > 1 ? 's' : ''}`;
+
+        if (projects.length === 1) {
+          selector.value = projects[0].id;
+          await switchPromoProject(projects[0].id);
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+    }
+
+    function exitPromoTab() {
+      document.getElementById('stepper').style.display = 'flex';
+      showView('view-launcher');
+      promoProjectId = null;
+    }
+
+    async function switchPromoProject(projectId) {
+      promoProjectId = projectId || null;
+      document.getElementById('promo-tools').style.display = promoProjectId ? 'block' : 'none';
+      if (!promoProjectId) return;
+      await refreshPromoPosts();
+    }
+
+    async function refreshPromoPosts() {
+      if (!promoProjectId) return;
+      const statusEl = document.getElementById('promo-project-status');
+      try {
+        const data = await window.api.getPromoStatus(promoProjectId);
+        const posts = data.posts || [];
+        promoCurrentPosts = posts;
+        renderPromoPosts(posts);
+        renderPromoStats(data.stats);
+
+        const summary = data.summary || {};
+        const aspect = data.stats?.aspectRatio || data.project?.aspectRatio || '16:9';
+        if (summary.total > 0) {
+          statusEl.textContent = `${summary.total} promo posts - ${summary.planned || 0} planned, ${summary.asset_done || 0} image ready, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled - aspect ${aspect}`;
+        } else {
+          statusEl.textContent = `${(data.characters || []).length} characters available. Click Plan Spotlights to start - aspect ${aspect}.`;
+        }
+
+        updatePromoActionButtons();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+        promoCurrentPosts = [];
+        renderPromoPosts([]);
+        renderPromoStats(null);
+        updatePromoActionButtons();
+      }
+    }
+
+    function getPromoStartDate() {
+      const value = document.getElementById('promo-start-date')?.value || '';
+      return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+    }
+
+    function getPromoActionState() {
+      const rows = promoCurrentPosts;
+      const planned = rows.filter(p => p.status === 'planned').length;
+      const assetReady = rows.filter(p => p.status === 'asset_done').length;
+      const ready = rows.filter(p => p.status === 'content_done' || p.status === 'upload_failed').length;
+      const scheduled = rows.filter(p => p.status === 'scheduled').length;
+      const allScheduled = rows.length > 0 && planned === 0 && assetReady === 0 && ready === 0 && scheduled === rows.length;
+      return { planned, assetReady, ready, scheduled, allScheduled };
+    }
+
+    function updatePromoActionButtons() {
+      const planBtn = document.getElementById('btn-plan-promo');
+      const assetsBtn = document.getElementById('btn-assets-promo');
+      const copyBtn = document.getElementById('btn-copy-promo');
+      const scheduleBtn = document.getElementById('btn-schedule-promo');
+      const progressEl = document.getElementById('promo-progress');
+      if (!planBtn || !assetsBtn || !copyBtn || !scheduleBtn) return;
+
+      const state = getPromoActionState();
+      planBtn.disabled = state.allScheduled;
+      assetsBtn.disabled = state.planned === 0;
+      copyBtn.disabled = state.assetReady === 0;
+      scheduleBtn.disabled = state.ready === 0;
+      if (state.allScheduled && progressEl) {
+        progressEl.innerHTML = `<span style="color:var(--green);">All ${state.scheduled} promo posts are already scheduled.</span>`;
+      }
+    }
+
+    function renderPromoPosts(posts) {
+      const tbody = document.getElementById('promo-posts-body');
+      if (!tbody) return;
+      if (!posts || posts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="padding:12px;color:var(--muted);text-align:center;">No promo posts planned</td></tr>';
+        return;
+      }
+      const statusColors = {
+        planned: 'var(--muted)',
+        asset_done: '#38bdf8',
+        content_done: 'var(--accent)',
+        scheduled: 'var(--green)',
+        upload_failed: 'var(--red)',
+      };
+      tbody.innerHTML = '';
+      posts.forEach(p => {
+        const mediaName = p.media_path ? p.media_path.split(/[\\/]/).pop() : 'missing';
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--border)';
+        tr.innerHTML = `
+          <td style="padding:5px 8px;">${escapeHtml(p.scheduled_date || '-')}</td>
+          <td style="padding:5px 8px;">${escapeHtml(p.scheduled_time || '-')}</td>
+          <td style="padding:5px 8px;color:var(--muted);">${escapeHtml(p.source_character_element_name || p.source_character_id || '-')}</td>
+          <td style="padding:5px 8px;color:${p.media_path ? 'var(--text)' : 'var(--red)'};" title="${escapeHtml(p.media_path || p.error_message || '')}">${escapeHtml(mediaName)}</td>
+          <td style="padding:5px 8px;color:${statusColors[p.status] || 'var(--muted)'}">${escapeHtml(p.status || 'planned')}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderPromoStats(stats) {
+      const el = document.getElementById('promo-stats');
+      if (!el) return;
+      if (!stats) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+      }
+      el.style.display = 'flex';
+      el.innerHTML = `
+        <span><strong style="color:var(--accent);">${stats.characterCount || 0}</strong> characters</span>
+        <span><strong style="color:#38bdf8;">${escapeHtml(stats.aspectRatio || '16:9')}</strong> aspect</span>
+        <span><strong style="color:var(--accent);">${escapeHtml(stats.promoTime || '10:00')}</strong> daily</span>
+        <span><strong style="color:var(--green);">${escapeHtml(stats.startDate || '-')}</strong> to <strong style="color:var(--green);">${escapeHtml(stats.endDate || '-')}</strong></span>
+      `;
+    }
+
+    async function planPromoPosts() {
+      if (!promoProjectId) return;
+      const btn = document.getElementById('btn-plan-promo');
+      const progressEl = document.getElementById('promo-progress');
+      btn.disabled = true;
+      btn.textContent = 'Planning...';
+      progressEl.textContent = 'Planning one standalone character spotlight per unique speaking character...';
+
+      try {
+        const startDate = getPromoStartDate();
+        const result = await window.api.planPromoPosts(promoProjectId, { startDate });
+        progressEl.innerHTML = `<span style="color:var(--green);">Planned ${result.inserted} new promo post${result.inserted === 1 ? '' : 's'} (${result.planned} characters checked).</span>`;
+        renderPromoPosts(result.posts || []);
+        await refreshPromoPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Plan Spotlights';
+      updatePromoActionButtons();
+    }
+
+    async function generatePromoAssets() {
+      if (!promoProjectId) return;
+      const btn = document.getElementById('btn-assets-promo');
+      const progressEl = document.getElementById('promo-progress');
+      btn.disabled = true;
+      btn.textContent = 'Generating...';
+      progressEl.textContent = 'Launching Higgsfield and generating Nano Banana Pro promo cards...';
+
+      try {
+        const result = await window.api.generatePromoAssets(promoProjectId, {});
+        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Generated ${result.generated} promo image${result.generated === 1 ? '' : 's'}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        renderPromoPosts(result.posts || []);
+        await refreshPromoPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Generate Images';
+      updatePromoActionButtons();
+    }
+
+    async function generatePromoCopy() {
+      if (!promoProjectId) return;
+      const btn = document.getElementById('btn-copy-promo');
+      const progressEl = document.getElementById('promo-progress');
+      btn.disabled = true;
+      btn.textContent = 'Generating...';
+      progressEl.textContent = 'Generating spoiler-free meet-the-cast captions...';
+
+      try {
+        const result = await window.api.generatePromoCopy(promoProjectId, {});
+        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Generated ${result.generated} caption${result.generated === 1 ? '' : 's'}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        renderPromoPosts(result.posts || []);
+        await refreshPromoPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Generate Copy';
+      updatePromoActionButtons();
+    }
+
+    async function scheduleAllPromoPosts() {
+      if (!promoProjectId) return;
+      const btn = document.getElementById('btn-schedule-promo');
+      const progressEl = document.getElementById('promo-progress');
+      btn.disabled = true;
+      btn.textContent = 'Scheduling...';
+      progressEl.textContent = 'Launching Facebook and scheduling standalone promo image posts...';
+
+      try {
+        const result = await window.api.scheduleAllPromoPosts(promoProjectId, {});
+        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Scheduled ${result.uploaded} promo post${result.uploaded === 1 ? '' : 's'}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        renderPromoPosts(result.posts || []);
+        await refreshPromoPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Schedule All';
+      updatePromoActionButtons();
+    }
+
+    if (window.api.onPromoProgress) {
+      window.api.onPromoProgress((data) => {
+        const progressEl = document.getElementById('promo-progress');
+        if (!progressEl) return;
+        if (data.message) progressEl.textContent = data.message;
+        else if (data.phase === 'asset' && data.status === 'done') {
+          progressEl.textContent = `Generated ${data.generated || 0}; failed ${data.failed || 0}.`;
+        } else if (data.phase === 'copy' && data.status === 'done') {
           progressEl.textContent = `Generated ${data.generated || 0}; failed ${data.failed || 0}.`;
         } else if (data.phase === 'upload' && data.status === 'done') {
           progressEl.textContent = `Scheduled ${data.uploaded || 0}; failed ${data.failed || 0}.`;

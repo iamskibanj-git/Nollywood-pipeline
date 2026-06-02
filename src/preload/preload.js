@@ -93,6 +93,14 @@ contextBridge.exposeInMainWorld('api', {
   generateSocialPosts: (projectId, options) => ipcRenderer.invoke('social:generate', projectId, options || {}),
   scheduleAllSocialPosts: (projectId, options) => ipcRenderer.invoke('social:scheduleAll', projectId, options || {}),
 
+  // Standalone promo character spotlights
+  getPromoProjects: () => ipcRenderer.invoke('promo:getProjects'),
+  getPromoStatus: (projectId) => ipcRenderer.invoke('promo:getStatus', projectId),
+  planPromoPosts: (projectId, options) => ipcRenderer.invoke('promo:plan', projectId, options || {}),
+  generatePromoAssets: (projectId, options) => ipcRenderer.invoke('promo:generateAssets', projectId, options || {}),
+  generatePromoCopy: (projectId, options) => ipcRenderer.invoke('promo:generateCopy', projectId, options || {}),
+  scheduleAllPromoPosts: (projectId, options) => ipcRenderer.invoke('promo:scheduleAll', projectId, options || {}),
+
   // API connectivity test
   testApiKeys: () => ipcRenderer.invoke('test-api-keys'),
 
@@ -112,5 +120,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   onSocialProgress: (callback) => {
     ipcRenderer.on('social-progress', (_, data) => callback(data));
+  },
+  onPromoProgress: (callback) => {
+    ipcRenderer.on('promo-progress', (_, data) => callback(data));
   },
 });

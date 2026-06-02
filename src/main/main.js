@@ -318,6 +318,32 @@ ipcMain.handle('social:plan', (_, projectId, options) => getSocialPostsControlle
 ipcMain.handle('social:generate', (_, projectId, options) => getSocialPostsController().generate(projectId, options || {}));
 ipcMain.handle('social:scheduleAll', (_, projectId, options) => getSocialPostsController().scheduleAll(projectId, options || {}));
 
+// Standalone promo character spotlights
+const { PromoController } = require('./promo');
+let promoController = null;
+function getPromoController() {
+  if (!promoController) {
+    promoController = new PromoController(db, {
+      apiKey: store.get('claudeApiKey', ''),
+      geminiApiKey: store.get('geminiApiKey', ''),
+      userDataDir: store.get('chromeUserDataDir', null),
+      log: (...args) => console.log('[PROMO]', ...args),
+      onProgress: (data) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('promo-progress', data);
+        }
+      },
+    });
+  }
+  return promoController;
+}
+ipcMain.handle('promo:getProjects', () => getPromoController().getProjects());
+ipcMain.handle('promo:getStatus', (_, projectId) => getPromoController().getStatus(projectId));
+ipcMain.handle('promo:plan', (_, projectId, options) => getPromoController().plan(projectId, options || {}));
+ipcMain.handle('promo:generateAssets', (_, projectId, options) => getPromoController().generateAssets(projectId, options || {}));
+ipcMain.handle('promo:generateCopy', (_, projectId, options) => getPromoController().generateCopy(projectId, options || {}));
+ipcMain.handle('promo:scheduleAll', (_, projectId, options) => getPromoController().scheduleAll(projectId, options || {}));
+
 // API connectivity test — validates keys work before starting a pipeline run
 ipcMain.handle('test-api-keys', async () => {
   const results = { claude: null, gemini: null };

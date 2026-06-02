@@ -6,6 +6,7 @@ const SOCIAL_POST_TIMES = {
   post_short_recap: '21:00',
 };
 
+const ENGAGEMENT_POST_TYPES = new Set(['character_intro', 'pre_short_teaser', 'post_short_recap']);
 const DEFAULT_SCHEDULE_BUFFER_MINUTES = 60;
 
 class SocialPlanner {
@@ -20,7 +21,8 @@ class SocialPlanner {
   }
 
   getStatus(projectId) {
-    const posts = this.db.getSocialPostsForProject(projectId);
+    const posts = this.db.getSocialPostsForProject(projectId)
+      .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type));
     const summary = {
       total: posts.length,
       planned: posts.filter(p => p.status === 'planned').length,

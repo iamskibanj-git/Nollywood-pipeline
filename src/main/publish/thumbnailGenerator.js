@@ -208,7 +208,7 @@ Requirements:
   /**
    * Stage 3: Composite title card over key art using both as references.
    */
-  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9' }) {
+  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = false, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false }) {
     const placementInstructions = {
       'upper-third':    'Position the title text in the UPPER THIRD of the frame, spanning the full width',
       'lower-third':    'Position the title text in the LOWER THIRD of the frame, spanning the full width',
@@ -239,6 +239,8 @@ Requirements:
         outputPath,
         references: [keyArtPath, titleCardPath],
         aspectRatio,
+        referenceUploadWarmupMs,
+        referenceUploadAllowAnyInput,
         useUnlimited: true,
       }, 'composite');
     } catch (genErr) {
@@ -250,9 +252,15 @@ Requirements:
           outputPath,
           references: [keyArtPath, titleCardPath],
           aspectRatio,
+          referenceUploadWarmupMs,
+          referenceUploadAllowAnyInput,
           useUnlimited: true,
         }, 'composite');
       } else {
+        if (skipRecoveryOnReferenceFailure && /REFERENCE_UPLOAD_FAILED|REFERENCE_GATE_FAILED|reference/i.test(genErr.message || '')) {
+          console.warn(`[THUMBNAIL] Stage 3 stopped before Generate was submitted: ${genErr.message}`);
+          throw genErr;
+        }
         console.warn(`[THUMBNAIL] Stage 3 generation failed: ${genErr.message} — attempting Asset library recovery`);
         const recovered = await this._tryAssetRecovery(prompt, outputPath, 'composite');
         if (!recovered) throw genErr;

@@ -473,11 +473,12 @@ class HiggsFieldAutomation {
     );
   }
 
-  async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null }) {
+  async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false }) {
     // Reset per-call state — _lastDetectedUrl must NOT bleed across calls.
     // Without this, a previous portrait's CDN URL would be attached to the
     // next portrait's error, causing wrong-portrait-on-recovery bugs.
     this._lastDetectedUrl = null;
+    this._referenceUploadAllowAnyInput = referenceUploadAllowAnyInput === true;
 
     // Normalize aspect ratio — only these are valid for Nano Banana Pro in this pipeline
     const _aspect = ['1:1', '16:9', '9:16'].includes(aspectRatio) ? aspectRatio : '16:9';
@@ -598,6 +599,9 @@ class HiggsFieldAutomation {
           if (exists) validRefs.push(references[i]);
         }
         if (validRefs.length > 0) {
+          if (referenceUploadWarmupMs > 0) {
+            await this._warmupReferenceUploadControls(referenceUploadWarmupMs);
+          }
           await this.uploadImageReferences(validRefs);
 
           // ── HARD GATE: Verify reference thumbnails are visible (local preview) ──
@@ -2170,6 +2174,62 @@ class HiggsFieldAutomation {
   // IMAGE REFERENCE UPLOAD HELPERS
   // ══════════════════════════════════════════════════════════
 
+  async _warmupReferenceUploadControls(timeoutMs = 8000) {
+    const page = this.page;
+    console.log(`[REF] Warmup: waiting up to ${Math.round(timeoutMs / 1000)}s for reference upload controls...`);
+
+    try {
+      const promptBox = await page.$('[role="textbox"][contenteditable="true"]');
+      if (promptBox) {
+        await promptBox.click({ force: true }).catch(() => {});
+      } else {
+        const vp = page.viewportSize() || { width: 1200, height: 800 };
+        await page.mouse.click(Math.round(vp.width / 2), Math.round(vp.height * 0.88)).catch(() => {});
+      }
+    } catch (_) {}
+
+    const start = Date.now();
+    let lastState = '';
+    while (Date.now() - start < timeoutMs) {
+      const state = await page.evaluate(() => {
+        const form = document.querySelector('form.image-form') || document.querySelector('form');
+        if (!form) return { formFound: false, slots: 0, fileInputs: 0, bottomButtons: 0 };
+        const formRect = form.getBoundingClientRect();
+        const slots = form.querySelectorAll('.size-14').length;
+        const fileInputs = form.querySelectorAll('input[type="file"]').length;
+        let bottomButtons = 0;
+        for (const btn of form.querySelectorAll('button, [role="button"], label')) {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 15 && rect.height > 15 && rect.y >= window.innerHeight * 0.55) bottomButtons++;
+        }
+        return {
+          formFound: true,
+          slots,
+          fileInputs,
+          bottomButtons,
+          formY: Math.round(formRect.y),
+          formH: Math.round(formRect.height),
+        };
+      }).catch(() => ({ formFound: false, slots: 0, fileInputs: 0, bottomButtons: 0 }));
+
+      const stateText = JSON.stringify(state);
+      if (stateText !== lastState) {
+        console.log(`[REF] Warmup state: ${stateText}`);
+        lastState = stateText;
+      }
+
+      if (state.formFound && (state.slots > 0 || state.fileInputs > 0 || state.bottomButtons > 0)) {
+        await page.waitForTimeout(1200);
+        console.log('[REF] Warmup complete: reference upload controls are hydrated');
+        return;
+      }
+
+      await page.waitForTimeout(500);
+    }
+
+    console.warn('[REF] Warmup timed out; proceeding to normal upload trigger search');
+  }
+
   /**
    * Wait for reference slot file inputs to appear in the DOM.
    * After page navigation or preview overlay dismissal, React needs time
@@ -3184,20 +3244,38 @@ class HiggsFieldAutomation {
     // wrapped in a label or button. The actual click trigger (+ button with SVG
     // icon) is a SIBLING of the input's ancestors, not an ancestor itself.
     if (slotState.totalSlots === 0) {
-      const freshInfo = await page.evaluate(() => {
+      const freshInfo = await page.evaluate((allowAnyFileInput) => {
         const form = document.querySelector('form.image-form') || document.querySelector('form');
         if (!form) return { error: 'no form' };
 
-        // Find the image-accepting file input NOT inside a .size-14 slot
+        const inputs = Array.from(form.querySelectorAll('input[type="file"]')).map((input, index) => {
+          const rect = input.getBoundingClientRect();
+          return {
+            index,
+            accept: input.getAttribute('accept') || '',
+            insideSlot: !!input.closest('.size-14'),
+            id: input.id || null,
+            name: input.getAttribute('name') || null,
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+          };
+        });
+
+        // Find a fresh-page file input NOT inside a .size-14 slot. Publish keeps
+        // the stricter image-accept check; Promo composite can opt into accepting
+        // Higgsfield's current bare file input when its accept attribute is empty.
         let fileInput = null;
         for (const input of form.querySelectorAll('input[type="file"]')) {
           const accept = (input.getAttribute('accept') || '').toLowerCase();
-          if (!accept.includes('image')) continue;
           if (input.closest('.size-14')) continue;
+          if (!allowAnyFileInput && accept && !accept.includes('image') && !accept.includes('*')) continue;
+          if (!allowAnyFileInput && !accept) continue;
           fileInput = input;
           break;
         }
-        if (!fileInput) return { error: 'no fresh file input' };
+        if (!fileInput) return { error: 'no fresh file input', inputs, allowAnyFileInput };
 
         const candidates = [];
 
@@ -3310,8 +3388,10 @@ class HiggsFieldAutomation {
           chosen: best ? { tag: best.tag, w: Math.round(best.w), h: Math.round(best.h), x: Math.round(best.x), y: Math.round(best.y) } : null,
           inputAccept: fileInput.getAttribute('accept') || '',
           inputId: fileInput.id || null,
+          inputs,
+          allowAnyFileInput,
         };
-      });
+      }, this._referenceUploadAllowAnyInput === true);
 
       console.log(`[REF]   Fresh page candidates: ${JSON.stringify(freshInfo)}`);
 
