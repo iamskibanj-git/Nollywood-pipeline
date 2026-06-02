@@ -8777,12 +8777,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         // because those are the only ones that burn credits.
         const isPreGen = e.message.includes('[PRE-GEN]');
         const isTimeout = e.message.includes('Timeout') || e.message.includes('timeout');
+        const isCinemaRefundedFailure = cinematicVideoEngine === 'cinema-studio-3.5' && (
+          e.code === 'CINEMA_REFUNDED_FAILURE' ||
+          e.message.includes('CINEMA_REFUNDED_FAILURE')
+        );
         const isBrowserDead = e.message.includes('closed') || e.message.includes('crashed') ||
                               e.message.includes('disconnected') || e.message.includes('Target');
 
-        if (!isPreGen && isTimeout && !isBrowserDead && finalMultiShotPrompt) {
-          this.log(`[CINEMATIC] ${clipId}: timeout detected — waiting 120s for ${videoEngineLabel} to finish generating before recovery...`);
-          await new Promise(r => setTimeout(r, 120000));
+        if (isCinemaRefundedFailure) {
+          shouldRetry = true;
+          this.log(`[CINEMATIC] ${clipId}: Cinema Studio failed with visible credits-refunded state — retrying once without Asset Library recovery`);
+        } else if (!isPreGen && isTimeout && !isBrowserDead && finalMultiShotPrompt) {
+          const isEarlyUiSettled = e.message.includes('UI settled early');
+          const recoveryGraceMs = isEarlyUiSettled ? 30000 : 120000;
+          this.log(`[CINEMATIC] ${clipId}: ${isEarlyUiSettled ? 'UI settled early' : 'timeout detected'} — waiting ${Math.round(recoveryGraceMs / 1000)}s for ${videoEngineLabel} to finish indexing before recovery...`);
+          await new Promise(r => setTimeout(r, recoveryGraceMs));
           this.log(`[CINEMATIC] ${clipId}: wait complete — attempting Asset library recovery...`);
           try {
             const recovered = await videoAutomation.recoverTimedOutClip(finalMultiShotPrompt, outputPath, {

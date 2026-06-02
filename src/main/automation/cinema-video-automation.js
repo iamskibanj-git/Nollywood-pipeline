@@ -25,6 +25,15 @@ class CinemaEligibilityError extends Error {
   }
 }
 
+class CinemaRefundedFailureError extends Error {
+  constructor(message, evidence = null) {
+    super(message);
+    this.name = 'CinemaRefundedFailureError';
+    this.code = 'CINEMA_REFUNDED_FAILURE';
+    this.evidence = evidence;
+  }
+}
+
 class CinemaVideoAutomation extends KlingAutomation {
   constructor({ automation, logger, projectId, elementEligibilityCache, onElementEligibilityUpdate } = {}) {
     super({ automation, logger: logger || ((msg) => console.log(`[CINEMA-VIDEO] ${msg}`)) });
@@ -2973,6 +2982,58 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
   }
 
+  async _detectCinemaGenerationLifecycle(page) {
+    if (!page) return { state: 'unknown', evidence: 'no page' };
+    try {
+      return await page.evaluate(() => {
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+            && r.top < window.innerHeight && r.bottom > 0 && r.left < window.innerWidth && r.right > 0;
+        };
+        const interesting = [...document.querySelectorAll('button, [role="button"], [role="status"], [aria-live], div, span')]
+          .filter(visible)
+          .map(el => ({
+            text: normalize(el.innerText || el.textContent || ''),
+            tag: el.tagName || '',
+          }))
+          .filter(item => item.text);
+
+        for (const item of interesting) {
+          if (/^(processing|generating)$/i.test(item.text) || /\b(processing|generating)\b/i.test(item.text)) {
+            return { state: 'active', evidence: item.text.slice(0, 160) };
+          }
+        }
+
+        for (const item of interesting) {
+          const lower = item.text.toLowerCase();
+          const failed = /\bfailed\b/.test(lower) || /please try again/i.test(item.text);
+          const refunded = /credits?\s+refunded/i.test(item.text) || /\brefunded\b/i.test(lower);
+          if (failed && refunded) {
+            return { state: 'failed_refunded', evidence: item.text.slice(0, 220) };
+          }
+        }
+
+        const videoTiles = [...document.querySelectorAll('video, video source, img')]
+          .filter(el => {
+            const r = el.getBoundingClientRect();
+            if (!visible(el)) return false;
+            if (r.width < 140 || r.height < 140) return false;
+            return r.top > 60;
+          });
+        if (videoTiles.length > 0) {
+          return { state: 'settled', evidence: `${videoTiles.length} visible media tile(s), no Processing/Generating/Failed-refunded label` };
+        }
+
+        return { state: 'unknown', evidence: null };
+      });
+    } catch (err) {
+      return { state: 'unknown', evidence: `check failed: ${err.message}` };
+    }
+  }
+
   async _waitForCinemaGenerationAccepted(page, timeoutMs = 90000) {
     const started = Date.now();
     let attempt = 0;
@@ -3166,11 +3227,32 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     const maxWaitMs = 12 * 60 * 1000;
+    const minEarlyRecoveryMs = 4 * 60 * 1000;
+    const pollMs = 60 * 1000;
     const startedAt = Date.now();
-    this.log(`Cinema Studio generation submitted; waiting ${Math.round(maxWaitMs / 60000)}min before Asset Library recovery (direct UI video-source download disabled for identity safety)`);
+    let settledPolls = 0;
+    this.log(`Cinema Studio generation submitted; polling UI lifecycle up to ${Math.round(maxWaitMs / 60000)}min before Asset Library recovery (direct UI video-source download disabled for identity safety)`);
     let lastSeenSrc = initialFirstSrc;
     while (Date.now() - startedAt < maxWaitMs) {
-      await page.waitForTimeout(30000);
+      await page.waitForTimeout(pollMs);
+      const elapsedMs = Date.now() - startedAt;
+      const lifecycle = await this._detectCinemaGenerationLifecycle(page);
+      if (lifecycle.state === 'failed_refunded') {
+        throw new CinemaRefundedFailureError(`CINEMA_REFUNDED_FAILURE: Cinema Studio failed and credits were refunded (${lifecycle.evidence || 'visible failure state'})`, lifecycle.evidence);
+      }
+      if (lifecycle.state === 'active') {
+        settledPolls = 0;
+        this.log(`[CINEMA-VIDEO] Generation still active after ${Math.round(elapsedMs / 1000)}s (${lifecycle.evidence || 'Processing/Generating'})`);
+      } else if (elapsedMs >= minEarlyRecoveryMs && lifecycle.state === 'settled') {
+        settledPolls++;
+        this.log(`[CINEMA-VIDEO] UI appears settled after ${Math.round(elapsedMs / 1000)}s (${settledPolls}/2): ${lifecycle.evidence || 'no active label'}`);
+        if (settledPolls >= 2) {
+          throw new Error(`Timeout waiting for Cinema Studio 3.5 generation (${Math.round(elapsedMs / 1000)}s; UI settled early for Asset Library recovery)`);
+        }
+      } else {
+        settledPolls = 0;
+        this.log(`[CINEMA-VIDEO] Waiting for generation lifecycle (${Math.round(elapsedMs / 1000)}s, state=${lifecycle.state}${lifecycle.evidence ? `, evidence=${lifecycle.evidence}` : ''})`);
+      }
       const currentFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null).catch(() => null);
       if (currentFirstSrc && currentFirstSrc !== initialFirstSrc) {
         if (currentFirstSrc !== lastSeenSrc) {
@@ -3214,4 +3296,4 @@ class CinemaVideoAutomation extends KlingAutomation {
   }
 }
 
-module.exports = { CinemaVideoAutomation, CinemaEligibilityError };
+module.exports = { CinemaVideoAutomation, CinemaEligibilityError, CinemaRefundedFailureError };
