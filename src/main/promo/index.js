@@ -315,8 +315,17 @@ class PromoController {
     const preset = thumbGen.presets?.drama || Object.values(thumbGen.presets || {})[0] || {};
     const keyArtPath = path.join(outputDir, 'key-art-custom.png');
     const titleCardPath = path.join(outputDir, 'title-card.png');
+    const titleCardSpecPath = path.join(outputDir, 'title-card.json');
     const thumbnailPath = path.join(outputDir, 'thumbnail-custom.png');
     const placement = aspectRatio === '9:16' ? 'bottom-bar' : 'lower-third';
+    const scriptDisplayTitle = this._promoScriptDisplayTitle(project.title);
+    const titleCardTitle = this._promoCharacterDisplayName(character);
+    const titleCardSpec = {
+      version: 3,
+      title: titleCardTitle,
+      subtitle: scriptDisplayTitle,
+      aspectRatio,
+    };
 
     if (!this._fileReady(keyArtPath)) {
       await thumbGen.generateCustomKeyArt({
@@ -329,14 +338,18 @@ class PromoController {
       this.log(`[PROMO] Reusing existing promo key art: ${keyArtPath}`);
     }
 
-    if (!this._fileReady(titleCardPath)) {
+    if (!this._fileReady(titleCardPath) || !this._jsonFileMatches(titleCardSpecPath, titleCardSpec)) {
       await thumbGen.generateTitleCard({
-        title: project.title,
-        tagline: '',
+        title: titleCardTitle,
+        tagline: scriptDisplayTitle,
         preset,
         outputPath: titleCardPath,
         aspectRatio,
+        taglineCase: 'preserve',
+        taglineSeparator: true,
+        splitTitle: false,
       });
+      this._writeJsonFile(titleCardSpecPath, titleCardSpec);
     } else {
       this.log(`[PROMO] Reusing existing promo title card: ${titleCardPath}`);
     }
@@ -439,6 +452,54 @@ class PromoController {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '');
+  }
+
+  _promoScriptDisplayTitle(title) {
+    let text = String(title || 'Untitled').trim();
+    text = text.replace(/\s*\([^)]*characters?[^)]*\)\s*$/i, '').trim();
+    text = text.replace(/\s*\|\s*(?:ai\s+)?(?:nollywood\s+)?(?:short\s+)?(?:film|movie|drama)\s*$/i, '').trim();
+
+    const suffixSplit = text.split(/\s+[—-]\s+/);
+    if (suffixSplit.length > 1) {
+      const suffix = suffixSplit.slice(1).join(' ');
+      if (/(nigerian|animated|folktale|ai|drama|film|movie|full)/i.test(suffix)) {
+        text = suffixSplit[0].trim();
+      }
+    }
+
+    text = text.replace(/\s+/g, ' ').trim() || 'Untitled';
+    if (/[a-z]/.test(text)) return text;
+
+    const smallWords = new Set(['of', 'the', 'and', 'a', 'an', 'in', 'on', 'to', 'for', 'with', 'from', 'by']);
+    return text.toLowerCase().replace(/\b[a-z0-9']+\b/g, (word, offset) => {
+      if (offset > 0 && smallWords.has(word)) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    });
+  }
+
+  _promoCharacterDisplayName(character) {
+    let text = String(character?.name || character?.id || 'Character Spotlight').trim();
+    text = text.split(/\s+[—-]\s+/)[0].trim();
+    text = text.split(/\s+\|\s+/)[0].trim();
+    return text.replace(/\s+/g, ' ').trim() || 'Character Spotlight';
+  }
+
+  _jsonFileMatches(filePath, expected) {
+    try {
+      if (!fs.existsSync(filePath)) return false;
+      const actual = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      return JSON.stringify(actual) === JSON.stringify(expected);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _writeJsonFile(filePath, value) {
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+    } catch (error) {
+      this.log(`[PROMO] Could not write title-card spec: ${error.message}`);
+    }
   }
 
   _promoImagePath(projectDir, character) {

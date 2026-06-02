@@ -133,9 +133,10 @@ Requirements:
    * Stage 2: Generate transparent-PNG title card.
    * Includes OCR verification via Gemini Vision with auto-retry.
    */
-  async generateTitleCard({ title, tagline, preset, outputPath, aspectRatio = '16:9' }) {
-    // Split title into 1-2 lines if it's long
-    const titleLines = this._splitTitle(title);
+  async generateTitleCard({ title, tagline, preset, outputPath, aspectRatio = '16:9', taglineCase = 'all-caps', taglineSeparator = false, splitTitle = true }) {
+    // Split title into 1-2 lines if it's long. Promo title cards disable this
+    // so character names containing punctuation stay on exactly one line.
+    const titleLines = splitTitle ? this._splitTitle(title) : [String(title || '').trim()];
     const titleLine1 = titleLines[0];
     const titleLine2 = titleLines[1] || '';
 
@@ -148,6 +149,8 @@ Requirements:
       primaryName: preset.primary_name,
       secondaryHex: preset.secondary_hex,
       secondaryName: preset.secondary_name,
+      taglineCase,
+      taglineSeparator,
     });
 
     let verified = false;
@@ -374,7 +377,7 @@ Requirements:
     return [title];
   }
 
-  _buildTitleCardPrompt({ titleLine1, titleLine2, tagline, fontFamilyHint, primaryHex, primaryName, secondaryHex, secondaryName }) {
+  _buildTitleCardPrompt({ titleLine1, titleLine2, tagline, fontFamilyHint, primaryHex, primaryName, secondaryHex, secondaryName, taglineCase = 'all-caps', taglineSeparator = false }) {
     let prompt = `Transparent background PNG. Typography only, no characters, no scenery.
 Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyweight, slightly tracked out, color: ${primaryHex} (${primaryName}) with a very subtle inner glow and paper-thin dark outline #0A0A0A.`;
 
@@ -383,7 +386,13 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
     }
 
     if (tagline) {
-      prompt += ` ${titleLine2 ? 'Line 3' : 'Line 2'} tagline: "${tagline}" — thin elegant sans-serif, all caps, wide letter spacing, color: ${secondaryHex} (${secondaryName}).`;
+      if (taglineSeparator && !titleLine2) {
+        prompt += ` Thin horizontal ${primaryName} rule ${primaryHex} separating line 1 from line 2, full width of the text block.`;
+      }
+      const taglineCaseInstruction = taglineCase === 'preserve'
+        ? 'preserve the exact title case shown, no all-caps conversion'
+        : 'all caps';
+      prompt += ` ${titleLine2 ? 'Line 3' : 'Line 2'} tagline: "${tagline}" — thin elegant sans-serif, ${taglineCaseInstruction}, wide letter spacing, color: ${secondaryHex} (${secondaryName}).`;
     }
 
     prompt += ` All elements perfectly center-aligned. Subtle metallic sheen on the ${primaryName} lettering — not glittery, just premium. No drop shadow. No background. Pure transparent PNG.`;

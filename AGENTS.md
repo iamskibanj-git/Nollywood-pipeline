@@ -3613,10 +3613,39 @@ Standalone Promo posts live in the Promo tab and reuse existing Publish + Engage
   ```text
   key-art-custom.png
   title-card.png
+  title-card.json
   thumbnail-custom.png
   ```
-  If `key-art-custom.png` and `title-card.png` already exist and are non-trivial files, `Generate Images` should reuse them and continue directly to `thumbnail-custom.png` composite.
+  Promo title cards use the character full name as the top line and the cleaned script title as the bottom line, for example `Itohan Omonuwa` over `Blood of the Marketplace`. Strip production suffixes such as `— Full Nigerian AI Animated Folktale (3 characters)` from the displayed script title. `title-card.json` records the expected title-card spec; if it is missing or mismatched, regenerate `title-card.png` even when the image file already exists. If `key-art-custom.png` and a matching `title-card.png` already exist and are non-trivial files, `Generate Images` should reuse them and continue directly to `thumbnail-custom.png` composite.
 - **Composite safety:** Composite must attach the existing key art and title card as the two reference images before clicking Generate. If reference upload fails before Generate, do not run Asset Library recovery because no new generation was submitted; retry composite from a fresh context instead.
 - **Higgsfield fresh-page upload drift:** On the current Nano Banana Pro fresh image page, reference upload may show `totalSlots: 0` with one bare `input[type=file]` whose `accept` attribute is empty or not explicitly `image/*`. Promo composite opts into accepting this bare input while Publish defaults stay strict. The upload routine must still use trusted click/filechooser handling and abort before Generate if the backend upload is not confirmed.
 - **Copy:** Captions should be spoiler-free "meet the case/cast" copy based on character description and role, never a plot reveal.
 - **Scheduling:** After images and copy are ready, schedule through the existing Engagement Playwright/Facebook flow using the Promo rows and media paths.
+
+**Facebook image-post UI drift (live diagnostic 2026-06-02):**
+The Social/Promo image-post scheduler now opens a full-page composer at:
+```text
+https://www.facebook.com/post/create
+```
+Do not expect the old small `Create post` dialog or the old `Next -> Scheduling options` wizard for image posts. Current live flow:
+```text
+Professional dashboard -> Content Library -> Scheduled -> Create dropdown -> Post
+caption textbox visible immediately
+Add photos or videos drop zone visible immediately
+bottom Schedule button opens Scheduling options modal
+modal has Date and Time text inputs
+Schedule for later button applies the date/time and closes the modal
+bottom Schedule post button submits the scheduled post
+```
+Captured live selectors/labels:
+```text
+caption: role="textbox", placeholder "What's on your mind, Fayehun?"
+media: role="button", text "Add photos or videos or drag and drop"
+schedule: bottom role="button", text "Schedule"
+date input value example: "Jun 2, 2026"
+time input value example: "3:09 PM"
+modal submit: role="button", aria/text "Schedule for later"
+final submit: bottom role="button", aria/text "Schedule post"
+confirmation: Content Library scheduled row appears, e.g. caption text plus "Scheduled · Today at 3:45 PM"; do not rely on a toast
+```
+Keep Shorts/Reels on their separate wizard path; this drift note applies to image posts scheduled by `social-facebook-uploader.js`.

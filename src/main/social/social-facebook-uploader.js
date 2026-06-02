@@ -67,33 +67,28 @@ class SocialFacebookUploader extends FacebookUploader {
       await this._enterPostCaption(caption);
       this.onStepComplete('caption');
 
-      this.log('[FB-SOCIAL] Step 5: Clicking Next');
+      this.log('[FB-SOCIAL] Step 5: Opening scheduling modal');
       await this._scrollComposerToBottom();
-      await this._clickNext();
-      await this.page.waitForTimeout(POST_CLICK_SETTLE);
-      this.onStepComplete('next');
-
-      this.log('[FB-SOCIAL] Step 6: Opening scheduling options');
-      await this._clickSchedulingOptions();
+      await this._clickComposerScheduleButton();
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('scheduling_options');
 
-      this.log(`[FB-SOCIAL] Step 7: Setting date ${scheduledDate}`);
+      this.log(`[FB-SOCIAL] Step 6: Setting date ${scheduledDate}`);
       await this._setScopedScheduleDate(scheduledDate);
       await this.page.waitForTimeout(1000);
 
-      this.log(`[FB-SOCIAL] Step 8: Setting time ${scheduledTime}`);
+      this.log(`[FB-SOCIAL] Step 7: Setting time ${scheduledTime}`);
       await this._setScopedScheduleTime(scheduledTime);
       await this.page.waitForTimeout(1000);
 
-      this.log('[FB-SOCIAL] Step 9: Clicking Schedule for later');
+      this.log('[FB-SOCIAL] Step 8: Clicking Schedule for later');
       await this._clickScheduleForLater();
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('schedule_for_later');
 
-      this.log('[FB-SOCIAL] Step 10: Clicking Schedule');
-      await this._clickFinalSchedule();
-      await this._waitForScheduleConfirmation();
+      this.log('[FB-SOCIAL] Step 9: Clicking Schedule post to submit scheduled post');
+      await this._clickComposerSubmitButton();
+      await this._waitForScheduleConfirmation(caption);
       this.onStepComplete('scheduled');
 
       this.log('[FB-SOCIAL] Image post scheduled successfully');
@@ -125,18 +120,37 @@ class SocialFacebookUploader extends FacebookUploader {
         const locator = getLocator();
         if (await locator.count() > 0) {
           await locator.click({ timeout: CLICK_TIMEOUT });
-          return;
+          await this.page.waitForTimeout(1200);
+          if (await this._hasCreateMenuOpen()) return;
+          await locator.click({ timeout: CLICK_TIMEOUT });
+          await this.page.waitForTimeout(1200);
+          if (await this._hasCreateMenuOpen()) return;
         }
       } catch (_) {}
     }
+    const clicked = await this._clickVisibleControlByText(/^Create$/i);
+    if (clicked) {
+      await this.page.waitForTimeout(1200);
+      if (await this._hasCreateMenuOpen()) return;
+      await this._clickVisibleControlByText(/^Create$/i);
+      await this.page.waitForTimeout(1200);
+      return;
+    }
     throw new Error('Could not click Create button');
+  }
+
+  async _hasCreateMenuOpen() {
+    return await this.page.evaluate(() => {
+      const text = document.body.innerText || document.body.textContent || '';
+      return /\bPost\b[\s\S]*\bStory\b[\s\S]*\bReel\b/.test(text);
+    }).catch(() => false);
   }
 
   async _clickPostMenuItem() {
     const candidates = [
       () => this.page.getByRole('menuitem', { name: /^Post$/i }).first(),
-      () => this.page.getByText('Post', { exact: true }).first(),
       () => this.page.locator('[role="menuitem"]:has-text("Post")').first(),
+      () => this.page.getByText('Post', { exact: true }).first(),
     ];
     for (const getLocator of candidates) {
       try {
@@ -147,20 +161,25 @@ class SocialFacebookUploader extends FacebookUploader {
         }
       } catch (_) {}
     }
+    const clicked = await this._clickVisibleControlByText(/^Post$/i, { preferRole: 'menuitem' });
+    if (clicked) return;
     throw new Error('Could not click Post menu item');
   }
 
   async _waitForCreatePostDialog() {
     await this.page.waitForFunction(() => {
       const dialogs = [...document.querySelectorAll('[role="dialog"]')];
-      return dialogs.some(d => /Create post/i.test(d.textContent || ''));
+      const text = document.body.innerText || document.body.textContent || '';
+      return location.href.includes('/post/create') ||
+        dialogs.some(d => /Create post|What's on your mind|Posting to|Add photos or videos/i.test(d.textContent || '')) ||
+        /What's on your mind|Posting to|Add photos or videos/i.test(text);
     }, { timeout: CLICK_TIMEOUT });
     await this._waitForComposerHydration();
   }
 
   _activeDialog() {
     return this.page.locator('[role="dialog"]').filter({
-      hasText: /Create post|What's on your mind|Photo\/video|Scheduling options|Schedule for later/i,
+      hasText: /Create post|What's on your mind|Posting to|Photo\/video|Add photos or videos|Scheduling options|Schedule for later/i,
     }).last();
   }
 
@@ -309,6 +328,9 @@ class SocialFacebookUploader extends FacebookUploader {
     const dialog = this._activeDialog();
 
     const triggerClick = async () => {
+      const clickedNewDropZone = await this._clickAddPhotosDropZone();
+      if (clickedNewDropZone) return true;
+
       const clickedAddToPostIcon = await this._clickPhotoVideoIconByGeometry(dialog);
       if (clickedAddToPostIcon) return true;
 
@@ -366,6 +388,13 @@ class SocialFacebookUploader extends FacebookUploader {
     }
 
     throw new Error('Could not upload image through Photo/video control');
+  }
+
+  async _clickAddPhotosDropZone() {
+    const clicked = await this._clickVisibleControlByText(/Add photos or videos/i);
+    if (!clicked) return false;
+    await this.page.waitForTimeout(800);
+    return true;
   }
 
   async _setAnyImageFileInput(mediaPath) {
@@ -481,6 +510,110 @@ class SocialFacebookUploader extends FacebookUploader {
       } catch (_) {}
     }
     await this._clickWithFallback('div[role="button"]:has-text("Schedule for later"), span:text("Schedule for later")');
+  }
+
+  async _clickComposerScheduleButton() {
+    const clicked = await this._clickVisibleControlByText(/^Schedule$/i);
+    if (clicked) return;
+    await this._clickWithFallback('div[role="button"]:has-text("Schedule"):not(:has-text("for later")):not(:has-text("Scheduling")), span:text-is("Schedule")');
+  }
+
+  async _clickComposerSubmitButton() {
+    const clicked = await this._clickVisibleControlByText(/^(Schedule post|Post)$/i, { preferRole: 'button', bottomOnly: true });
+    if (clicked) return;
+    await this._clickWithFallback('div[role="button"][aria-label="Schedule post"], div[role="button"]:has-text("Schedule post"), div[role="button"][aria-label="Post"], div[role="button"]:has-text("Post")');
+  }
+
+  async _waitForScheduleConfirmation(expectedCaption = '') {
+    const captionNeedle = String(expectedCaption || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const start = Date.now();
+    const timeoutMs = 30000;
+    while (Date.now() - start < timeoutMs) {
+      const state = await this.page.evaluate((caption) => {
+        const text = document.body.innerText || document.body.textContent || '';
+        const url = location.href;
+        const hasSuccessText = /post has been scheduled|your post.*scheduled|scheduled your post|successfully scheduled/i.test(text);
+        const stillComposer = /What's on your mind|Add photos or videos|Posting to/i.test(text) && url.includes('/post/create');
+        const onContentLibrary = /Content Library/i.test(text) && /professional_dashboard\/content\/content_library/.test(url);
+        const noScheduledPosts = /No scheduled posts/i.test(text);
+        const hasScheduledRow = onContentLibrary &&
+          !noScheduledPosts &&
+          /Scheduled\s*[·•]/i.test(text) &&
+          (!caption || text.replace(/\s+/g, ' ').includes(caption));
+        return { url, hasSuccessText, stillComposer, onContentLibrary, noScheduledPosts, hasScheduledRow };
+      }, captionNeedle).catch(() => ({ url: '', hasSuccessText: false, stillComposer: false, onContentLibrary: false, noScheduledPosts: false, hasScheduledRow: false }));
+
+      if (state.hasSuccessText || state.hasScheduledRow) {
+        this.log('[FB-SOCIAL] Schedule confirmed for image post');
+        return;
+      }
+
+      await this.page.waitForTimeout(2000);
+    }
+
+    throw new Error('Schedule confirmation timed out; scheduled row did not appear in Content Library.');
+  }
+
+  async _hasVisibleComposerScheduleButton() {
+    return await this.page.evaluate(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
+      return buttons.some(el => {
+        const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const aria = el.getAttribute('aria-label') || '';
+        const rect = el.getBoundingClientRect();
+        return /^Schedule$/i.test(text || aria) && rect.y > window.innerHeight * 0.65;
+      });
+    }).catch(() => false);
+  }
+
+  async _clickVisibleControlByText(pattern, options = {}) {
+    const target = await this.page.evaluate(({ source, flags, preferRole, bottomOnly }) => {
+      const re = new RegExp(source, flags);
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const all = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], a, label, div')].filter(visible);
+      const ranked = all
+        .filter(el => re.test(textOf(el)))
+        .filter(el => {
+          if (!bottomOnly) return true;
+          const rect = el.getBoundingClientRect();
+          return rect.y > window.innerHeight * 0.6;
+        })
+        .map(el => {
+          const rect = el.getBoundingClientRect();
+          const role = el.getAttribute('role') || '';
+          let score = 0;
+          if (preferRole && role === preferRole) score += 100;
+          if (role === 'button' || role === 'menuitem' || el.tagName === 'BUTTON') score += 20;
+          if (rect.width > 20 && rect.height > 20) score += 10;
+          if (rect.width > 450) score -= 5;
+          return { rect, role, text: textOf(el), score };
+        })
+        .sort((a, b) => b.score - a.score);
+      const item = ranked[0];
+      if (!item) return null;
+      return {
+        x: Math.round(item.rect.x + item.rect.width / 2),
+        y: Math.round(item.rect.y + item.rect.height / 2),
+        text: item.text,
+        role: item.role,
+      };
+    }, { source: pattern.source, flags: pattern.flags, preferRole: options.preferRole || '', bottomOnly: options.bottomOnly === true }).catch(() => null);
+
+    if (!target) return false;
+    this.log(`[FB-SOCIAL] Clicking visible control "${target.text}" (${target.role || 'no role'}) at ${target.x},${target.y}`);
+    await this.page.mouse.click(target.x, target.y);
+    await this.page.waitForTimeout(800);
+    return true;
   }
 
   async _setScopedScheduleDate(dateStr) {
