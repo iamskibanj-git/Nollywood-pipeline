@@ -790,6 +790,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     let lastParsedCost = null;
 
     while (Date.now() - startedAt < timeoutMs) {
+      await this._dismissLowCreditToast('Generate credit read');
       const genBtnBox = await page.evaluate(() => {
         for (const b of document.querySelectorAll('button[type="submit"], button')) {
           const text = b.textContent?.trim() || '';
@@ -829,6 +830,115 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     throw new Error(`[PRE-GEN] Generate button has no credit cost after setup (last text=${JSON.stringify(lastButtonText)}, parsed=${lastParsedCost})`);
+  }
+
+  async _dismissLowCreditToast(label = 'pre-Generate') {
+    const page = this.automation.page;
+    if (!page) return false;
+    const result = await page.evaluate(() => {
+      const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const isLowCreditText = text => /credits are running low/i.test(text) || /over\s+90%\s+already\s+used/i.test(text);
+
+      const candidates = [...document.querySelectorAll('div, section, aside, [role="alert"], [role="status"]')]
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = normalize(el.innerText || el.textContent || '');
+          return { el, r, text };
+        })
+        .filter(item =>
+          item.r.width > 120 &&
+          item.r.height > 20 &&
+          item.r.x > window.innerWidth * 0.45 &&
+          item.r.y > window.innerHeight * 0.55 &&
+          isLowCreditText(item.text)
+        )
+        .sort((a, b) => (a.r.width * a.r.height) - (b.r.width * b.r.height));
+
+      if (candidates.length === 0) return { dismissed: false, reason: 'not-found' };
+
+      let toast = null;
+      let close = null;
+      for (const candidate of candidates) {
+        const buttons = [...candidate.el.querySelectorAll('button, [role="button"]')]
+          .map(btn => {
+            const r = btn.getBoundingClientRect();
+            const text = normalize(btn.innerText || btn.textContent || btn.getAttribute('aria-label') || '');
+            return { btn, r, text };
+          })
+          .filter(item => item.r.width > 0 && item.r.height > 0);
+
+        const candidateClose = buttons
+          .filter(item => !/upgrade/i.test(item.text))
+          .sort((a, b) => {
+            const aRight = a.r.x + a.r.width;
+            const bRight = b.r.x + b.r.width;
+            if (Math.abs(bRight - aRight) > 4) return bRight - aRight;
+            return a.r.y - b.r.y;
+          })[0];
+        if (candidateClose) {
+          toast = candidate;
+          close = candidateClose;
+          break;
+        }
+      }
+
+      if (!toast || !close) return { dismissed: false, reason: 'close-not-found', text: candidates[0].text.slice(0, 120) };
+      close.btn.click();
+      return {
+        dismissed: true,
+        text: toast.text.slice(0, 120),
+        closeText: close.text,
+        box: { x: toast.r.x, y: toast.r.y, w: toast.r.width, h: toast.r.height },
+      };
+    }).catch(err => ({ dismissed: false, reason: err.message }));
+
+    if (result?.dismissed) {
+      this.log(`[CINEMA-SAFETY] Dismissed low-credit toast before ${label}: ${JSON.stringify(result.box)}`);
+      await page.waitForTimeout(300);
+      return true;
+    }
+    return false;
+  }
+
+  async _assertGenerateClickPointClear(genBtnBox) {
+    const page = this.automation.page;
+    if (!page || !genBtnBox) throw new Error('[PRE-GEN] Generate button box unavailable');
+    const point = { x: Math.round(genBtnBox.x), y: Math.round(genBtnBox.y) };
+    const info = await page.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y);
+      const text = String(el?.innerText || el?.textContent || el?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const buttonsAtPoint = [...document.querySelectorAll('button[type="submit"], button')]
+        .filter(btn => {
+          const r = btn.getBoundingClientRect();
+          return /generate/i.test(btn.textContent || '') &&
+            r.width > 0 &&
+            r.height > 0 &&
+            x >= r.left &&
+            x <= r.right &&
+            y >= r.top &&
+            y <= r.bottom;
+        })
+        .map(btn => String(btn.innerText || btn.textContent || btn.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim());
+      const lowCreditAtPoint = [...document.querySelectorAll('div, section, aside, [role="alert"], [role="status"]')]
+        .some(node => {
+          const r = node.getBoundingClientRect();
+          if (!(r.width > 120 && r.height > 20 && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)) return false;
+          const nodeText = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+          return /credits are running low|over\s+90%\s+already\s+used/i.test(nodeText);
+        });
+      return {
+        tag: el?.tagName || '',
+        text: text.slice(0, 160),
+        buttonText: buttonsAtPoint[0]?.slice(0, 160) || '',
+        ok: buttonsAtPoint.length > 0,
+        blockedByLowCredit: lowCreditAtPoint || /credits are running low|over\s+90%\s+already\s+used|upgrade/i.test(text),
+      };
+    }, point);
+
+    if (!info.ok || info.blockedByLowCredit) {
+      throw new Error(`[PRE-GEN] Generate click point occluded before intentional click: ${JSON.stringify(info)}`);
+    }
+    return true;
   }
 
   async _ensureCinemaStudio35VideoActive(aspectRatio = '16:9') {
@@ -3010,7 +3120,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     await this._assertCinemaPromptComplete(this._expectedCinemaPromptText);
     await this._waitForCinemaEndpointQuietPeriod({ quietMs: 10000, timeoutMs: 30000, label: 'usage baseline' });
 
-    const { genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 20000, expectedMaxCost: 70 });
+    let { genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 20000, expectedMaxCost: 70 });
 
     let baselineLedgerSignatures = [];
     this._cinemaGeneratePhase = 'baseline';
@@ -3023,6 +3133,9 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     await this._waitForCinemaEndpointQuietPeriod({ quietMs: 5000, timeoutMs: 15000, label: 'intentional Generate click' });
+    await this._dismissLowCreditToast('intentional Generate click');
+    ({ genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 8000, expectedMaxCost: 70 }));
+    await this._assertGenerateClickPointClear(genBtnBox);
     this._cinemaGeneratePhase = 'readyToGenerate';
     await this._disarmCinemaGenerationEndpointBlocker();
     await this._allowNextGenerateClick();
