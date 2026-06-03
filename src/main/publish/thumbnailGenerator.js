@@ -229,7 +229,9 @@ Requirements:
 - Use the EXACT key art as the background — do not modify the characters, lighting, or composition
 - Overlay the EXACT title text from the title card — same font, same color, same style
 - ${placementInstruction}
-- Do NOT cover or obscure character faces with text — faces must remain fully visible
+- FACE PROTECTION IS MANDATORY: do not place any letter, shadow, rule line, glow, gradient, or text box over the character's face, head, eyes, nose, mouth, cheeks, forehead, chin, hair/headwrap, or neck
+- Keep the full face/head silhouette unobstructed with at least a 6% frame margin around it; the title block must sit entirely inside empty/negative space
+- If the requested placement conflicts with the face or head, ignore that placement and move the title to the clearest negative-space area instead
 - Blend naturally: slight darkened gradient behind text area for readability
 - Final result should look like a professional YouTube thumbnail
 - NO additional text, NO watermarks, NO borders`;
