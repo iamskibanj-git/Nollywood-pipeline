@@ -1109,7 +1109,7 @@
       badge.className = `status-badge ${status}`;
       badge.textContent = status.replace('_', ' ').toUpperCase();
 
-      const operatorResumeGate = ['preflight-failed', 'credits-exhausted'].includes(state.currentApprovalGate);
+      const operatorResumeGate = ['preflight-failed', 'credits-exhausted', 'higgsfield-verification-required'].includes(state.currentApprovalGate);
       document.getElementById('btn-pause').disabled = status !== 'running';
       document.getElementById('btn-cancel').disabled = status === 'idle' || status === 'complete';
       document.getElementById('btn-pause').style.display = (status === 'paused' || operatorResumeGate) ? 'none' : 'inline-block';
@@ -1357,7 +1357,7 @@
     }
 
     async function resumeProject() {
-      if (state.currentApprovalGate === 'preflight-failed' || state.currentApprovalGate === 'credits-exhausted') {
+      if (state.currentApprovalGate === 'preflight-failed' || state.currentApprovalGate === 'credits-exhausted' || state.currentApprovalGate === 'higgsfield-verification-required') {
         addLog(`Acknowledging ${state.currentApprovalGate} gate and retrying...`);
         await window.api.resumePipeline();
         return;
@@ -4284,6 +4284,15 @@
             const reason = d.reason || 'Higgsfield credits may be exhausted';
             const cost = d.creditCost != null ? ` (cost per generation: ${d.creditCost} credits)` : '';
             const msg = `⚠ Credits Exhausted\n\n${reason}${cost}\n\nAdd credits in Higgsfield, then click Resume.`;
+            updateLog(msg, 'warn');
+            document.getElementById('btn-pause').style.display = 'none';
+            document.getElementById('btn-resume-pipeline').style.display = 'inline-block';
+            document.getElementById('btn-resume-pipeline').disabled = false;
+          }
+          if (event.gate === 'higgsfield-verification-required') {
+            const d = event.detail || {};
+            const label = d.label ? ` during ${d.label}` : '';
+            const msg = `⚠ Higgsfield Verification Required${label}\n\nComplete the slider challenge in the Higgsfield browser window, then click Resume.`;
             updateLog(msg, 'warn');
             document.getElementById('btn-pause').style.display = 'none';
             document.getElementById('btn-resume-pipeline').style.display = 'inline-block';

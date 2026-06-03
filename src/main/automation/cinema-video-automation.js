@@ -110,7 +110,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
   }
 
-  async generateClip({ startFramePath, multiShotPrompt, durationSeconds = 15, outputPath, validElements, aspectRatio = '16:9', onGenClicked }) {
+  async generateClip({ startFramePath, multiShotPrompt, durationSeconds = 15, outputPath, validElements, aspectRatio = '16:9', onGenClicked, onVerificationRequired }) {
     if (!startFramePath) throw new Error('generateClip: startFramePath required');
     if (!fs.existsSync(startFramePath)) throw new Error(`[PRE-GEN] Start frame file not found: ${startFramePath}`);
     if (!multiShotPrompt) throw new Error('generateClip: multiShotPrompt required');
@@ -140,12 +140,13 @@ class CinemaVideoAutomation extends KlingAutomation {
       await this._cleanupCinemaSafetyAfterFailure('setup').catch(() => {});
       await this._setGenerateSafetyLock(false).catch(() => {});
       if (setupErr.code === 'CINEMA_ELIGIBILITY_FAILED') throw setupErr;
+      if (setupErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED') throw setupErr;
       if (setupErr.message && setupErr.message.includes('SESSION_EXPIRED')) throw setupErr;
       throw new Error(`[PRE-GEN] ${setupErr.message}`);
     }
 
     try {
-      const result = await this._generateAndDownload(outputPath, durationSeconds, onGenClicked);
+      const result = await this._generateAndDownload(outputPath, durationSeconds, onGenClicked, onVerificationRequired);
       return { ...result, model: this.modelName };
     } catch (err) {
       await this._cleanupCinemaSafetyAfterFailure('generate').catch(() => {});
@@ -616,16 +617,19 @@ class CinemaVideoAutomation extends KlingAutomation {
     const targetUrl = this._cinemaProjectUrl();
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(1500);
+    await this.automation.assertNoVerificationRequired?.('Cinema Studio project navigation');
     if (this._isCurrentCinemaProjectUrl(page.url())) return;
 
     this.log(`[CINEMA-VIDEO] Wrong URL after Cinema Studio navigation (${page.url()}); retrying direct project URL`, 'warn');
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(1500);
+    await this.automation.assertNoVerificationRequired?.('Cinema Studio project navigation retry');
   }
 
   async _assertCurrentCinemaProjectUrl(label = 'Cinema Studio navigation') {
     const page = this.automation.page;
     if (!page) throw new Error('Playwright page not ready');
+    await this.automation.assertNoVerificationRequired?.(label);
     if (this._isCurrentCinemaProjectUrl(page.url())) return;
 
     if (this._projectId) {
@@ -962,9 +966,11 @@ class CinemaVideoAutomation extends KlingAutomation {
     } else if (!page.url().includes('/cinema-studio')) {
       this.log('Navigating to Cinema Studio...');
       await page.goto('https://higgsfield.ai/cinema-studio', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.automation.assertNoVerificationRequired?.('Cinema Studio navigation');
     }
     await this._dismissAdsWithPatience('[CINEMA-VIDEO]');
     await page.waitForTimeout(2500);
+    await this.automation.assertNoVerificationRequired?.('Cinema Studio setup');
     await this._assertCurrentCinemaProjectUrl('after Cinema Studio navigation');
 
     await this._ensureVideoMode();
@@ -3038,6 +3044,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     const started = Date.now();
     let attempt = 0;
     while (Date.now() - started < timeoutMs) {
+      await this.automation.assertNoVerificationRequired?.('post-Generate acceptance wait');
       const state = await this._detectCinemaGenerationInProgress(page);
       if (state.active) {
         this.log(`Cinema Studio generation accepted by UI state (${state.evidence || 'Processing'})`);
@@ -3065,6 +3072,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     await new Promise(resolve => setTimeout(resolve, 10000));
     while (Date.now() - started < timeoutMs) {
       try {
+        await this.automation.assertNoVerificationRequired?.('Cinema credit ledger confirmation');
         const uiState = await this._detectCinemaGenerationInProgress(generationPage);
         if (uiState.active && !uiAccepted) {
           uiAccepted = true;
@@ -3100,6 +3108,9 @@ class CinemaVideoAutomation extends KlingAutomation {
         const newestHint = newest ? `; newest=${newest.cost ?? '?'} @ ${newest.dateText} (${newest.source || 'dom'})` : '';
         this.log(`Credit ledger not matched yet (${rows.length} Cinema Studio row(s), rejects=${JSON.stringify(rejectCounts)}${newestHint}) — polling...`);
       } catch (ledgerErr) {
+        if (ledgerErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || ledgerErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) {
+          throw ledgerErr;
+        }
         this.log(`Cinema Studio credit ledger check failed (${ledgerErr.message}) — polling...`, 'warn');
       }
       await new Promise(resolve => setTimeout(resolve, 5000));
@@ -3122,7 +3133,46 @@ class CinemaVideoAutomation extends KlingAutomation {
     };
   }
 
-  async _generateAndDownload(outputPath, durationSeconds, onGenClicked) {
+  async _captureCinemaSubmitDiagnostics(page, label = 'submit') {
+    try {
+      if (!page || page.isClosed?.()) return { label, pageClosed: true };
+      return await page.evaluate((diagLabel) => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
+            && r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0;
+        };
+        const buttons = [...document.querySelectorAll('button, [role="button"]')]
+          .filter(visible)
+          .map(el => clean(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
+          .filter(Boolean)
+          .slice(0, 24);
+        const iframes = [...document.querySelectorAll('iframe')]
+          .map(frame => ({
+            src: frame.src || '',
+            title: frame.title || '',
+            visible: visible(frame),
+          }))
+          .slice(0, 8);
+        const text = clean(document.body?.innerText || document.body?.textContent || '');
+        return {
+          label: diagLabel,
+          url: location.href,
+          title: document.title,
+          bodySnippet: text.slice(0, 700),
+          hasVerificationText: /Verification Required|Slide right to secure your access|unusual activity/i.test(text),
+          buttons,
+          iframes,
+        };
+      }, label);
+    } catch (err) {
+      return { label, error: err.message };
+    }
+  }
+
+  async _generateAndDownload(outputPath, durationSeconds, onGenClicked, onVerificationRequired) {
     const page = this.automation.page;
     await this._assertCurrentCinemaProjectUrl('before Generate');
     const initialFirstSrc = await page.evaluate(() => document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]')?.src || null);
@@ -3179,51 +3229,85 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     await this._assertCinemaPromptComplete(this._expectedCinemaPromptText);
-    await this._waitForCinemaEndpointQuietPeriod({ quietMs: 10000, timeoutMs: 30000, label: 'usage baseline' });
 
-    let { genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 20000, expectedMaxCost: 70 });
+    let acceptedState = null;
+    let creditConfirmation = null;
+    let creditCost = null;
+    let submitAttempt = 0;
+    const maxSubmitAttempts = 3;
 
-    let baselineLedgerSignatures = [];
-    this._cinemaGeneratePhase = 'baseline';
-    try {
-      const baselineRows = await this._readCinemaCreditLedger(page.context(), 15000);
-      baselineLedgerSignatures = baselineRows.map(row => row.signature);
-      this.log(`Credit ledger baseline captured (${baselineLedgerSignatures.length} Cinema Studio row(s))`);
-    } catch (ledgerErr) {
-      this.log(`Warn: could not capture credit ledger baseline before click: ${ledgerErr.message}`, 'warn');
-    }
+    while (true) {
+      submitAttempt++;
+      try {
+        await this.automation.assertNoVerificationRequired?.(`before Cinema submit attempt ${submitAttempt}`);
+        await this._waitForCinemaEndpointQuietPeriod({
+          quietMs: 10000,
+          timeoutMs: 30000,
+          label: submitAttempt === 1 ? 'usage baseline' : `usage baseline after verification ${submitAttempt}`,
+        });
 
-    await this._waitForCinemaEndpointQuietPeriod({ quietMs: 5000, timeoutMs: 15000, label: 'intentional Generate click' });
-    await this._dismissLowCreditToast('intentional Generate click');
-    ({ genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 8000, expectedMaxCost: 70 }));
-    await this._assertGenerateClickPointClear(genBtnBox);
-    this._cinemaGeneratePhase = 'readyToGenerate';
-    await this._disarmCinemaGenerationEndpointBlocker();
-    await this._allowNextGenerateClick();
-    const clickedAt = new Date();
-    this._cinemaGeneratePhase = 'intentionalGenerate';
-    await page.mouse.click(genBtnBox.x, genBtnBox.y);
-    this._cinemaGeneratePhase = 'postGenerate';
-    await this._setGenerateSafetyLock(true);
-    this.log(`GENERATE clicked once at ${clickedAt.toLocaleTimeString()} - confirming Cinema Studio credit ledger`);
+        let genBtnBox;
+        ({ genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 20000, expectedMaxCost: 70 }));
 
-    const acceptedState = await this._waitForCinemaGenerationAccepted(page, 90000);
-    const creditConfirmation = await this._confirmCinemaCreditSpend({
-      expectedCost: creditCost,
-      clickedAt,
-      timeoutMs: 120000,
-      baselineSignatures: baselineLedgerSignatures,
-      generationPage: page,
-    });
-    if (!creditConfirmation.ok) {
-      if (acceptedState.active || creditConfirmation.accepted) {
-        this.log(`Warn: Cinema Studio UI accepted generation but ledger spend was not confirmed (${creditConfirmation.reason}). Continuing without retry to avoid double-spend.`, 'warn');
-      } else {
-        throw new Error(`[PRE-GEN] Generate click was not confirmed in Cinema Studio credit history (${creditConfirmation.reason}) - no Processing state detected`);
+        let baselineLedgerSignatures = [];
+        this._cinemaGeneratePhase = 'baseline';
+        try {
+          const baselineRows = await this._readCinemaCreditLedger(page.context(), 15000);
+          baselineLedgerSignatures = baselineRows.map(row => row.signature);
+          this.log(`Credit ledger baseline captured (${baselineLedgerSignatures.length} Cinema Studio row(s))`);
+        } catch (ledgerErr) {
+          this.log(`Warn: could not capture credit ledger baseline before click: ${ledgerErr.message}`, 'warn');
+        }
+
+        await this._waitForCinemaEndpointQuietPeriod({ quietMs: 5000, timeoutMs: 15000, label: 'intentional Generate click' });
+        await this._dismissLowCreditToast('intentional Generate click');
+        ({ genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 8000, expectedMaxCost: 70 }));
+        await this._assertGenerateClickPointClear(genBtnBox);
+        this._cinemaGeneratePhase = 'readyToGenerate';
+        await this._disarmCinemaGenerationEndpointBlocker();
+        await this._allowNextGenerateClick();
+        const clickedAt = new Date();
+        this._cinemaGeneratePhase = 'intentionalGenerate';
+        await page.mouse.click(genBtnBox.x, genBtnBox.y);
+        this._cinemaGeneratePhase = 'postGenerate';
+        await this._setGenerateSafetyLock(true);
+        this.log(`GENERATE clicked once at ${clickedAt.toLocaleTimeString()} - confirming Cinema Studio credit ledger`);
+
+        acceptedState = await this._waitForCinemaGenerationAccepted(page, 45000);
+        creditConfirmation = await this._confirmCinemaCreditSpend({
+          expectedCost: creditCost,
+          clickedAt,
+          timeoutMs: acceptedState.active ? 120000 : 35000,
+          baselineSignatures: baselineLedgerSignatures,
+          generationPage: page,
+        });
+        if (!creditConfirmation.ok) {
+          if (acceptedState.active || creditConfirmation.accepted) {
+            this.log(`Warn: Cinema Studio UI accepted generation but ledger spend was not confirmed (${creditConfirmation.reason}). Continuing without retry to avoid double-spend.`, 'warn');
+          } else {
+            const diagnostics = await this._captureCinemaSubmitDiagnostics(page, `not-submitted attempt ${submitAttempt}`);
+            this.log(`[CINEMA-VIDEO] Submit attempt ${submitAttempt} did not produce Processing or ledger spend; treating as not submitted. Diagnostics: ${JSON.stringify(diagnostics).slice(0, 1600)}`, 'warn');
+            if (submitAttempt < maxSubmitAttempts) {
+              await page.waitForTimeout(5000);
+              continue;
+            }
+            throw new Error(`[PRE-GEN] Generate click was not submitted after ${maxSubmitAttempts} attempts (${creditConfirmation.reason})`);
+          }
+        }
+        if (creditConfirmation.ok && typeof onGenClicked === 'function') {
+          try { onGenClicked(creditCost); } catch (_) {}
+        }
+        break;
+      } catch (submitErr) {
+        if ((submitErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || submitErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) && typeof onVerificationRequired === 'function') {
+          this.log(`[CINEMA-VIDEO] Higgsfield verification interrupted submit attempt ${submitAttempt}; waiting for manual slider completion, then resuming at usage baseline`, 'warn');
+          await this._setGenerateSafetyLock(true).catch(() => {});
+          await onVerificationRequired({ message: submitErr.message, attempt: submitAttempt });
+          await this.automation.assertNoVerificationRequired?.(`after verification submit attempt ${submitAttempt}`);
+          continue;
+        }
+        throw submitErr;
       }
-    }
-    if (creditConfirmation.ok && typeof onGenClicked === 'function') {
-      try { onGenClicked(creditCost); } catch (_) {}
     }
 
     const maxWaitMs = 12 * 60 * 1000;

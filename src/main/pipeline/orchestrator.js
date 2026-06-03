@@ -8889,6 +8889,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             // instead of re-generating (burning credits again).
             if (clipAsset) db.markAssetGenClicked(clipAsset.id, creditCost);
           },
+          onVerificationRequired: async (detail) => {
+            await this._pauseForHiggsfieldVerification(`${clipId} (${label})`, detail?.message || detail?.reason);
+          },
         });
 
         if (clipAsset) {
@@ -8915,6 +8918,13 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         if (reviewDecision === 'stop') break;
       } catch (e) {
         this.log(`[CINEMATIC] ${clipId} failed: ${e.message}`, 'warn');
+
+        if (e.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || e.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) {
+          await this._pauseForHiggsfieldVerification(`${clipId} (${label})`, e.message);
+          if (this.cancelled) return;
+          i--;
+          continue;
+        }
 
         if (e.code === 'CINEMA_ELIGIBILITY_FAILED') {
           if (clipAsset) {
@@ -9148,6 +9158,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               onGenClicked: (creditCost) => {
                 if (clipAsset) db.markAssetGenClicked(clipAsset.id, creditCost);
               },
+              onVerificationRequired: async (detail) => {
+                await this._pauseForHiggsfieldVerification(`${clipId} retry (${label})`, detail?.message || detail?.reason);
+              },
             });
 
             if (clipAsset) {
@@ -9177,6 +9190,13 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             continue; // retry succeeded — skip failure path
           } catch (retryErr) {
             this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
+
+            if (retryErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || retryErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) {
+              await this._pauseForHiggsfieldVerification(`${clipId} retry (${label})`, retryErr.message);
+              if (this.cancelled) return;
+              i--;
+              continue;
+            }
 
             // ── DOUBLE-TIMEOUT FINAL RECOVERY ──
             // Both attempts timed out — videos may still be generating.
@@ -11670,6 +11690,31 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     return { success: false, reason: 'No active publish context' };
   }
 
+  async _pauseForHiggsfieldVerification(label, message) {
+    this.log(`[HIGGSFIELD] Verification required during ${label}. Complete the slider challenge in the browser, then click Resume.`, 'warn');
+    this.paused = true;
+    this.state.status = 'waiting_approval';
+    this.emit({
+      type: 'waiting',
+      gate: 'higgsfield-verification-required',
+      detail: {
+        label,
+        reason: message || 'Higgsfield verification required',
+      },
+    });
+    await this.waitForApproval('higgsfield-verification-required');
+    if (this.cancelled) throw new Error('Pipeline cancelled during Higgsfield verification pause');
+    this.paused = false;
+    this.state.status = 'running';
+    if (this.automation) {
+      await this.automation.assertNoVerificationRequired?.(`resume after ${label}`);
+      await this.automation.page?.waitForTimeout?.(5000).catch(() => {});
+      try { await this.automation.saveSession?.(); } catch (_) {}
+    }
+    this.emit({ type: 'resumed' });
+    this.log(`[HIGGSFIELD] Verification cleared — continuing ${label}`);
+  }
+
   /**
    * 'session-expired' event so the UI can prompt the user to log in,
    * then retries the same operation once after resume.
@@ -11713,6 +11758,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     try {
       return await fn();
     } catch (err) {
+      if (err.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || err.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) {
+        await this._pauseForHiggsfieldVerification(label, err.message);
+        return await fn();
+      }
+
       if (err.message && err.message.includes('SESSION_EXPIRED')) {
         this.log(`Session expired during ${label}. Relaunching browser for re-authentication...`, 'warn');
         this.paused = true;
@@ -11851,7 +11901,7 @@ REWRITTEN DESCRIPTION:`,
     // Some operator-fix gates are intentionally surfaced as "fix the issue,
     // then click Resume" in the renderer. They are approval waits, not pause
     // waits, so the generic Resume button must resolve them explicitly.
-    const resumeResolvedGates = ['preflight-failed', 'credits-exhausted'];
+    const resumeResolvedGates = ['preflight-failed', 'credits-exhausted', 'higgsfield-verification-required'];
     for (const gate of resumeResolvedGates) {
       if (this._approvalResolvers[gate]) {
         this._approvalResolvers[gate]();

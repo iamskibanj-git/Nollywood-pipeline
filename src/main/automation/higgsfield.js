@@ -473,6 +473,32 @@ class HiggsFieldAutomation {
     );
   }
 
+  async _getImageGenerationFailureToast() {
+    try {
+      const page = this.page;
+      if (!page || page.isClosed?.()) return null;
+      return await page.evaluate(() => {
+        const visibleText = (el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return '';
+          return (el.textContent || '').replace(/\s+/g, ' ').trim();
+        };
+        const candidates = Array.from(document.querySelectorAll('[role="alert"], [data-sonner-toast], [class*="toast"], [class*="notification"], [class*="Toast"]'));
+        candidates.push(document.body);
+        for (const el of candidates) {
+          const text = visibleText(el);
+          if (!text) continue;
+          if (/Something went wrong/i.test(text) && /Failed to fetch/i.test(text)) {
+            return text.slice(0, 300);
+          }
+        }
+        return null;
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
   async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false }) {
     // Reset per-call state — _lastDetectedUrl must NOT bleed across calls.
     // Without this, a previous portrait's CDN URL would be attached to the
@@ -3263,14 +3289,20 @@ class HiggsFieldAutomation {
           };
         });
 
-        // Find a fresh-page file input NOT inside a .size-14 slot. Publish keeps
-        // the stricter image-accept check; Promo composite can opt into accepting
-        // Higgsfield's current bare file input when its accept attribute is empty.
+        // Find a fresh-page file input NOT inside a .size-14 slot. Keep the
+        // strict image check unless the caller explicitly opts into any input.
+        // Higgsfield currently advertises images as extensions
+        // (".jpg,.jpeg,.png,.webp"), not as "image/*".
+        const isImageAccept = (accept) => {
+          if (!accept) return false;
+          if (accept.includes('image') || accept.includes('*')) return true;
+          return /\.(jpg|jpeg|png|webp|gif|bmp|avif|heic)\b/.test(accept);
+        };
         let fileInput = null;
         for (const input of form.querySelectorAll('input[type="file"]')) {
           const accept = (input.getAttribute('accept') || '').toLowerCase();
           if (input.closest('.size-14')) continue;
-          if (!allowAnyFileInput && accept && !accept.includes('image') && !accept.includes('*')) continue;
+          if (!allowAnyFileInput && accept && !isImageAccept(accept)) continue;
           if (!allowAnyFileInput && !accept) continue;
           fileInput = input;
           break;
@@ -4103,6 +4135,11 @@ class HiggsFieldAutomation {
       const page = this.page;
       if (!page) return true; // No page = can't check, assume logged in
 
+      if (await this.isVerificationRequired()) {
+        console.log('[SESSION] isLoggedIn: FALSE — Higgsfield verification challenge visible');
+        return false;
+      }
+
       // Two-signal check: positive (Assets link = logged in) AND negative
       // (Login/Sign up buttons = logged out). Either signal is definitive.
       // The Assets link only appears when authenticated. The Login/Sign up
@@ -4170,6 +4207,36 @@ class HiggsFieldAutomation {
     } catch (e) {
       console.warn(`[SESSION] isLoggedIn check error: ${e.message}`);
       return true; // Assume logged in if check fails
+    }
+  }
+
+  async isVerificationRequired() {
+    try {
+      const page = this.page;
+      if (!page || page.isClosed?.()) return false;
+      return await page.evaluate(() => {
+        const parts = [document.body?.innerText || '', document.title || '', location.href || ''];
+        for (const frame of document.querySelectorAll('iframe')) {
+          parts.push(frame.src || '', frame.title || '', frame.getAttribute('aria-label') || '');
+          try {
+            parts.push(frame.contentDocument?.body?.innerText || '');
+          } catch (_) {}
+        }
+        const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+        return /Verification Required/i.test(text)
+          && /Slide right to secure your access/i.test(text)
+          && (/unusual activity/i.test(text) || /secure your access/i.test(text));
+      });
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async assertNoVerificationRequired(label = 'Higgsfield') {
+    if (await this.isVerificationRequired()) {
+      const err = new Error(`HIGGSFIELD_VERIFICATION_REQUIRED: ${label} is blocked by Higgsfield human verification`);
+      err.code = 'HIGGSFIELD_VERIFICATION_REQUIRED';
+      throw err;
     }
   }
 
@@ -4256,6 +4323,10 @@ class HiggsFieldAutomation {
             return { ok: false, reason: 'Browser page is closed or unavailable' };
           }
 
+          if (await this.isVerificationRequired()) {
+            return { ok: false, reason: 'Higgsfield verification required — complete the slider challenge in the browser' };
+          }
+
           // Navigate to Higgsfield to trigger session check
           const url = page.url();
           if (!url || !url.includes('higgsfield.ai')) {
@@ -4323,6 +4394,14 @@ class HiggsFieldAutomation {
       console.warn('[WAIT] Pre-gen snapshot failed — Layer 2 will take its own');
     }
 
+    const earlyFailureToast = await this._getImageGenerationFailureToast();
+    if (earlyFailureToast) {
+      const err = new Error(`GENERATION_FAILED_FETCH: ${earlyFailureToast}`);
+      err.serverFailed = true;
+      err.retryable = true;
+      throw err;
+    }
+
     // ══════════════════════════════════════════════════════════
     // LAYER 1: API-based job tracking (primary)
     // ══════════════════════════════════════════════════════════
@@ -4343,6 +4422,13 @@ class HiggsFieldAutomation {
           }
         } else {
           console.warn('[WAIT] Layer 1: No job UUID captured — falling back to Layer 2');
+          const failureToast = await this._getImageGenerationFailureToast();
+          if (failureToast) {
+            const err = new Error(`GENERATION_FAILED_FETCH: ${failureToast}`);
+            err.serverFailed = true;
+            err.retryable = true;
+            throw err;
+          }
         }
       } catch (err) {
         // Timeouts, cancellations, and server failures must propagate — don't fall to Layer 2
@@ -4411,6 +4497,14 @@ class HiggsFieldAutomation {
       }
 
       // Check for error messages
+      const l2FailureToast = await this._getImageGenerationFailureToast();
+      if (l2FailureToast) {
+        const err = new Error(`GENERATION_FAILED_FETCH: ${l2FailureToast}`);
+        err.serverFailed = true;
+        err.retryable = true;
+        throw err;
+      }
+
       const errorEl = await page.$('.error-message, [data-testid="generation-error"]');
       if (errorEl) {
         const errorText = await errorEl.textContent().catch(() => 'Unknown generation error');

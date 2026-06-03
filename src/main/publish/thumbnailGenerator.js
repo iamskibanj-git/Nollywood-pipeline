@@ -211,7 +211,7 @@ Requirements:
   /**
    * Stage 3: Composite title card over key art using both as references.
    */
-  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = false, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false }) {
+  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = true, referenceUploadWarmupMs = 12000, referenceUploadAllowAnyInput = false }) {
     const placementInstructions = {
       'upper-third':    'Position the title text in the UPPER THIRD of the frame, spanning the full width',
       'lower-third':    'Position the title text in the LOWER THIRD of the frame, spanning the full width',
@@ -260,12 +260,18 @@ Requirements:
           useUnlimited: true,
         }, 'composite');
       } else {
-        if (skipRecoveryOnReferenceFailure && /REFERENCE_UPLOAD_FAILED|REFERENCE_GATE_FAILED|reference/i.test(genErr.message || '')) {
-          console.warn(`[THUMBNAIL] Stage 3 stopped before Generate was submitted: ${genErr.message}`);
+        const errorMessage = genErr.message || '';
+        const noGenerationSubmitted = /REFERENCE_UPLOAD_FAILED|REFERENCE_GATE_FAILED|reference|\[PRE-GEN\]|pre-generation|before Generate/i.test(errorMessage);
+        if (skipRecoveryOnReferenceFailure && noGenerationSubmitted) {
+          console.warn(`[THUMBNAIL] Stage 3 stopped before Generate was submitted: ${errorMessage}`);
           throw genErr;
         }
         console.warn(`[THUMBNAIL] Stage 3 generation failed: ${genErr.message} — attempting Asset library recovery`);
-        const recovered = await this._tryAssetRecovery(prompt, outputPath, 'composite');
+        const recovered = await this._tryAssetRecovery(prompt, outputPath, 'composite', {
+          minSimilarity: 90,
+          maxTilesToCheck: 4,
+          timeoutMs: 45000,
+        });
         if (!recovered) throw genErr;
       }
     }
@@ -308,7 +314,7 @@ Requirements:
    * @param {string} stageLabel - label for logging (e.g. 'key art', 'title card')
    * @returns {Promise<boolean>} true if recovery succeeded
    */
-  async _tryAssetRecovery(prompt, outputPath, stageLabel) {
+  async _tryAssetRecovery(prompt, outputPath, stageLabel, opts = {}) {
     if (!this.automation || typeof this.automation.recoverTimedOutImage !== 'function') {
       console.warn(`[THUMBNAIL] Asset recovery not available for ${stageLabel}`);
       return false;
@@ -320,9 +326,9 @@ Requirements:
       await this.automation.page?.waitForTimeout?.(10000);
 
       const recovered = await this.automation.recoverTimedOutImage(prompt, outputPath, {
-        minSimilarity: 60,  // Lower threshold — thumbnail prompts are long, partial matches OK
-        maxTilesToCheck: 6,
-        timeoutMs: 60000,
+        minSimilarity: opts.minSimilarity ?? 80,
+        maxTilesToCheck: opts.maxTilesToCheck ?? 6,
+        timeoutMs: opts.timeoutMs ?? 60000,
       });
 
       if (recovered && fs.existsSync(outputPath)) {
