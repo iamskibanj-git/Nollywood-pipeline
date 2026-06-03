@@ -360,6 +360,25 @@ Files changed:
 - `src/main/pipeline/orchestrator.js` — restored-map verification, post-save confirmation hardening, outfit-aware persistence, path guards, final `@` verification
 - `AGENTS.md` — this section
 
+**Session 30W — Script Realism + Background Roles Guardrails:**
+
+Problem observed in long cinematic scripts: institutional scenes could become visually/logically thin, e.g. court-related scenes without any judge/lawyer/clerk presence, or legal/medical/business stakes resolved by dialogue alone without visible proof. Adding every functional person as a full character would bloat portraits, elements, promo posts, and the 3-character scene constraint.
+
+Fix:
+- Script scaffolding now supports `scene.background_roles`: non-speaking realism roles/crowds such as judge at bench, court clerk, lawyers in gallery, market crowd, church ushers, nurses at station, palace attendants, mourners.
+- `background_roles` are environmental only: no dialogue, no portrait, no Higgsfield Element, no promo post, no character_bible entry, and they do **not** count toward the max-3 `characters_present` limit.
+- Standard and prestige outline prompts ask for `background_roles` and `props_in_scene` in scene beats when institutional/community realism or procedure requires them.
+- Cinematic scaffolding now explicitly requires functional presence for court/hospital/police/church/school/palace/market/funeral/wedding scenes and concrete props/procedure for legal, medical, business, land, school, and police beats.
+- Structural review prompt now has a Realism + Procedure check and can emit `realism` / `procedure` issue categories.
+- Broader realism guardrails are also enforced in generation/review: plausible time/travel sequence, money/work consequences, phone/WhatsApp/evidence access, social pressure, emotional aftermath, domestic/work texture, class/register differences, and prop continuity.
+
+Design rule for future work: if a role speaks or drives the plot, add it to `character_bible`; if it only makes the location credible, put it in `background_roles`. Do not solve realism by stuffing extra speaking characters into a scene.
+
+Files changed:
+- `src/main/pipeline/script-engine.js` — outline schemas/rules, continuation compression, cinematic scaffolding, cinematic review skeleton, reviewer extension
+- `prompts/structure-review-prompt.txt` — Realism + Procedure review guidance and issue categories
+- `AGENTS.md` — this section
+
 **Session 30R — Batch Prompt-Preview Mode (M4):**
 
 M4 — Batch prompt-preview gate:
@@ -595,8 +614,8 @@ Research → Title → Script (with cinematic fields)
 **What Phase 1 shipped:**
 - Migration 009: `projects.generator_mode TEXT NOT NULL DEFAULT 'staged'` with validation enforced in `setProjectGeneratorMode()` (same lock-on-start semantics as aspect_ratio — throws if any project_assets rows exist)
 - Renderer: third dropdown alongside Duration + Aspect on both pool and fresh-start cards. Values: `staged` (default, proven) vs `cinematic` (opt-in, WIP). Research view badge shows mode. Resume card shows mode badge.
-- Script prompt: new `{{CINEMATIC_SCAFFOLDING}}` placeholder. When `generator_mode = 'cinematic'`, Codex receives detailed authoring requirements for `scene.blocking` (frame-left/center/right with character references), `scene.location_element_hint` (snake_case location key), `scene.props_in_scene` (Chekhov's-gun array), and `scene.kling_clips` (multi-shot prompt array using Kling's bracketed dialogue syntax). Staged mode gets an empty string — no change to existing behavior.
-- Structural review rubric: `CINEMATIC_RUBRIC_EXTENSION` injected when mode is cinematic. Adds 4 scoring dimensions (blocking completeness, kling clip coherence, element-hint discipline, props-as-elements) plus cinematic-specific critical failure modes. Cinematic mode thresholds bumped +5 across all tiers (test=55, standard=65, long-form=75).
+- Script prompt: new `{{CINEMATIC_SCAFFOLDING}}` placeholder. When `generator_mode = 'cinematic'`, Codex receives detailed authoring requirements for `scene.blocking` (frame-left/center/right with character references), `scene.location_element_hint` (snake_case location key), `scene.background_roles` (non-speaking realism roles/crowds), `scene.props_in_scene` (Chekhov's-gun/procedure array), and `scene.kling_clips` (multi-shot prompt array using Kling's bracketed dialogue syntax). Staged mode gets an empty string — no change to existing behavior.
+- Structural review rubric: `CINEMATIC_RUBRIC_EXTENSION` injected when mode is cinematic. Adds scoring dimensions for blocking completeness, kling clip coherence, element-hint discipline, props-as-elements, plus deduction-only checks for realism/background population and cinematic-specific critical failure modes. Cinematic mode thresholds bumped +5 across all tiers (test=55, standard=65, long-form=75).
 - Orchestrator: reads `options.generatorMode`, persists to DB, carries on `this.state.generatorMode`, passes through `storyBrief.generatorMode` to script engine. Resume path restores from DB.
 - Test: migration 009 verified against fresh DB; cinematic scaffolding substitution verified via integration test.
 
@@ -612,7 +631,7 @@ Cinematic mode projects created today will generate cinematic-format script JSON
 **Phase 1 test plan:**
 1. Launch app → new project → set Duration=1min, Aspect=16:9, Generator mode=cinematic, click Proceed to Research
 2. Run through research + title selection + script generation
-3. Open `projects/<project-id>/script.json` — scenes should have `blocking`, `location_element_hint`, `props_in_scene`, and `kling_clips` fields populated
+3. Open `projects/<project-id>/script.json` — scenes should have `blocking`, `location_element_hint`, `background_roles`, `props_in_scene`, and `kling_clips` fields populated
 4. Structural review panel should show cinematic-specific rubric in issues (blocking completeness, kling clip coherence, etc.) and apply threshold 55 instead of 50
 5. Abandon the project (don't proceed to portraits) — Phase 2+ infrastructure doesn't exist yet
 

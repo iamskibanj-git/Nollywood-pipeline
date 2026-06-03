@@ -9,7 +9,7 @@ const db = require('../database/db');
 const CINEMATIC_RUBRIC_EXTENSION = `
 === CINEMATIC MODE EXTENSIONS (adds to tier rubric above; applies ONLY when GENERATOR_MODE = cinematic) ===
 
-The script includes additional cinematic-pipeline fields per scene: blocking, location_element_hint, props_in_scene, kling_clips. Grade these with the following bonus/penalty items (up to +15 pts, capped at 100 overall):
+The script includes additional cinematic-pipeline fields per scene: blocking, location_element_hint, background_roles, props_in_scene, kling_clips. Grade these with the following bonus/penalty items (up to +15 pts, capped at 100 overall):
 
 C1. BLOCKING COMPLETENESS (+5 pts max)
   - Full: every scene has a non-null blocking object; every character in characters_present appears in at least one of frame_left/frame_center/frame_right with a concrete posture/intent description
@@ -35,11 +35,19 @@ C4. PROPS-AS-ELEMENTS FOR SETUP/PAYOFF (+2 pts max)
   - Half: one side of the pair lists it, the other doesn't
   - Zero: no props_in_scene usage despite obvious setup/payoff pairs present
 
+C5. REALISM + BACKGROUND POPULATION (deduction only)
+  - Deduct when public/institutional locations feel empty without story justification.
+  - Deduct when a court, hospital, police station, church, school, palace, market, wedding, or funeral lacks either appropriate speaking characters or non-speaking background_roles.
+  - Deduct when legal, medical, business, land, school, or police stakes resolve through talk alone with no props_in_scene/proof/procedure.
+  - Do NOT count background_roles toward the 3-character scene limit. They are non-speaking environment roles only.
+
 CINEMATIC-SPECIFIC FAILURE MODES (automatic critical issues):
 - Any kling_clip.multi_shot_prompt missing the bracketed dialogue syntax [@character, speaking in a <tone> Nigerian English accent]: "..."
 - Any kling_clip.multi_shot_prompt that uses @location-style references (e.g. "@clara_kitchen") — locations are reference images, NOT elements, so @location won't resolve and just becomes useless text. Describe locations naturally ("inside the kitchen from the reference image") instead.
 - Any scene where characters speak in dialogue but don't appear in blocking
 - Any prop mentioned by name in dialogue but not listed in props_in_scene of any scene where it appears
+- Any institutional scene that lacks required functional presence: court without judge/lawyer/clerk/bailiff, hospital without doctor/nurse/reception, police station without officer/investigator, church without pastor/elder/usher, school without teacher/principal, palace without chief/elder/attendant
+- Any major legal/medical/business/land/police stake resolved only by dialogue with no visible proof/procedure in props_in_scene
 - Any kling_clip where Shot 1 has NO dialogue — Shot 1 must include the first dialogue line (the start frame image + CHARACTER POSITIONS preamble already establish the scene; a silent establishing Shot 1 wastes the model's limited shot budget and causes later dialogue to be dropped)
 - Any kling_clip that does NOT have exactly 3 shots — Kling 3.0 renders 4+ shots unreliably (skips shots, misattributes dialogue). 3 shots per clip is the hard production rule.
 - Any @element_name appearing inside dialogue quotes (e.g. "I am @okafor_otpto_0420") — characters speak human names, not element tags. The @ prefix inside quotes gets typed as an element reference attempt instead of spoken words.
@@ -47,7 +55,7 @@ CINEMATIC-SPECIFIC FAILURE MODES (automatic critical issues):
 - Any scene where blocking says a character is SEATED but Shot 1 of the first kling_clip describes them STANDING (or vice versa) — blocking defines the start frame; Shot 1 must match
 - Any scene where blocking places a character at frame-left but Shot 1 places them frame-right (or other position contradictions) — the establishing shot must visually match the blocking composition
 
-Log cinematic-specific issues with category values: 'blocking', 'kling_clips', 'element_hint', 'props_consistency'.
+Log cinematic-specific issues with category values: 'blocking', 'kling_clips', 'element_hint', 'props_consistency', 'realism', 'procedure'.
 `;
 
 class ScriptEngine {
@@ -486,7 +494,13 @@ CRITICAL RULES:
 9. Each kling_clip MUST include "visual_beat": a single concrete visual action tied to story meaning. NOT complex choreography — one AI-safe action that the camera can reveal. Examples: "clutches the envelope tighter", "slowly removes her ring", "steps back from the table", "hides phone behind her back", "turns the framed photo face-down". This gives Kling something visual to render beyond talking heads. The visual_beat goes into the shot direction of the most dramatically appropriate shot (usually Shot 2 or 3).
 10. Honour the scene_purpose from the outline. A "reveal" scene must actually reveal something the audience didn't know. A "confrontation" must have characters in active opposition. A "setup" scene plants something for later. If the purpose doesn't match the content, the scene is mislabeled or broken.
 11. Each scene MUST include "character_outfits": a mapping of character_id → outfit_id from the character_bible. This tells the visual pipeline which element (portrait/outfit) to use. Copy it directly from the outline's scene_beats. If a character changes outfit within a scene, SPLIT into two scenes — a single scene cannot have one character in two outfits.
-12. Every kling_clip.line_refs array MUST contain 1-3 line numbers, never 4 or more. If a dramatic beat needs more than 3 dialogue lines, create another complete kling_clip with its own real multi_shot_prompt. Never rely on auto-splitting or placeholder prompts.
+12. Each scene SHOULD include "background_roles" when the location would feel fake without non-speaking people. Background roles are environmental only: no dialogue, no portrait, no character_bible entry, and they do not count toward the 3-character scene limit.
+13. Institutional scenes MUST include appropriate functional presence as speaking characters or background_roles: court (judge/lawyer/clerk/bailiff), hospital (doctor/nurse/reception), police station (officer/investigator), church (pastor/elder/usher), school (teacher/principal), palace (chief/elder/attendant), market/event/funeral (crowd/traders/guests/mourners).
+14. Procedure-heavy scenes MUST include "props_in_scene" for concrete proof: affidavits, stamped files, land receipts, medical reports, ID cards, charge sheets, ledgers, phone recordings, letters, keys, rings, medicine. Major legal/medical/business/land stakes should not resolve with talk alone.
+15. Everyday realism MUST track logistics, money, communication, and aftermath. Travel between distant locations needs implied elapsed time; arrests, court dates, medical results, and family meetings need plausible sequence; phone calls/messages need believable access, battery, privacy, and timing; money demands should match the character's class and job; major revelations need aftermath before the next plot turn.
+16. Social realism matters: gossip, family hierarchy, religious pressure, elder authority, class difference, gender expectations, community shame, workplace consequences, and public reputation should affect how characters behave. Do not let characters act as isolated plot machines.
+17. Props persist across the story. If a phone, document, ring, key, test result, medicine, photograph, or recording triggers a beat, it must be accounted for later as setup/payoff or explicitly discarded.
+18. Every kling_clip.line_refs array MUST contain 1-3 line numbers, never 4 or more. If a dramatic beat needs more than 3 dialogue lines, create another complete kling_clip with its own real multi_shot_prompt. Never rely on auto-splitting or placeholder prompts.
 
 === STRICT RULES ===
 - Dialogue Only: Only character speech. No narration, SFX, or descriptions.
@@ -634,7 +648,9 @@ Return JSON with this EXACT structure:
           "location": "Description of location",
           "location_element_hint": "snake_case_location",
           "characters_present": ["char_id_1", "char_id_2"],
+          "background_roles": ["non-speaking role or crowd context if needed"],
           "character_outfits": {"char_id_1": "o1", "char_id_2": "o2"},
+          "props_in_scene": ["story-relevant prop or document visible in the setting"],
           "beat": "What happens in this scene — 1-2 sentences",
           "scene_purpose": "reveal|confrontation|reversal|temptation|public-shame|private-confession|decision|trap|payoff|setup|alliance",
           "power_shift": "char_id_1 → char_id_2 (or 'none' if power doesn't change)",
@@ -666,6 +682,13 @@ RULES FOR OUTLINE:
 - emotional_temperature per chapter prevents the "constant escalation" trap. A story needs low-simmer chapters (aftermath, setup, quiet tension) as breathing room between boiling-point confrontations. Not every chapter can be at maximum intensity.
 - Each scene beat specifies target_lines (how many dialogue lines) and target_clips (how many Kling clips).
 - Total target_clips across all chapters should be ~${targetClips}.
+- Each scene_beat SHOULD include background_roles when realism requires people who are present but not speaking. Background roles do NOT go in character_bible, do NOT get dialogue, and do NOT count toward the 3-character scene limit. Examples: courtroom gallery, judge at bench, court clerk, market crowd, church ushers, nurses at station.
+- Institutional or procedure-heavy scenes MUST include either an appropriate speaking role in characters_present OR non-speaking background_roles. Examples: court needs judge/lawyer/clerk/bailiff; hospital needs doctor/nurse/reception; police station needs officer/investigator; church needs pastor/elder/usher; school needs teacher/principal; palace needs chief/elder/attendant.
+- Scene beats involving legal, medical, business, land, school, or police stakes SHOULD include props_in_scene for concrete proof/procedure: affidavit, stamped file, land receipt, medical report, ID card, charge sheet, school-fee ledger, phone recording, signed letter. Do not resolve major stakes with talk alone.
+- Scene beats SHOULD account for logistics when the plot moves across time/place: travel, court dates, hospital results, police processes, school meetings, funerals, weddings, family councils, and work obligations need plausible sequence and elapsed time.
+- Scene beats SHOULD account for social pressure: gossip, family hierarchy, elder authority, religious expectation, public shame, class difference, gender expectations, workplace consequences, and reputation.
+- Scene beats SHOULD preserve object continuity. If a phone, document, ring, key, medicine, photograph, money, test result, or recording matters, keep it visible in props_in_scene until it pays off or is explicitly removed.
+- Money, jobs, housing, transport, and communication access SHOULD match the character's class/context. A broke student, market trader, banker, pastor, chief, police officer, and diaspora relative should not have identical resources or speech register.
 - Max 3 characters per scene_beat (Kling constraint).
 - Locations should use consistent location_element_hint values across chapters.
 - The outline IS the story — each chapter must be rich enough that an independent writer could generate the full chapter from this outline alone.
@@ -922,7 +945,9 @@ Return JSON:
           "location": "Description of location",
           "location_element_hint": "snake_case_location",
           "characters_present": ["char_id_1", "char_id_2"],
+          "background_roles": ["non-speaking role or crowd context if needed"],
           "character_outfits": {"char_id_1": "o1", "char_id_2": "o2"},
+          "props_in_scene": ["story-relevant prop or document visible in the setting"],
           "beat": "What happens — 1-2 sentences",
           "scene_purpose": "reveal|confrontation|reversal|temptation|public-shame|private-confession|decision|trap|payoff|setup|alliance",
           "power_shift": "char_id_1 → char_id_2 (or 'none')",
@@ -941,6 +966,7 @@ RULES:
 - Follow the five-act beat structure from the arc skeleton — each chapter must serve its act's dramatic function.
 - Maintain continuity with previous chapter outlines (if any).
 - Each scene_beat MUST include character_outfits, scene_purpose, and power_shift.
+- Each scene_beat SHOULD include background_roles for realistic non-speaking institutional/community presence and props_in_scene for concrete proof/procedure when documents, money, medicine, police, court, school, church, palace, market, land, or business stakes are involved.
 - Max 3 characters per scene_beat (Kling constraint).
 - Total target_clips across ALL ${totalChapters} chapters should be ~${targetClips}. Distribute ~${clipsPerChapter} per chapter, weighted by dramatic importance.
 - Use consistent location_element_hint values.
@@ -1276,6 +1302,8 @@ VOICE DRIFT PREVENTION: Each character's speech pattern above is their identity.
         location: sc.location,
         location_element_hint: sc.location_element_hint,
         characters_present: sc.characters_present,
+        background_roles: sc.background_roles || [],
+        props_in_scene: sc.props_in_scene || [],
         blocking: sc.blocking,
         lines: (sc.lines || []).map(l => ({
           line_number: l.line_number,
@@ -1339,7 +1367,8 @@ CRITICAL RULES FOR CONTINUATION:
 6. Stakes must be HIGHER than the previous chapter.
 7. ${startChapter < totalChapters ? `End each chapter (except the last) on a cliffhanger or reveal.` : 'Bring the story to a decisive resolution.'}
 8. Use consistent location_element_hint values for returning locations.
-9. Do NOT re-output the character_bible — only output the chapters array.
+9. Include background_roles and props_in_scene where institutional/community realism or procedure requires them.
+10. Do NOT re-output the character_bible — only output the chapters array.
 
 === STRICT RULES ===
 - Dialogue Only: Only character speech. No narration, SFX, or descriptions.
@@ -2140,6 +2169,8 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
    *     1-3 dialogue lines within a 15s clip, exactly 3 shots per clip (each with dialogue)
    *   - scene.location_element_hint: a snake_case hint for the location element
    *     name (used downstream by Phase 3 location-generation stage)
+   *   - scene.background_roles: non-speaking realism roles/crowds that do not
+   *     create portraits, elements, or promo posts
    *   - scene.props_in_scene: array of prop element hints (Chekhov's gun scaffolding)
    *
    * In staged mode, the addendum is empty — Claude writes the standard schema only.
@@ -2183,6 +2214,7 @@ This project runs the CINEMATIC pipeline (Cinema Studio 2.0 scene images + Kling
    - Shots within a clip are continuous beats of the same scene (same location, same lighting) — not "cuts between different scenes."
    - Each clip's \`multi_shot_prompt\` must stay under 2500 characters.
    - Use Kling's dialogue syntax: [@character, speaking in a <tone> Nigerian English accent]: "<dialogue>"
+   - Use \`scene.background_roles\` for non-speaking court clerks, judges at bench, market crowds, church ushers, nurses, palace attendants, mourners, and similar realism roles. They do not get dialogue, portraits, Higgsfield Elements, promo posts, or character_bible entries, and they do not count toward the max-3 \`characters_present\` limit.
    - NEVER use @element_name inside dialogue quotes — not in kling_clip multi_shot_prompt dialogue, not in scene line dialogue. Inside quotes, characters speak their HUMAN NAME (e.g. "Ngozi", "Emeka"), not their @tag. The @ prefix triggers Higgsfield element resolution and corrupts the spoken audio. Wrong: [@ngozi, speaking...]: "I told @emeka the truth." Right: [@ngozi, speaking...]: "I told Emeka the truth." This rule is violated constantly — double-check every dialogue string.
    - BLOCKING → SHOT 1 CONSISTENCY (MANDATORY): The FIRST kling_clip's Shot 1 MUST match \`scene.blocking\` exactly — same postures, same positions. Write blocking FIRST, then write kling_clips Shot 1 as a visual realization of that blocking.
    - EVERY SHOT MUST HAVE DIALOGUE: The start frame image and a CHARACTER POSITIONS preamble already establish the scene composition for the video model. Do NOT waste Shot 1 as a silent establishing shot — include the first dialogue line in Shot 1. A 3-shot clip with 3 dialogue lines = 1 line per shot. Shot 1 can still set the camera (WIDE, MEDIUM, etc.) but MUST include dialogue. Every shot must carry dialogue — no silent shots allowed.
@@ -2219,6 +2251,7 @@ EXAMPLE scene excerpt with cinematic fields:
   "location_details": "earthen red clay walls, kerosene lamp, window with sunset light",
   "location_element_hint": "clara_kitchen",
   "characters_present": ["claire_obi", "richard_eze"],
+  "background_roles": [],
   "props_in_scene": [],
   "blocking": {
     "frame_left": "@claire_obi near the wooden table, body angled toward the window, arms tense",
@@ -2244,6 +2277,20 @@ EXAMPLE scene excerpt with cinematic fields:
   ]
 }
 \`\`\`
+
+REALISM AND WORLD POPULATION (CRITICAL FOR LONG-FORM BELIEVABILITY):
+- Use \`background_roles\` for people who make a location believable but should NOT become full speaking characters. They do not get portraits, grids, elements, promo posts, or dialogue. They do not count toward the max-3 \`characters_present\` limit. Examples: court clerk, judge at bench, lawyers in gallery, market crowd, church ushers, nurses at station, palace attendants, mourners.
+- Institutional scenes require functional presence. Court scenes need judge/lawyer/clerk/bailiff; hospital scenes need doctor/nurse/reception; police scenes need officer/investigator; church scenes need pastor/elder/usher; school scenes need teacher/principal; palace scenes need chief/elder/attendant. If the role drives plot or speaks, add it to character_bible; otherwise put it in \`background_roles\`.
+- Populate public settings. Markets, churches, courts, hospitals, schools, weddings, funerals, police stations, and palace compounds should not feel empty unless the story explicitly says they are empty. Use \`background_roles\` and location details such as sparse/moderate/packed crowd density.
+- Legal, medical, business, land, school, and police beats need concrete procedure. Use \`props_in_scene\` and dialogue references for affidavits, stamped files, land receipts, medical reports, ID cards, charge sheets, ledgers, phone recordings, signed letters, keys, rings, medicine, or other proof. Do not resolve major stakes with talk alone.
+- Respect authority boundaries. Judges do not investigate like police. Pastors do not issue legal judgments. Doctors do not disclose private medical details publicly. Police do not settle inheritance or land ownership with one argument. Use the correct institution for the action.
+- Track time and logistics. If scenes move between village, Lagos, court, hospital, police station, palace, or church, imply believable elapsed time. Court dates, medical results, arrests, travel, and family meetings should not happen instantly unless the script explains the urgency.
+- Money and work have consequences. Demands, bribes, dowry/bridal negotiations, rent, school fees, hospital bills, transport, business losses, and salary threats should match the character's class, job, and access to cash.
+- Communication must be plausible. Phone calls, WhatsApp messages, recordings, screenshots, and viral posts need access, privacy, timing, and a reason the information reaches the right person.
+- Domestic life should feel specific. Homes, meals, clothes, transport, work schedules, church/mosque days, market hours, school pickup, and neighborhood routines should ground the drama where relevant.
+- Emotional aftermath matters. Big reveals, arrests, public disgrace, death news, betrayal, or legal defeat need a reaction beat: silence, avoidance, prayer, family meeting, apology attempt, shame, or community gossip before the next major plot turn.
+- Props persist. If a phone, letter, land document, ring, test result, key, medicine, or photograph triggers a scene, account for it later or use it as setup/payoff. Do not let crucial objects vanish.
+- Language register should match role and class: lawyer formal, pastor spiritual, elder proverbial, trader blunt, police procedural, young professional clipped. Avoid one generic voice for everyone.
 
 CHARACTER ELEMENT NAMING (CRITICAL — CONSISTENCY REQUIRED):
 - Each character in the bible MUST have an \`element_name_hint\` field: a short snake_case name derived from the character's actual name (e.g. "mama_adaeze", "eze_okonkwo", "emeka"). This is the SINGLE name used as the @reference in ALL prompts.
@@ -2604,6 +2651,7 @@ HOOK-RESOLUTION CYCLE (the retention engine — non-negotiable at this length):
             location: sc.location,
             ...(tier !== 'prestige' && sc.location_details ? { location_details: sc.location_details } : {}),
             characters_present: sc.characters_present || [],
+            background_roles: sc.background_roles || [],
             lines: (sc.lines || []).map(ln => {
               const line = {
                 line_number: ln.line_number,

@@ -35,6 +35,19 @@ UNIVERSAL (30 points total, apply to all tiers):
    - Deduct for missing mandatory roles or under-used characters.
    - Cinematic mode: deduct if ANY scene has more than 3 characters in characters_present (Kling constraint).
 
+REALISM + PROCEDURE CHECK (apply deductions inside characters, stakes, setup/payoff, exposition, and cinematic categories as appropriate):
+- Institutional scenes need functional presence as either speaking characters or non-speaking background_roles. Court scenes need judge/lawyer/clerk/bailiff; hospital scenes need doctor/nurse/reception; police station scenes need officer/investigator; church scenes need pastor/elder/usher; school scenes need teacher/principal; palace scenes need chief/elder/attendant.
+- Public/community settings should not feel empty unless the script explicitly justifies it. Markets, churches, courts, hospitals, schools, weddings, funerals, police stations, and palace compounds should show crowd/community context via background_roles or location details.
+- Legal, medical, business, land, school, and police stakes need concrete proof/procedure. Look for props_in_scene such as affidavits, stamped files, land receipts, medical reports, ID cards, charge sheets, ledgers, phone recordings, signed letters, keys, rings, medicine, or equivalent evidence.
+- Respect authority boundaries. Judges do not investigate like police. Pastors do not issue legal judgments. Doctors do not disclose private medical details publicly. Police do not settle inheritance or land ownership with one argument.
+- Check logistics and time. Travel, court dates, hospital results, arrests, funerals, weddings, family councils, school meetings, and workplace consequences need plausible sequence and elapsed time.
+- Check money/work realism. Bribes, rent, school fees, medical bills, dowry/bridal negotiations, transport, business losses, salary threats, and sudden wealth should match the character's class, job, and access to cash.
+- Check communication realism. Phone calls, WhatsApp messages, recordings, screenshots, and viral posts need access, privacy, timing, and a believable path to the right person.
+- Check social pressure. Gossip, family hierarchy, elder authority, religious expectation, gender expectations, class difference, public shame, and reputation should affect choices in community/family stories.
+- Check aftermath. Big reveals, arrests, public disgrace, betrayal, death news, legal defeat, and medical shocks need reaction beats before the story races to the next event.
+- Check prop continuity. Phones, documents, rings, keys, medicine, photographs, money, test results, and recordings should not vanish after becoming plot-important.
+- Do NOT count background_roles as full characters and do NOT penalize them for having no dialogue. They are non-speaking realism/crowd roles only.
+
 RETENTION — HOOK-RESOLUTION CYCLE (20 points total, apply to all tiers):
 
 This is the engine that keeps viewers watching. A script can have perfect structure and still hemorrhage viewers if the hook-resolution cadence is broken.
@@ -96,7 +109,7 @@ FOR PRESTIGE TIER (45 min, five-act structure):
   "issues": [
     {
       "severity": "critical" | "warning" | "minor",
-      "category": "opening" | "dialogue" | "hooks" | "characters" | "hook_resolution_ladder" | "intra_scene_tension" | "hook_escalation" | "inciting" | "midpoint" | "first_reversal" | "bplot" | "dual_bplot" | "stakes" | "setup_payoff" | "exposition" | "ending" | "thematic_coherence" | "act_structure",
+      "category": "opening" | "dialogue" | "hooks" | "characters" | "realism" | "procedure" | "hook_resolution_ladder" | "intra_scene_tension" | "hook_escalation" | "inciting" | "midpoint" | "first_reversal" | "bplot" | "dual_bplot" | "stakes" | "setup_payoff" | "exposition" | "ending" | "thematic_coherence" | "act_structure",
       "description": "<specific, actionable — include chapter/scene/line numbers>",
       "chapter": <int or null>,
       "scene": <int or null>,
