@@ -3226,6 +3226,25 @@ it does NOT correspond to a Higgsfield element. `createLocationElement()` in
 - Debug screenshot saved after opening scheduling panel for diagnosis.
 - Upload order: `ORDER BY short_number ASC` — short_001 uploads first, matches earliest scheduled date.
 
+
+**Facebook Reels UI drift (live diagnostic 2026-06-03):**
+- Shorts/Reels no longer use the old `Next -> description -> Next -> Reel settings -> Scheduling options row` wizard after upload.
+- Current live flow mirrors Promo/Engagement composer scheduling:
+  ```text
+  Content Library -> Create dropdown -> Reel
+  Reel composer opens with caption field + uploaded media preview
+  upload video
+  enter caption in "Describe your reel..."
+  bottom Schedule button opens Scheduling options modal
+  set Date and Time in the modal
+  Schedule for later applies date/time
+  bottom Schedule post submits
+  confirmation should return to Content Library Scheduled tab / scheduled row
+  ```
+- Keep Reel-specific upload (`input[type=file]` / `setInputFiles`) and exact `Reel` menu selection, but use the composer-style schedule modal and final `Schedule post` button. Do not click old `Next` buttons unless Facebook explicitly returns to the old wizard.
+- Live upload behavior: clicking exact `Reel` can immediately open the native file chooser. Arm `page.waitForEvent('filechooser')` before clicking `Reel`; if it fires, set the video file from that chooser and skip searching for a later upload input. If no chooser fires, fall back to video-capable file inputs, then the visible Reel upload drop zone. Upload readiness must wait for real composer markers such as `Uploaded media`, `safe to publish`, caption + Schedule controls plus a real `video` or selected file input; do not treat missing spinner or unrelated page images as upload complete.
+- Failure mode seen 2026-06-03: after `+ Create`, `_dismissPopups()` can misclassify the Create menu as an unknown dialog and press Escape, closing `Post / Story / Reel / Bulk upload reels` before Step 3. Protect Create-menu text from Escape dismissal, and do not run popup dismissal immediately before clicking `Reel`.
+
 **Shorts Status: `upload_failed` (Session 30M):**
 - Upload errors now set status to `upload_failed` (not generic `failed`).
 - `failed` is reserved for SEO generation failures (description/hashtags generation).

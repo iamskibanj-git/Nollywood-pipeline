@@ -255,6 +255,7 @@ class FacebookUploader {
       });
       // Dynamic readiness wait — polls for Content Library UI indicators
       await this._waitForPageReady();
+      await this._openScheduledTab();
       await this._dismissPopups(); // FB shows popups on first load (shortcuts, banners, etc.)
       this.onStepComplete('navigate');
 
@@ -266,18 +267,23 @@ class FacebookUploader {
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('create');
 
+      let reelFileChooser = null;
       // ── Step 3: Select "Reel" from dropdown menu (with retry)
       this.log('[FB-UPLOAD] Step 3: Selecting Reel');
       await this._retryStep('Step 3 (Reel)', async () => {
+        const fileChooserPromise = this.page.waitForEvent('filechooser', { timeout: 20000 }).catch(() => null);
         // The dropdown has: Post, Story, Reel, Bulk upload reels
         // Use getByText for exact match to avoid hitting "Bulk upload reels"
         try {
-          await this._dismissPopups();
-          await this.page.getByText('Reel', { exact: true }).click({ timeout: CLICK_TIMEOUT });
+          await this._clickCreateMenuReel();
         } catch (_) {
           await this._clickWithFallback(SELECTORS.reelOption);
         }
+        reelFileChooser = await fileChooserPromise;
       });
+      this.log(reelFileChooser
+        ? '[FB-UPLOAD] Reel menu opened native file chooser'
+        : '[FB-UPLOAD] Reel menu did not open a file chooser; will use composer upload fallback');
       await this.page.waitForTimeout(POST_NAV_SETTLE);
       await this._dismissPopups();
       this.onStepComplete('reel_selected');
@@ -285,42 +291,27 @@ class FacebookUploader {
       // ── Step 4: Upload video file
       // "Create reel" modal appears with "Add video / or drag and drop" area
       this.log(`[FB-UPLOAD] Step 4: Uploading video: ${path.basename(filePath)}`);
-      await this._uploadVideo(filePath);
+      await this._uploadVideo(filePath, reelFileChooser);
       this.log('[FB-UPLOAD] Step 4b: Waiting for upload processing...');
       await this._waitForUploadProcessing();
       this.onStepComplete('uploaded');
 
-      // ── Step 5: Click "Next" (post-upload — goes to Edit reel / description page)
-      this.log('[FB-UPLOAD] Step 5: Clicking Next (post-upload)');
-      await this._retryStep('Step 5 (Next post-upload)', async () => {
-        await this._clickNext();
-      });
-      await this.page.waitForTimeout(POST_NAV_SETTLE);
-      this.onStepComplete('next_1');
+      // Current Facebook Reels composer keeps caption + schedule controls on
+      // the same full-page composer after upload. Do not click the old Next
+      // wizard steps unless the UI explicitly changes back.
+      this.log('[FB-UPLOAD] Step 5: Waiting for composer controls after upload');
+      await this._waitForReelComposerReady();
 
-      // ── Step 6: Enter description ("Describe your reel..." field)
       this.log('[FB-UPLOAD] Step 6: Entering description');
       await this._enterDescription(description);
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('description');
 
-      // ── Step 7: Click "Next" (goes to Reel settings page)
-      this.log('[FB-UPLOAD] Step 7: Clicking Next (to Reel settings)');
-      await this._retryStep('Step 7 (Next to settings)', async () => {
-        await this._clickNext();
-      });
-      await this.page.waitForTimeout(POST_NAV_SETTLE);
-      this.onStepComplete('next_2');
-
-      // ── Step 8: Click "Scheduling options" row (shows "Publish now" by default)
-      // This opens a sub-panel with date/time inputs + "Schedule for later" button
-      this.log('[FB-UPLOAD] Step 8: Opening Scheduling options');
-      await this._retryStep('Step 8 (Scheduling options)', async () => {
-        await this._clickSchedulingOptions();
-      });
+      this.log('[FB-UPLOAD] Step 7: Opening scheduling modal');
+      await this._scrollComposerToBottom();
+      await this._clickComposerScheduleButton();
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
 
-      // Debug: screenshot the scheduling sub-panel so we can see what FB shows
       try {
         const debugPath = path.join(path.dirname(filePath), `fb_debug_schedule_panel_${Date.now()}.png`);
         await this.page.screenshot({ path: debugPath, fullPage: false });
@@ -329,34 +320,27 @@ class FacebookUploader {
 
       this.onStepComplete('scheduling_opened');
 
-      // ── Step 9: Set date in the scheduling sub-panel
-      this.log(`[FB-UPLOAD] Step 9: Setting date: ${scheduledDate}`);
-      await this._setScheduleDate(scheduledDate);
-      await this.page.waitForTimeout(POST_CLICK_SETTLE);
+      this.log(`[FB-UPLOAD] Step 8: Setting date: ${scheduledDate}`);
+      await this._setScopedScheduleDate(scheduledDate);
+      await this.page.waitForTimeout(1000);
       this.onStepComplete('date_set');
 
-      // ── Step 10: Set time in the scheduling sub-panel
-      this.log(`[FB-UPLOAD] Step 10: Setting time: ${scheduledTime}`);
-      await this._setScheduleTime(scheduledTime);
-      await this.page.waitForTimeout(POST_CLICK_SETTLE);
+      this.log(`[FB-UPLOAD] Step 9: Setting time: ${scheduledTime}`);
+      await this._setScopedScheduleTime(scheduledTime);
+      await this.page.waitForTimeout(1000);
       this.onStepComplete('time_set');
 
-      // ── Step 11: Click "Schedule for later" button (inside the sub-panel)
-      // This confirms the date/time and returns to Reel settings
-      // where the "Post" button is now replaced with "Schedule"
-      this.log('[FB-UPLOAD] Step 11: Clicking Schedule for later');
-      await this._retryStep('Step 11 (Schedule for later)', async () => {
-        await this._clickWithFallback(SELECTORS.scheduleForLaterButton);
+      this.log('[FB-UPLOAD] Step 10: Clicking Schedule for later');
+      await this._retryStep('Step 10 (Schedule for later)', async () => {
+        await this._clickScheduleForLater();
       });
-      await this.page.waitForTimeout(POST_NAV_SETTLE);
+      await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('schedule_for_later');
 
-      // ── Step 12: Click "Schedule" button (final confirmation)
-      // The Reel settings page now shows "Save" + "Schedule" buttons
-      this.log('[FB-UPLOAD] Step 12: Clicking Schedule (final)');
-      await this._clickFinalSchedule();
-      this.log('[FB-UPLOAD] Step 12b: Waiting for schedule confirmation...');
-      await this._waitForScheduleConfirmation();
+      this.log('[FB-UPLOAD] Step 11: Clicking Schedule post');
+      await this._clickComposerSubmitButton();
+      this.log('[FB-UPLOAD] Step 11b: Waiting for schedule confirmation...');
+      await this._waitForReelScheduleConfirmation(description);
       this.onStepComplete('scheduled');
 
       this.log('[FB-UPLOAD] ✓ Reel scheduled successfully');
@@ -461,7 +445,9 @@ class FacebookUploader {
           text.includes('Scheduling options') ||
           text.includes('Schedule for later') ||
           text.includes('Add video') ||
-          text.includes('Describe your reel')
+          text.includes('Describe your reel') ||
+          /Post\s+Story\s+Reel/i.test(text) ||
+          /Story\s+Reel\s+Bulk upload reels/i.test(text)
         );
         if (!isOurWizard) {
           await this.page.keyboard.press('Escape');
@@ -543,6 +529,26 @@ class FacebookUploader {
     }
   }
 
+  async _openScheduledTab() {
+    try {
+      const clicked = await this._clickVisibleControlByText(/^Scheduled$/i, { preferRole: 'button' });
+      if (clicked) {
+        await this.page.waitForTimeout(1500);
+        return;
+      }
+    } catch (_) {}
+    try {
+      await this.page.getByText('Scheduled', { exact: true }).first().click({ timeout: 5000 });
+      await this.page.waitForTimeout(1500);
+    } catch (_) {}
+  }
+
+  async _clickCreateMenuReel() {
+    const clicked = await this._clickVisibleControlByText(/^Reel$/i, { preferRole: 'menuitem' });
+    if (clicked) return;
+    await this.page.getByText('Reel', { exact: true }).click({ timeout: CLICK_TIMEOUT });
+  }
+
   /**
    * Click using primary selector with fallback to alternatives.
    */
@@ -595,44 +601,327 @@ class FacebookUploader {
     throw new Error(`Timed out waiting for element: ${selectorString.slice(0, 80)}...`);
   }
 
+  _activeDialog() {
+    return this.page.locator('[role="dialog"]').last();
+  }
+
+  async _waitForReelComposerReady() {
+    const start = Date.now();
+    const timeoutMs = 90000;
+    while (Date.now() - start < timeoutMs) {
+      const state = await this.page.evaluate(() => {
+        const text = document.body.innerText || document.body.textContent || '';
+        const hasCaption = /Describe your reel|Enter caption|caption/i.test(text);
+        const hasSchedule = /\bSchedule\b/i.test(text);
+        const safe = /safe to publish/i.test(text);
+        const hasPreview = !!document.querySelector('video, [aria-label*="video" i], img');
+        return { hasCaption, hasSchedule, safe, hasPreview };
+      }).catch(() => ({ hasCaption: false, hasSchedule: false, safe: false, hasPreview: false }));
+      if ((state.hasCaption && state.hasSchedule) || state.safe || (state.hasPreview && state.hasSchedule)) {
+        await this.page.waitForTimeout(1500);
+        return;
+      }
+      await this.page.waitForTimeout(2000);
+    }
+    throw new Error('Timed out waiting for Reel composer controls after upload');
+  }
+
+  async _scrollComposerToBottom() {
+    try {
+      await this.page.evaluate(() => {
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+        const dialog = dialogs[dialogs.length - 1];
+        const roots = dialog ? [dialog, ...dialog.querySelectorAll('*')] : [document.scrollingElement, ...document.querySelectorAll('*')];
+        const scrollables = roots.filter(el => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          return /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 20;
+        });
+        for (const el of scrollables) el.scrollTop = el.scrollHeight;
+        if (document.scrollingElement) document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight;
+      });
+      await this.page.mouse.wheel(0, 2000);
+      await this.page.waitForTimeout(1000);
+    } catch (_) {}
+  }
+
+  async _clickVisibleControlByText(pattern, options = {}) {
+    const target = await this.page.evaluate(({ source, flags, preferRole, bottomOnly }) => {
+      const re = new RegExp(source, flags);
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const all = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], a, label, div')].filter(visible);
+      const ranked = all
+        .filter(el => re.test(textOf(el)))
+        .filter(el => {
+          if (!bottomOnly) return true;
+          const rect = el.getBoundingClientRect();
+          return rect.y > window.innerHeight * 0.6;
+        })
+        .map(el => {
+          const rect = el.getBoundingClientRect();
+          const role = el.getAttribute('role') || '';
+          let score = 0;
+          if (preferRole && role === preferRole) score += 100;
+          if (role === 'button' || role === 'menuitem' || el.tagName === 'BUTTON') score += 20;
+          if (rect.width > 20 && rect.height > 20) score += 10;
+          if (rect.width > 450) score -= 5;
+          return { rect, role, text: textOf(el), score };
+        })
+        .sort((a, b) => b.score - a.score);
+      const item = ranked[0];
+      if (!item) return null;
+      return {
+        x: Math.round(item.rect.x + item.rect.width / 2),
+        y: Math.round(item.rect.y + item.rect.height / 2),
+        text: item.text,
+        role: item.role,
+      };
+    }, { source: pattern.source, flags: pattern.flags, preferRole: options.preferRole || '', bottomOnly: options.bottomOnly === true }).catch(() => null);
+
+    if (!target) return false;
+    this.log(`[FB-UPLOAD] Clicking visible control "${target.text}" (${target.role || 'no role'}) at ${target.x},${target.y}`);
+    await this.page.mouse.click(target.x, target.y);
+    await this.page.waitForTimeout(800);
+    return true;
+  }
+
+  async _clickComposerScheduleButton() {
+    const clicked = await this._clickVisibleControlByText(/^Schedule$/i, { preferRole: 'button', bottomOnly: true });
+    if (clicked) return;
+    await this._clickWithFallback('div[role="button"]:has-text("Schedule"):not(:has-text("for later")):not(:has-text("Scheduling")), span:text-is("Schedule")');
+  }
+
+  async _clickScheduleForLater() {
+    const dialog = this._activeDialog();
+    const candidates = [
+      () => dialog.getByRole('button', { name: /Schedule for later/i }).first(),
+      () => dialog.getByText('Schedule for later', { exact: false }).first(),
+      () => this.page.getByRole('button', { name: /Schedule for later/i }).first(),
+    ];
+    for (const getLocator of candidates) {
+      try {
+        const locator = getLocator();
+        if (await locator.count() > 0) {
+          await locator.click({ timeout: CLICK_TIMEOUT });
+          return;
+        }
+      } catch (_) {}
+    }
+    await this._clickWithFallback(SELECTORS.scheduleForLaterButton);
+  }
+
+  async _clickComposerSubmitButton() {
+    const clicked = await this._clickVisibleControlByText(/^(Schedule post|Post)$/i, { preferRole: 'button', bottomOnly: true });
+    if (clicked) return;
+    await this._clickWithFallback('div[role="button"][aria-label="Schedule post"], div[role="button"]:has-text("Schedule post"), div[role="button"][aria-label="Post"], div[role="button"]:has-text("Post")');
+  }
+
+  async _setScopedScheduleDate(dateStr) {
+    const [year, month, day] = dateStr.split('-');
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const fbDate = `${monthNames[parseInt(month, 10) - 1]} ${parseInt(day, 10)}, ${year}`;
+    const dialog = this._activeDialog();
+    const inputs = dialog.locator('input[type="text"], input:not([type]), input[role="combobox"]');
+    const count = await inputs.count();
+    for (let i = 0; i < count; i++) {
+      const input = inputs.nth(i);
+      const value = await input.inputValue().catch(() => '');
+      const label = await input.getAttribute('aria-label').catch(() => '');
+      if (/date|schedule/i.test(label) || /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.test(value) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(value)) {
+        await input.click({ clickCount: 3, timeout: 5000 });
+        await input.fill(fbDate);
+        await this.page.keyboard.press('Tab');
+        return;
+      }
+    }
+    await this._setScheduleDate(dateStr);
+  }
+
+  async _setScopedScheduleTime(timeStr) {
+    const [hours, minutes] = timeStr.split(':');
+    const h = parseInt(hours, 10);
+    const period = h >= 12 ? 'PM' : 'AM';
+    const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+    const fbTime = `${h12}:${minutes} ${period}`;
+    const dialog = this._activeDialog();
+    const inputs = dialog.locator('input[type="text"], input:not([type]), input[role="combobox"]');
+    const count = await inputs.count();
+    for (let i = 0; i < count; i++) {
+      const input = inputs.nth(i);
+      const value = await input.inputValue().catch(() => '');
+      const label = await input.getAttribute('aria-label').catch(() => '');
+      if (/time/i.test(label) || /\b(AM|PM)\b/i.test(value) || /^\d{1,2}:\d{2}/.test(value)) {
+        await input.click({ clickCount: 3, timeout: 5000 });
+        await input.fill(fbTime);
+        await this.page.keyboard.press('Tab');
+        return;
+      }
+    }
+    await this._setScheduleTime(timeStr);
+  }
+
+  async _waitForReelScheduleConfirmation(expectedDescription = '') {
+    const needle = String(expectedDescription || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const start = Date.now();
+    const timeoutMs = 30000;
+    let triedScheduledTab = false;
+    while (Date.now() - start < timeoutMs) {
+      const state = await this.page.evaluate((caption) => {
+        const text = document.body.innerText || document.body.textContent || '';
+        const compact = text.replace(/\s+/g, ' ');
+        const url = location.href;
+        const hasSuccessText = /reel has been scheduled|your reel.*scheduled|post has been scheduled|successfully scheduled/i.test(text);
+        const onContentLibrary = /Content Library/i.test(text) && /professional_dashboard\/content\/content_library/.test(url);
+        const noScheduledPosts = /No scheduled posts/i.test(text);
+        const hasScheduledRow = onContentLibrary &&
+          !noScheduledPosts &&
+          /Scheduled\s*[Â·â€¢]/i.test(text) &&
+          (!caption || compact.includes(caption));
+        return { url, hasSuccessText, onContentLibrary, noScheduledPosts, hasScheduledRow };
+      }, needle).catch(() => ({ url: '', hasSuccessText: false, onContentLibrary: false, noScheduledPosts: false, hasScheduledRow: false }));
+
+      if (state.hasSuccessText || state.hasScheduledRow) {
+        this.log('[FB-UPLOAD] Schedule confirmed for Reel');
+        return;
+      }
+      if (state.onContentLibrary && !triedScheduledTab) {
+        triedScheduledTab = true;
+        await this._openScheduledTab();
+      }
+      await this.page.waitForTimeout(2000);
+    }
+    throw new Error('Schedule confirmation timed out; scheduled Reel row did not appear in Content Library.');
+  }
+
   /**
    * Upload video via file input element.
    * Note: post-upload processing wait is handled by _waitForUploadProcessing().
    */
-  async _uploadVideo(filePath) {
+  async _uploadVideo(filePath, preopenedFileChooser = null) {
+    if (preopenedFileChooser) {
+      this.log('[FB-UPLOAD] File chooser opened from Reel menu click; setting video file');
+      await preopenedFileChooser.setFiles(filePath);
+      await this.page.waitForTimeout(POST_CLICK_SETTLE);
+      return;
+    }
+
     // Try to find a file input first (most reliable)
     try {
-      const fileInput = await this.page.waitForSelector(SELECTORS.fileInput, { timeout: 5000 });
-      if (fileInput) {
+      const fileInputs = await this.page.locator(SELECTORS.fileInput).all();
+      this.log(`[FB-UPLOAD] Upload fallback: found ${fileInputs.length} file input(s)`);
+      for (const fileInput of fileInputs) {
+        const accept = await fileInput.getAttribute('accept').catch(() => '');
+        if (accept && !/video|\*/i.test(accept)) continue;
         await fileInput.setInputFiles(filePath);
         // Brief settle — actual processing wait is in _waitForUploadProcessing()
         await this.page.waitForTimeout(POST_CLICK_SETTLE);
+        this.log('[FB-UPLOAD] Upload fallback: set video on file input');
         return;
       }
     } catch (_) {}
 
-    // Fallback: click upload button which should trigger file chooser
-    const [fileChooser] = await Promise.all([
-      this.page.waitForEvent('filechooser', { timeout: CLICK_TIMEOUT }),
-      this._clickWithFallback(SELECTORS.uploadButton),
-    ]);
+    // Fallback: click the current Reel composer upload surface.
+    const fileChooserPromise = this.page.waitForEvent('filechooser', { timeout: CLICK_TIMEOUT });
+    const clicked = await this._clickReelUploadSurface();
+    if (!clicked) {
+      await this._logReelUploadDiagnostics('upload-fallback-no-click-target');
+      throw new Error('Could not find Reel upload target after selecting Reel');
+    }
+    const fileChooser = await fileChooserPromise.catch(async (e) => {
+      await this._logReelUploadDiagnostics('upload-fallback-no-filechooser');
+      throw e;
+    });
     await fileChooser.setFiles(filePath);
     // Brief settle — actual processing wait is in _waitForUploadProcessing()
     await this.page.waitForTimeout(POST_CLICK_SETTLE);
+    this.log('[FB-UPLOAD] Upload fallback: set video from composer file chooser');
+  }
+
+  async _clickReelUploadSurface() {
+    const attempts = [
+      () => this.page.getByText(/Add video|Add photos or videos|Upload video|Choose file|or drag and drop/i).first(),
+      () => this.page.locator('[role="button"]').filter({ hasText: /Add video|Add photos or videos|Upload video|Choose file/i }).first(),
+      () => this.page.locator('div, label').filter({ hasText: /Add video|Add photos or videos|Upload video|or drag and drop/i }).first(),
+      () => this.page.locator('input[type="file"]').first(),
+    ];
+
+    for (const find of attempts) {
+      try {
+        const locator = find();
+        if (await locator.count() === 0) continue;
+        const first = locator.first();
+        const box = await first.boundingBox().catch(() => null);
+        if (!box) continue;
+        await first.click({ timeout: CLICK_TIMEOUT, force: true });
+        await this.page.waitForTimeout(1000);
+        return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  async _logReelUploadDiagnostics(label) {
+    try {
+      const state = await this.page.evaluate(() => {
+        const text = (document.body.innerText || document.body.textContent || '').replace(/\s+/g, ' ').trim();
+        const visible = el => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const controls = [...document.querySelectorAll('button, [role="button"], label, input[type="file"], [contenteditable="true"]')]
+          .filter(visible)
+          .slice(0, 40)
+          .map(el => ({
+            tag: el.tagName,
+            role: el.getAttribute('role') || '',
+            aria: el.getAttribute('aria-label') || '',
+            text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+            accept: el.getAttribute('accept') || '',
+            type: el.getAttribute('type') || '',
+          }));
+        return { url: location.href, text: text.slice(0, 1200), controls };
+      });
+      this.log(`[FB-UPLOAD] ${label}: ${JSON.stringify(state).slice(0, 3000)}`);
+    } catch (e) {
+      this.log(`[FB-UPLOAD] ${label}: diagnostics failed (${e.message})`);
+    }
   }
 
   /**
    * Wait for Facebook to finish processing the uploaded video.
-   * Polls for: progress bar disappearing, "Next" button becoming enabled,
-   * or thumbnail preview appearing. Falls back to fixed timeout.
+   * The current Reels composer can show no spinner before the upload is
+   * actually attached, so absence of a spinner is not enough.
    */
   async _waitForUploadProcessing() {
     const POLL_INTERVAL = 3000;
-    const MAX_WAIT = UPLOAD_TIMEOUT; // 3 minutes max
+    const MAX_WAIT = UPLOAD_TIMEOUT;
     const startTime = Date.now();
 
     while (Date.now() - startTime < MAX_WAIT) {
-      // Check if "Next" button is present and enabled (FB enables it when upload is done)
+      const state = await this.page.evaluate(() => {
+        const text = document.body.innerText || document.body.textContent || '';
+        const uploadedMedia = /Uploaded media|Your reel is safe to publish|safe to publish/i.test(text);
+        const hasCaption = /Describe your reel|Enter caption|caption/i.test(text);
+        const hasSchedule = /\bSchedule\b/i.test(text);
+        const hasVideo = !!document.querySelector('video');
+        const hasSelectedFile = [...document.querySelectorAll('input[type="file"]')]
+          .some(input => input.files && input.files.length > 0);
+        const errorText = /could not upload|upload failed|failed to upload|video file is not supported/i.test(text);
+        return { uploadedMedia, hasCaption, hasSchedule, hasVideo, hasSelectedFile, errorText };
+      }).catch(() => ({ uploadedMedia: false, hasCaption: false, hasSchedule: false, hasVideo: false, hasSelectedFile: false, errorText: false }));
+
+      if (state.errorText) throw new Error('Facebook reported a Reel upload error');
+      if (state.uploadedMedia || (state.hasCaption && state.hasSchedule && (state.hasVideo || state.hasSelectedFile))) {
+        this.log('[FB-UPLOAD] Upload processing complete (composer upload markers visible)');
+        return;
+      }
+
       try {
         const nextBtn = await this.page.$(SELECTORS.nextButton.split(', ')[0]);
         if (nextBtn) {
@@ -644,23 +933,10 @@ class FacebookUploader {
         }
       } catch (_) {}
 
-      // Check if progress indicator is gone (FB shows a spinner/progress bar during upload)
-      try {
-        const spinner = await this.page.$('[role="progressbar"], [aria-label*="uploading" i], [aria-label*="processing" i]');
-        if (!spinner) {
-          // No spinner — check if we've waited at least the minimum settle time
-          if (Date.now() - startTime >= POST_UPLOAD_SETTLE) {
-            this.log('[FB-UPLOAD] Upload processing complete (no progress indicator)');
-            return;
-          }
-        }
-      } catch (_) {}
-
       await this.page.waitForTimeout(POLL_INTERVAL);
     }
 
-    // Fallback: max wait reached, proceed anyway
-    this.log('[FB-UPLOAD] Upload processing timeout reached — proceeding');
+    throw new Error('Timed out waiting for Reel upload to attach to the composer');
   }
 
   /**
