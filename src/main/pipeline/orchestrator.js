@@ -9241,12 +9241,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.state.status = 'paused';
           this.emit({
             type: 'paused',
-            reason: 'cinema-clip-failed',
+            reason: 'cinema-clip-failed-auto-recovery',
             clipId,
             message: e.message,
           });
-          await this.checkPause();
+          this.log(`[CINEMATIC] ${clipId}: auto-resuming in 5s to enter Asset Library recovery path`);
+          await new Promise(r => setTimeout(r, 5000));
           if (this.cancelled) return;
+          this.paused = false;
+          this.state.status = 'running';
+          this.emit({ type: 'resumed' });
+          this.log(`[CINEMATIC] ${clipId}: auto-resumed; retrying clip through recovery-first path`);
           i--;
           continue;
         }
