@@ -7894,6 +7894,99 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       this.log(`[CINEMATIC] Clip ${clipId} approved — continuing to next`);
       return 'continue';
     };
+    const getFreshClipAsset = (clipId, fallbackAsset = null) => {
+      const fresh = db.getAssets(projectId, { type: 'video_clip_cinematic' })
+        .find(a => (fallbackAsset?.id && a.id === fallbackAsset.id) || (clipId && a.kling_clip_id === clipId));
+      return fresh || fallbackAsset || null;
+    };
+
+    const buildRecoveryPromptFromAsset = (asset, fallbackPrompt, clipId) => {
+      let recoveryPrompt = fallbackPrompt || '';
+      if (asset?.prompt_used) {
+        try {
+          const parsed = JSON.parse(asset.prompt_used);
+          if (parsed.prompt && parsed.prompt.length > 50) {
+            recoveryPrompt = parsed.prompt;
+            this.log(`[CINEMATIC] ${clipId}: using stored prompt_used for recovery matching (${recoveryPrompt.length} chars)`);
+          }
+        } catch (_) {
+          if (asset.prompt_used.length > 50) {
+            recoveryPrompt = asset.prompt_used;
+            this.log(`[CINEMATIC] ${clipId}: using raw prompt_used for recovery matching (${recoveryPrompt.length} chars)`);
+          }
+        }
+      }
+      const elemMap = this.state.cinematicElementNames || {};
+      const validNames = new Set(Object.values(elemMap).map(n => n.toLowerCase()));
+      return recoveryPrompt.replace(/@([a-z0-9_]+)/gi, (match, name) => {
+        if (validNames.has(name.toLowerCase())) return match;
+        return name;
+      });
+    };
+
+    const attemptSubmittedClipRecovery = async ({
+      clipId,
+      clipDef,
+      clipIndex,
+      clipLabel,
+      fallbackPrompt,
+      outputPath,
+      asset,
+      context = 'submitted',
+      minSimilarity = 88,
+      maxTilesToCheck = 8,
+      timeoutMs = 90000,
+    }) => {
+      const freshAsset = getFreshClipAsset(clipId, asset);
+      if (!freshAsset || freshAsset.status === 'done') {
+        return { status: 'skip', reason: freshAsset?.status === 'done' ? 'already done' : 'missing asset' };
+      }
+      if (!freshAsset.gen_clicked_at || !freshAsset.prompt_used) {
+        return { status: 'skip', reason: 'missing gen_clicked_at or prompt_used' };
+      }
+
+      this.log(`[CINEMATIC] ${clipId}: gen_clicked_at=${freshAsset.gen_clicked_at}, prompt_len=${freshAsset.prompt_used.length} - attempting Asset Library recovery before any new Generate click (${context})`);
+      const recoveryPrompt = buildRecoveryPromptFromAsset(freshAsset, fallbackPrompt || clipDef?.multi_shot_prompt || '', clipId);
+      const recovered = await videoAutomation.recoverTimedOutClip(recoveryPrompt, outputPath, {
+        minSimilarity,
+        maxTilesToCheck,
+        timeoutMs,
+      });
+
+      if (!recovered) {
+        this.log(`[CINEMATIC] ${clipId}: recovery found no match (${context}) - generation may proceed`);
+        return { status: 'miss', asset: freshAsset };
+      }
+
+      this.log(`[CINEMATIC] ${clipId} recovered from Asset library (similarity=${recovered.similarity}%, uuid=${recovered.assetUuid || 'unknown'})`);
+      db.markAssetDone(freshAsset.id, recovered.path, {
+        model: videoModelName,
+        sourceGenId: recovered.sourceGenId,
+        cdnUrl: recovered.cdnUrl,
+      });
+      generated++;
+      this.state.videoClips = this.state.videoClips || [];
+      this.state.videoClips.push({
+        chapter: freshAsset.chapter,
+        scene: freshAsset.scene,
+        clipId,
+        path: recovered.path,
+        status: 'complete',
+      });
+      this.emit({ type: 'clip-complete', index: clipIndex, path: recovered.path });
+
+      const recoveryReview = await runClipReviewIfNeeded({
+        clipId,
+        clipPath: recovered.path,
+        clipIndex,
+        clipLabel,
+        clipAsset: freshAsset,
+        context,
+      });
+      if (recoveryReview === 'stop') return { status: 'stop', asset: freshAsset };
+      return { status: 'recovered', asset: freshAsset, path: recovered.path };
+    };
+
     const clipGenStartTime = Date.now();
 
     // ── LAZY VISION VERIFICATION CACHE ──
@@ -7942,7 +8035,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // ── RESUME: Check if the clip file already exists on disk ──
       // Covers the gap where the file was downloaded but the DB wasn't updated
       // (crash between file write and markAssetDone).
-      const existingAsset = existingClips.find(a => a.kling_clip_id === clipId);
+      const existingAsset = getFreshClipAsset(clipId, existingClips.find(a => a.kling_clip_id === clipId));
       const isPreGenError = existingAsset?.error_message?.includes('[PRE-GEN]');
 
       const expectedOutputPath = path.join(clipsDir, `${clipId}_cinematic.mp4`);
@@ -8739,6 +8832,21 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
 
       try {
+        if (cinematicVideoEngine === 'cinema-studio-3.5') {
+          const recoveryBeforeGenerate = await attemptSubmittedClipRecovery({
+            clipId,
+            clipDef,
+            clipIndex: i,
+            clipLabel: label,
+            fallbackPrompt: finalMultiShotPrompt,
+            outputPath,
+            asset: clipAsset,
+            context: 'pre-generate guard',
+          });
+          if (recoveryBeforeGenerate.status === 'stop') break;
+          if (recoveryBeforeGenerate.status === 'recovered') continue;
+        }
+
         if (clipAsset) {
           // Store prompt as JSON with reconciliation flag for restart persistence
           const promptPayload = {
@@ -9128,6 +9236,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             db.markAssetFailed(clipAsset.id, e.message);
             db.resetAsset(clipAsset.id);
           }
+          this.log(`[CINEMATIC] ${clipId}: paused with submitted generation metadata preserved; resume will attempt Asset Library recovery before any new Generate click`);
           this.paused = true;
           this.state.status = 'paused';
           this.emit({
