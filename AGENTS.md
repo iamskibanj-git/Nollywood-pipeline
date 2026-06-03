@@ -89,6 +89,12 @@ A story has NO abandon concept — once started, it always resumes until assembl
 
 **Stages** (in order): `research-done` → `title-chosen` → `script-done` → `portraits-done` → `scenes-done` → `videos-done` → `assembled`
 
+**Project root folder naming (Session 2026-06-02):**
+- New projects are initially created as `YYYY-MM-DD_<8-char-uuid>` because the title is not known during research setup.
+- Immediately after title approval, `orchestrator.js::_ensureProjectDirIncludesTitle()` renames the root folder to `YYYY-MM-DD_<8-char-uuid> - <script title>` and updates `projects.project_dir`, `this.state.project.dir`, `project.json`, Higgsfield automation, and the assembler to use the renamed path.
+- Windows-illegal filename characters in titles (`<>:"/\|?*` and controls) are sanitized to ` - `. Example UI title `THE MAN I CHOSE OVER GOD | AI Nollywood Short Film` becomes the folder segment `THE MAN I CHOSE OVER GOD - AI Nollywood Short Film`.
+- Existing projects with asset rows are not auto-renamed, because absolute asset paths may already be persisted in SQLite. Do not bulk-rename old project roots without also migrating all DB file paths and checking disk files.
+
 **Pool locking**: Source video is "claimed" when title is chosen, marked "used" only when assembly completes. No new story can start while a project is in progress.
 
 **Launcher UI** (two-card layout in `index.html`):

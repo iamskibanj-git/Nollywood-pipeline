@@ -408,6 +408,90 @@ class PipelineOrchestrator {
 
   // ── Used Videos (delegates to db module) ──
 
+  _projectFolderName(projectId, title) {
+    const cleanTitle = this._sanitizeProjectFolderTitle(title);
+    if (!cleanTitle) return projectId;
+    const prefix = `${projectId} - `;
+    const maxTitleLength = Math.max(20, 240 - prefix.length);
+    const boundedTitle = cleanTitle.length > maxTitleLength
+      ? cleanTitle.slice(0, maxTitleLength).replace(/[ .-]+$/g, '')
+      : cleanTitle;
+    return `${prefix}${boundedTitle}`;
+  }
+
+  _sanitizeProjectFolderTitle(title) {
+    return String(title || '')
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, ' - ')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*-\s*(?:-\s*)+/g, ' - ')
+      .replace(/[ .-]+$/g, '')
+      .trim();
+  }
+
+  _uniqueProjectDir(parentDir, folderName) {
+    let candidate = path.join(parentDir, folderName);
+    if (!fs.existsSync(candidate)) return candidate;
+
+    for (let i = 2; i <= 99; i++) {
+      const suffix = ` (${i})`;
+      const base = folderName.length + suffix.length > 240
+        ? folderName.slice(0, 240 - suffix.length).replace(/[ .-]+$/g, '')
+        : folderName;
+      candidate = path.join(parentDir, `${base}${suffix}`);
+      if (!fs.existsSync(candidate)) return candidate;
+    }
+
+    throw new Error(`Could not find available project folder name for ${folderName}`);
+  }
+
+  _ensureProjectDirIncludesTitle(projectId, projectDir, title) {
+    if (!projectId || !projectDir || !title) return projectDir;
+
+    const desiredName = this._projectFolderName(projectId, title);
+    const currentName = path.basename(projectDir);
+    if (currentName === desiredName) return projectDir;
+
+    const mayRename = currentName === projectId || currentName.startsWith(`${projectId} - `);
+    if (!mayRename) {
+      this.log(`[PROJECT] Keeping custom project folder name: ${currentName}`);
+      return projectDir;
+    }
+
+    const existingAssets = db.getAssets(projectId) || [];
+    if (existingAssets.length > 0) {
+      this.log(`[PROJECT] Project folder still uses id-only name; skipping rename because ${existingAssets.length} asset row(s) already exist`, 'warn');
+      return projectDir;
+    }
+
+    if (!fs.existsSync(projectDir)) {
+      this.log(`[PROJECT] Project folder missing, cannot rename: ${projectDir}`, 'warn');
+      return projectDir;
+    }
+
+    const targetDir = this._uniqueProjectDir(path.dirname(projectDir), desiredName);
+    fs.renameSync(projectDir, targetDir);
+    db.updateProject(projectId, { project_dir: targetDir });
+
+    if (this.state.project) this.state.project.dir = targetDir;
+    try {
+      const projectJsonPath = path.join(targetDir, 'project.json');
+      const existing = fs.existsSync(projectJsonPath)
+        ? JSON.parse(fs.readFileSync(projectJsonPath, 'utf-8'))
+        : {};
+      fs.writeFileSync(projectJsonPath, JSON.stringify({
+        ...existing,
+        id: projectId,
+        title,
+        projectDir: targetDir,
+      }, null, 2));
+    } catch (error) {
+      this.log(`[PROJECT] Folder renamed but project.json update failed: ${error.message}`, 'warn');
+    }
+
+    this.log(`[PROJECT] Renamed project folder: ${path.basename(targetDir)}`);
+    return targetDir;
+  }
+
   markVideosUsed(videoIds, projectId) {
     db.markVideosUsed(videoIds, projectId);
     this.log(`Marked ${videoIds.length} video(s) as used`);
@@ -1349,6 +1433,13 @@ class PipelineOrchestrator {
             title: this.state.selectedTitle,
             stage: 'title-chosen',
           });
+          const renamedProjectDir = this._ensureProjectDirIncludesTitle(projectId, projectDir, this.state.selectedTitle);
+          if (renamedProjectDir !== projectDir) {
+            projectDir = renamedProjectDir;
+            this.state.project.dir = projectDir;
+            this.automation = new HiggsFieldAutomation(null, projectDir);
+            this.assembler = new VideoAssembler(projectDir, { brandingCardPath });
+          }
 
           // Skip script gen if resuming with script already done
           if (isResume && activeProject.scriptJson) {
