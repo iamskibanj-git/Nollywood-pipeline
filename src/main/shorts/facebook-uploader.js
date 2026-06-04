@@ -249,15 +249,17 @@ class FacebookUploader {
     try {
       // ── Step 1: Navigate to Content Library (direct URL — faster than dashboard → content)
       this.log('[FB-UPLOAD] Step 1: Navigating to Content Library');
-      await this.page.goto('https://www.facebook.com/professional_dashboard/content/content_library/?filter=SCHEDULED', {
-        waitUntil: 'domcontentloaded',
-        timeout: NAV_TIMEOUT,
-      });
-      // Dynamic readiness wait — polls for Content Library UI indicators
-      await this._waitForPageReady();
-      await this._openScheduledTab();
+      await this._reloadScheduledLibrary();
       await this._dismissPopups(); // FB shows popups on first load (shortcuts, banners, etc.)
       this.onStepComplete('navigate');
+
+      const preExistingMatch = await this._hasScheduledReel(description);
+      if (preExistingMatch) {
+        this.log('[FB-UPLOAD] Matching Reel already exists in Scheduled tab — treating as scheduled');
+        return { success: true, recovered: true };
+      }
+      const scheduledRowBaseline = (await this._getScheduledPostRows()).length;
+      this.log(`[FB-UPLOAD] Scheduled row baseline before upload: ${scheduledRowBaseline}`);
 
       // ── Step 2: Click "+ Create" dropdown (with retry — FB DOM can be slow)
       this.log('[FB-UPLOAD] Step 2: Clicking + Create');
@@ -340,7 +342,7 @@ class FacebookUploader {
       this.log('[FB-UPLOAD] Step 11: Clicking Schedule post');
       await this._clickComposerSubmitButton();
       this.log('[FB-UPLOAD] Step 11b: Waiting for schedule confirmation...');
-      await this._waitForReelScheduleConfirmation(description);
+      await this._waitForReelScheduleConfirmation(description, scheduledRowBaseline);
       this.onStepComplete('scheduled');
 
       this.log('[FB-UPLOAD] ✓ Reel scheduled successfully');
@@ -541,6 +543,16 @@ class FacebookUploader {
       await this.page.getByText('Scheduled', { exact: true }).first().click({ timeout: 5000 });
       await this.page.waitForTimeout(1500);
     } catch (_) {}
+  }
+
+  async _reloadScheduledLibrary() {
+    await this.page.goto('https://www.facebook.com/professional_dashboard/content/content_library/?filter=SCHEDULED', {
+      waitUntil: 'domcontentloaded',
+      timeout: NAV_TIMEOUT,
+    });
+    await this._waitForPageReady();
+    await this._openScheduledTab();
+    await this.page.waitForTimeout(2500);
   }
 
   async _clickCreateMenuReel() {
@@ -765,34 +777,91 @@ class FacebookUploader {
     await this._setScheduleTime(timeStr);
   }
 
-  async _waitForReelScheduleConfirmation(expectedDescription = '') {
-    const needle = String(expectedDescription || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    const start = Date.now();
-    const timeoutMs = 30000;
-    let triedScheduledTab = false;
-    while (Date.now() - start < timeoutMs) {
-      const state = await this.page.evaluate((caption) => {
-        const text = document.body.innerText || document.body.textContent || '';
-        const compact = text.replace(/\s+/g, ' ');
-        const url = location.href;
-        const hasSuccessText = /reel has been scheduled|your reel.*scheduled|post has been scheduled|successfully scheduled/i.test(text);
-        const onContentLibrary = /Content Library/i.test(text) && /professional_dashboard\/content\/content_library/.test(url);
-        const noScheduledPosts = /No scheduled posts/i.test(text);
-        const hasScheduledRow = onContentLibrary &&
-          !noScheduledPosts &&
-          /Scheduled\s*[Â·â€¢]/i.test(text) &&
-          (!caption || compact.includes(caption));
-        return { url, hasSuccessText, onContentLibrary, noScheduledPosts, hasScheduledRow };
-      }, needle).catch(() => ({ url: '', hasSuccessText: false, onContentLibrary: false, noScheduledPosts: false, hasScheduledRow: false }));
+  _captionNeedle(description, length = 40) {
+    return String(description || '').replace(/\s+/g, ' ').trim().slice(0, length);
+  }
 
-      if (state.hasSuccessText || state.hasScheduledRow) {
-        this.log('[FB-UPLOAD] Schedule confirmed for Reel');
+  _captionNeedles(description) {
+    const normalized = String(description || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return [];
+    const firstLine = normalized.split(/\n|#/)[0].trim();
+    const firstSentence = normalized.split(/[.!?]\s/)[0].trim();
+    return [...new Set([
+      normalized.slice(0, 80),
+      normalized.slice(0, 50),
+      normalized.slice(0, 32),
+      firstLine.slice(0, 50),
+      firstSentence.slice(0, 50),
+    ].map(s => s.trim()).filter(s => s.length >= 12))];
+  }
+
+  async _getScheduledPostRows() {
+    return this.page.evaluate(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+      const textOf = el => norm(el.innerText || el.textContent || '');
+      const hasMedia = el => !!el.querySelector('img, video, [aria-label*="video" i], [aria-label*="reel" i]');
+      const isScheduledPostRow = (el, text) => {
+        const rect = el.getBoundingClientRect();
+        if (!/Scheduled/i.test(text) || /No scheduled posts/i.test(text)) return false;
+        if (/Content Library|Published Scheduled Drafts|Create|Search for posts|posts selected/i.test(text)) return false;
+        if (rect.width < 420 || rect.height < 45 || rect.height > 260) return false;
+        if (!hasMedia(el) && !/(Today|Tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec).*at\s+\d{1,2}:\d{2}/i.test(text)) return false;
+        return true;
+      };
+      const candidates = [...document.querySelectorAll('[role="row"], tbody tr, div')]
+        .filter(visible)
+        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+        .filter(item => isScheduledPostRow(item.el, item.text))
+        .sort((a, b) => {
+          if (Math.abs(a.rect.y - b.rect.y) > 6) return a.rect.y - b.rect.y;
+          return a.rect.width - b.rect.width;
+        });
+      const rows = [];
+      for (const item of candidates) {
+        if (rows.some(row => Math.abs(row.y - item.rect.y) < 12 && (row.text.includes(item.text) || item.text.includes(row.text)))) continue;
+        rows.push({
+          text: item.text,
+          key: item.text.slice(0, 300),
+          y: Math.round(item.rect.y),
+          h: Math.round(item.rect.height),
+        });
+      }
+      return rows;
+    }).catch(() => []);
+  }
+
+  async _hasScheduledReel(description) {
+    const needles = this._captionNeedles(description);
+    if (!needles.length) return false;
+    const rows = await this._getScheduledPostRows();
+    const match = rows.find(row => needles.some(needle => row.text.includes(needle)));
+    if (match) this.log(`[FB-UPLOAD] Existing scheduled Reel row matched: "${match.text.slice(0, 120)}"`);
+    return !!match;
+  }
+
+  async _waitForReelScheduleConfirmation(expectedDescription = '', baselineCount = 0) {
+    const needles = this._captionNeedles(expectedDescription);
+    const start = Date.now();
+    const timeoutMs = 60000;
+    await this.page.waitForTimeout(5000);
+    while (Date.now() - start < timeoutMs) {
+      await this._reloadScheduledLibrary();
+      const rows = await this._getScheduledPostRows();
+      const captionMatch = rows.find(row => needles.some(needle => row.text.includes(needle)));
+      if (captionMatch) {
+        this.log(`[FB-UPLOAD] Schedule confirmed for Reel by row match: "${captionMatch.text.slice(0, 120)}"`);
         return;
       }
-      if (state.onContentLibrary && !triedScheduledTab) {
-        triedScheduledTab = true;
-        await this._openScheduledTab();
+      if (rows.length > baselineCount) {
+        this.log(`[FB-UPLOAD] Schedule confirmed for Reel by row-count fallback (${baselineCount} -> ${rows.length})`);
+        return;
       }
+      this.log(`[FB-UPLOAD] Schedule confirmation pending: ${rows.length} row(s), need caption match or >${baselineCount}`);
       await this.page.waitForTimeout(2000);
     }
     throw new Error('Schedule confirmation timed out; scheduled Reel row did not appear in Content Library.');

@@ -166,17 +166,22 @@ class ShortsController {
     let uploaded = 0;
     let failed = 0;
     let current = 0;
+    const failedThisSession = new Set();
 
     try {
       while (true) {
-        const nextShort = this.scheduler.getNextPendingUpload(projectId);
+        const nextShort = this.scheduler.getNextPendingUpload(projectId, [...failedThisSession]);
         if (!nextShort) break;
 
         current++;
-        const total = current + db.queryOne(
-          `SELECT COUNT(*) as cnt FROM shorts WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')`,
-          [projectId]
-        )?.cnt || 0;
+        const failedIds = [...failedThisSession];
+        const exclusionSql = failedIds.length ? ` AND id NOT IN (${failedIds.map(() => '?').join(',')})` : '';
+        const remainingRow = db.queryOne(
+          `SELECT COUNT(*) as cnt FROM shorts
+           WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')${exclusionSql}`,
+          [projectId, ...failedIds]
+        );
+        const total = current + (remainingRow?.cnt || 0);
 
         this.log(`[SHORTS] Uploading short #${nextShort.short_number} (${current} of batch) → ${nextShort.scheduled_date}`);
         this._emitProgress({ phase: 'upload', current, total, shortNumber: nextShort.short_number, scheduledDate: nextShort.scheduled_date, status: 'uploading' });
@@ -196,6 +201,7 @@ class ShortsController {
           this.log(`[SHORTS] Short #${nextShort.short_number} scheduled for ${nextShort.scheduled_date}`);
         } else {
           this.scheduler.markFailed(nextShort.id, result.error);
+          failedThisSession.add(nextShort.id);
           failed++;
           this.log(`[SHORTS] Short #${nextShort.short_number} failed: ${result.error}`);
         }

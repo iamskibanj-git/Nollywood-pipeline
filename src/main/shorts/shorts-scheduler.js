@@ -499,13 +499,15 @@ Reply with ONLY valid JSON:
    * Picks up both fresh (seo_done) and retryable (upload_failed) shorts.
    * Order: short_number ASC — short_001 always goes first.
    */
-  getNextPendingUpload(projectId) {
+  getNextPendingUpload(projectId, excludeIds = []) {
+    const excluded = Array.isArray(excludeIds) ? excludeIds.filter(id => id !== null && id !== undefined) : [];
+    const exclusionSql = excluded.length ? ` AND id NOT IN (${excluded.map(() => '?').join(',')})` : '';
     return db.queryOne(`
       SELECT * FROM shorts
-      WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')
+      WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')${exclusionSql}
       ORDER BY short_number ASC
       LIMIT 1
-    `, [projectId]);
+    `, [projectId, ...excluded]);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
