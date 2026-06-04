@@ -5,6 +5,7 @@ const { FacebookUploader } = require('../shorts/facebook-uploader');
 const CLICK_TIMEOUT = 20000;
 const POST_CLICK_SETTLE = 3000;
 const IMAGE_UPLOAD_TIMEOUT = 90000;
+const SCHEDULE_MODAL_SETTLE = 3000;
 
 class SocialFacebookUploader extends FacebookUploader {
   async _dismissPopups() {
@@ -180,6 +181,12 @@ class SocialFacebookUploader extends FacebookUploader {
   _activeDialog() {
     return this.page.locator('[role="dialog"]').filter({
       hasText: /Create post|What's on your mind|Posting to|Photo\/video|Add photos or videos|Scheduling options|Schedule for later/i,
+    }).last();
+  }
+
+  _schedulingDialog() {
+    return this.page.locator('[role="dialog"]').filter({
+      hasText: /Scheduling options|Choose a date and time|Schedule for later|Date\s+Time/i,
     }).last();
   }
 
@@ -479,22 +486,54 @@ class SocialFacebookUploader extends FacebookUploader {
   async _scrollComposerToBottom() {
     try {
       await this.page.evaluate(() => {
-        const dialogs = [...document.querySelectorAll('[role="dialog"]')];
-        const dialog = dialogs[dialogs.length - 1];
-        if (!dialog) return;
-        const scrollables = [dialog, ...dialog.querySelectorAll('*')].filter(el => {
+        const textOf = el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const isVisible = el => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const isScrollable = el => {
           const style = window.getComputedStyle(el);
           return /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 20;
+        };
+        const scrollables = [document.scrollingElement, ...document.querySelectorAll('*')]
+          .filter(Boolean)
+          .filter(el => isVisible(el) && isScrollable(el))
+          .map(el => {
+            const rect = el.getBoundingClientRect();
+            const text = textOf(el);
+            let score = 0;
+            if (rect.left < window.innerWidth * 0.5) score += 20;
+            if (/Posting to|Uploaded media|Add to feed post|Share|Post audience|Schedule|Post/i.test(text)) score += 40;
+            if (/What's on your mind|Add photos or videos/i.test(text)) score += 20;
+            if (rect.height > window.innerHeight * 0.45) score += 10;
+            return { el, score };
+          })
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6);
+
+        for (const { el } of scrollables) {
+          el.scrollTop = el.scrollHeight;
+        }
+
+        const leftPane = scrollables.find(({ el }) => {
+          const rect = el.getBoundingClientRect();
+          return rect.left < window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.45;
         });
-        for (const el of scrollables) el.scrollTop = el.scrollHeight;
+        if (leftPane) leftPane.el.scrollTop = leftPane.el.scrollHeight;
       });
-      await this.page.mouse.wheel(0, 2000);
+      const viewport = this.page.viewportSize() || { width: 1280, height: 900 };
+      await this.page.mouse.move(Math.min(360, viewport.width * 0.35), Math.max(200, viewport.height - 120));
+      await this.page.mouse.wheel(0, 3000);
+      await this.page.waitForTimeout(500);
+      await this.page.mouse.wheel(0, 3000);
       await this.page.waitForTimeout(1000);
     } catch (_) {}
   }
 
   async _clickScheduleForLater() {
-    const dialog = this._activeDialog();
+    await this._waitForSchedulingModalOpen();
+    const dialog = this._schedulingDialog();
     const candidates = [
       () => dialog.getByRole('button', { name: /Schedule for later/i }).first(),
       () => dialog.getByText('Schedule for later', { exact: false }).first(),
@@ -513,9 +552,38 @@ class SocialFacebookUploader extends FacebookUploader {
   }
 
   async _clickComposerScheduleButton() {
-    const clicked = await this._clickVisibleControlByText(/^Schedule$/i);
-    if (clicked) return;
-    await this._clickWithFallback('div[role="button"]:has-text("Schedule"):not(:has-text("for later")):not(:has-text("Scheduling")), span:text-is("Schedule")');
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await this._scrollComposerToBottom();
+      const clicked = await this._clickVisibleControlByText(/^Schedule$/i, { preferRole: 'button', bottomOnly: true });
+      if (clicked) {
+        try {
+          await this._waitForSchedulingModalOpen();
+          return;
+        } catch (error) {
+          this.log(`[FB-SOCIAL] Schedule click attempt ${attempt} did not open modal; retrying`);
+        }
+      }
+      await this.page.waitForTimeout(1000);
+    }
+
+    throw new Error('Could not open Facebook scheduling modal; bottom Schedule button may still be off screen.');
+  }
+
+  async _waitForSchedulingModalOpen(timeout = CLICK_TIMEOUT) {
+    await this.page.waitForFunction(() => {
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+      return dialogs.some(dialog => {
+        const rect = dialog.getBoundingClientRect();
+        const style = window.getComputedStyle(dialog);
+        const text = dialog.innerText || dialog.textContent || '';
+        return rect.width > 100 &&
+          rect.height > 100 &&
+          style.visibility !== 'hidden' &&
+          style.display !== 'none' &&
+          /Scheduling options|Choose a date and time|Schedule for later/i.test(text);
+      });
+    }, { timeout });
+    await this.page.waitForTimeout(SCHEDULE_MODAL_SETTLE);
   }
 
   async _clickComposerSubmitButton() {
@@ -614,50 +682,6 @@ class SocialFacebookUploader extends FacebookUploader {
     await this.page.mouse.click(target.x, target.y);
     await this.page.waitForTimeout(800);
     return true;
-  }
-
-  async _setScopedScheduleDate(dateStr) {
-    const [year, month, day] = dateStr.split('-');
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const fbDate = `${monthNames[parseInt(month, 10) - 1]} ${parseInt(day, 10)}, ${year}`;
-    const dialog = this._activeDialog();
-    const inputs = dialog.locator('input[type="text"], input:not([type]), input[role="combobox"]');
-    const count = await inputs.count();
-    for (let i = 0; i < count; i++) {
-      const input = inputs.nth(i);
-      const value = await input.inputValue().catch(() => '');
-      const label = await input.getAttribute('aria-label').catch(() => '');
-      if (/date|schedule/i.test(label) || /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.test(value) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(value)) {
-        await input.click({ clickCount: 3, timeout: 5000 });
-        await input.fill(fbDate);
-        await this.page.keyboard.press('Tab');
-        return;
-      }
-    }
-    await this._setScheduleDate(dateStr);
-  }
-
-  async _setScopedScheduleTime(timeStr) {
-    const [hours, minutes] = timeStr.split(':');
-    const h = parseInt(hours, 10);
-    const period = h >= 12 ? 'PM' : 'AM';
-    const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
-    const fbTime = `${h12}:${minutes} ${period}`;
-    const dialog = this._activeDialog();
-    const inputs = dialog.locator('input[type="text"], input:not([type]), input[role="combobox"]');
-    const count = await inputs.count();
-    for (let i = 0; i < count; i++) {
-      const input = inputs.nth(i);
-      const value = await input.inputValue().catch(() => '');
-      const label = await input.getAttribute('aria-label').catch(() => '');
-      if (/time/i.test(label) || /\b(AM|PM)\b/i.test(value) || /^\d{1,2}:\d{2}/.test(value)) {
-        await input.click({ clickCount: 3, timeout: 5000 });
-        await input.fill(fbTime);
-        await this.page.keyboard.press('Tab');
-        return;
-      }
-    }
-    await this._setScheduleTime(timeStr);
   }
 
   async _dismissLeavePageGuard() {

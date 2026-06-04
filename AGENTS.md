@@ -3701,3 +3701,7 @@ final submit: bottom role="button", aria/text "Schedule post"
 confirmation: Content Library scheduled row appears, e.g. caption text plus "Scheduled · Today at 3:45 PM"; do not rely on a toast
 ```
 Keep Shorts/Reels on their separate wizard path; this drift note applies to image posts scheduled by `social-facebook-uploader.js`.
+
+**Social image composer off-screen action bar (live 2026-06-04):**
+Facebook can keep the bottom `Schedule` / `Post` action bar below the visible area in the left full-page composer pane even when the preview is visible on the right. For Engagement image posts, scroll the real left composer scroll container to the bottom before clicking `Schedule`; do not rely on document scroll alone. After clicking `Schedule`, verify the `Scheduling options` modal is visible before setting date/time.
+Do not fork custom Date/Time picker logic in the Engagement uploader. Engagement image posts should reuse the inherited Shorts scheduling helpers (`_setScopedScheduleDate()` / `_setScopedScheduleTime()` from `src/main/shorts/facebook-uploader.js`), which already handle Facebook's current Date/Time controls by input scan plus `getByText('Date'/'Time')` keyboard entry.
