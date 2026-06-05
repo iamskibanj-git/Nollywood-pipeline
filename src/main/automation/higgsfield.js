@@ -499,7 +499,7 @@ class HiggsFieldAutomation {
     }
   }
 
-  async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false }) {
+  async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false, requireAssetPromptMatchBeforeDownload = false, promptMatchMinSimilarity = 80, promptMatchMaxTilesToCheck = 8, promptMatchTimeoutMs = 90000 }) {
     // Reset per-call state — _lastDetectedUrl must NOT bleed across calls.
     // Without this, a previous portrait's CDN URL would be attached to the
     // next portrait's error, causing wrong-portrait-on-recovery bugs.
@@ -1040,8 +1040,44 @@ class HiggsFieldAutomation {
 
       // Wait for generation — API job tracking (primary) + CDN diffing (fallback)
       console.log('[IMG] Waiting for generation...');
-      const detectedUrl = await this.waitForGeneration('image', IMAGE_GEN_TIMEOUT_MS, prompt, jobIdPromise);
+      const detectedUrl = await this.waitForGeneration('image', IMAGE_GEN_TIMEOUT_MS, prompt, jobIdPromise, {
+        assetRecoveryMinSimilarity: requireAssetPromptMatchBeforeDownload ? promptMatchMinSimilarity : 60,
+      });
       this._lastDetectedUrl = detectedUrl; // Save for error recovery
+
+      if (requireAssetPromptMatchBeforeDownload) {
+        console.log(`[IMG] Strict prompt-matched Asset Library download required (min ${promptMatchMinSimilarity}%)`);
+        const recovered = await this.recoverTimedOutImage(prompt, outputPath, {
+          minSimilarity: promptMatchMinSimilarity,
+          maxTilesToCheck: promptMatchMaxTilesToCheck,
+          timeoutMs: promptMatchTimeoutMs,
+        });
+
+        if (!recovered) {
+          try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
+          throw new Error(`PROMPT_MATCHED_DOWNLOAD_FAILED: No Asset Library image matched submitted prompt at >=${promptMatchMinSimilarity}%`);
+        }
+
+        const genMeta = {
+          model: 'nano-banana-pro',
+          sourceGenId: recovered.sourceGenId || recovered.assetUuid,
+          cdnUrl: recovered.cdnUrl || detectedUrl || null,
+          promptMatchedDownload: true,
+          promptSimilarity: recovered.similarity,
+        };
+
+        if (this.throttled) {
+          console.log('[IMG] Generation succeeded — resetting throttle flag');
+          this.throttled = false;
+        }
+
+        genMeta.referencesUsed = references;
+        genMeta.generationDurationMs = Date.now() - genStartTime;
+
+        await this.saveSession();
+        console.log(`[IMG] Saved via prompt-matched Asset Library: ${outputPath} (${genMeta.generationDurationMs}ms, similarity=${recovered.similarity}%, ${references.length} refs)`);
+        return genMeta;
+      }
 
       // Download the result using the detected URL (avoids grabbing wrong image from history)
       console.log('[IMG] Downloading result...');
@@ -4367,9 +4403,10 @@ class HiggsFieldAutomation {
    * @param {Promise<string|null>} jobIdPromise - From _interceptJobId(), started before Generate click
    * @returns {string|null} The CDN URL of our generated asset
    */
-  async waitForGeneration(type, timeout = 300000, submittedPrompt = '', jobIdPromise = null) {
+  async waitForGeneration(type, timeout = 300000, submittedPrompt = '', jobIdPromise = null, opts = {}) {
     const page = this.page;
     const generateClickTime = Date.now();
+    const assetRecoveryMinSimilarity = opts.assetRecoveryMinSimilarity || 60;
 
     // ══════════════════════════════════════════════════════════
     // PRE-GENERATION SNAPSHOT — taken BEFORE Layer 1 runs
@@ -4606,7 +4643,9 @@ class HiggsFieldAutomation {
     if (submittedPrompt) {
       console.log('[WAIT] Layer 3: Scanning Asset library for completed image...');
       try {
-        const cdnUrl = await this._recoverCdnUrlFromAssets(submittedPrompt, type);
+        const cdnUrl = await this._recoverCdnUrlFromAssets(submittedPrompt, type, {
+          minSimilarity: assetRecoveryMinSimilarity,
+        });
         if (cdnUrl) {
           console.log(`[WAIT] Layer 3 SUCCESS — found CDN URL in Asset library`);
           return cdnUrl;
@@ -5448,6 +5487,83 @@ class HiggsFieldAutomation {
     return meta;
   }
 
+  async _expandAssetPromptDetails(page = this.page) {
+    if (!page) return false;
+
+    try {
+      const expanded = await page.evaluate(() => {
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const textOf = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const promptHeading = Array.from(document.querySelectorAll('div, span, p, h1, h2, h3, h4, h5'))
+          .find((el) => visible(el) && textOf(el).toUpperCase() === 'PROMPT');
+        const promptCard = promptHeading?.closest('section, article, [class*="rounded"], [class*="card"], div') || document.body;
+        const candidates = Array.from(promptCard.querySelectorAll('button, div[role="button"], span, div'))
+          .filter((el) => visible(el) && /^See all$/i.test(textOf(el)));
+        const target = candidates[0] || Array.from(document.querySelectorAll('button, div[role="button"], span, div'))
+          .find((el) => visible(el) && /^See all$/i.test(textOf(el)));
+        if (!target) return false;
+        target.click();
+        return true;
+      }).catch(() => false);
+
+      if (expanded) {
+        await page.waitForTimeout(500);
+        return true;
+      }
+    } catch (_) {
+      // Short prompts may not render a See all control.
+    }
+
+    return false;
+  }
+
+  async _readAssetPromptText(page = this.page) {
+    if (!page) return '';
+    return await page.evaluate(() => {
+      const promptDiv = document.querySelector('.attribute-text-value');
+      if (promptDiv) return (promptDiv.textContent || '').trim();
+
+      const body = document.body?.innerText || '';
+      const promptIdx = body.indexOf('PROMPT');
+      const infoIdx = body.indexOf('INFORMATION');
+      if (promptIdx >= 0 && infoIdx > promptIdx) {
+        return body.substring(promptIdx + 6, infoIdx)
+          .replace(/^Copy\s*/i, '')
+          .replace(/\s*See all\s*$/i, '')
+          .trim();
+      }
+      return '';
+    }).catch(() => '');
+  }
+
+  async _waitForAssetPromptText(page = this.page, opts = {}) {
+    const minLength = opts.minLength || 20;
+    const timeoutMs = opts.timeoutMs || 8000;
+    const stableMs = opts.stableMs || 1200;
+    const pollMs = opts.pollMs || 400;
+    const startedAt = Date.now();
+    let lastText = '';
+    let lastChangedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const promptText = await this._readAssetPromptText(page);
+      if (promptText && promptText !== lastText) {
+        lastText = promptText;
+        lastChangedAt = Date.now();
+      }
+      if (lastText.length >= minLength && Date.now() - lastChangedAt >= stableMs) {
+        return lastText;
+      }
+      await page.waitForTimeout(pollMs);
+    }
+
+    return lastText;
+  }
+
   /**
    * Extract generation metadata (model name, generation ID) from the
    * Higgsfield detail lightbox. Should be called while the lightbox is open,
@@ -5482,25 +5598,16 @@ class HiggsFieldAutomation {
         await page.waitForTimeout(2000);
       }
 
-      // Expand "See all" to get full prompt text (truncated by default)
-      try {
-        const seeAllBtn = await page.$('button:has-text("See all")');
-        if (seeAllBtn) {
-          await seeAllBtn.click({ timeout: 3000 });
-          await page.waitForTimeout(500);
-        }
-      } catch (_) { /* See all button may not exist for short prompts */ }
+      await this._expandAssetPromptDetails(page);
+      const detailPromptText = await this._readAssetPromptText(page);
 
       // Extract model name, generation ID, prompt text, reference images, and CDN URL
-      const extracted = await page.evaluate(() => {
+      const extracted = await page.evaluate((detailPromptText) => {
         const result = { model: null, sourceGenId: null, cdnUrl: null, promptText: null, referenceUrls: [] };
 
         // === Prompt text ===
         // The prompt lives in div.attribute-text-value inside the lightbox right panel
-        const promptDiv = document.querySelector('.attribute-text-value');
-        if (promptDiv) {
-          result.promptText = (promptDiv.textContent || '').trim();
-        }
+        result.promptText = detailPromptText || null;
 
         // === Reference images ===
         // When a reference image was used, a small clickable thumbnail (~40x40)
@@ -5602,7 +5709,7 @@ class HiggsFieldAutomation {
         }
 
         return result;
-      });
+      }, detailPromptText);
 
       meta.model = extracted.model;
       meta.sourceGenId = extracted.sourceGenId;
@@ -5788,18 +5895,12 @@ class HiggsFieldAutomation {
           continue;
         }
 
-        // Scrape prompt text from DOM (between "PROMPT" and "INFORMATION" headings)
-        let tilePrompt = await page.evaluate(() => {
-          const body = document.body?.innerText || '';
-          const promptIdx = body.indexOf('PROMPT');
-          const infoIdx = body.indexOf('INFORMATION');
-          if (promptIdx >= 0 && infoIdx > promptIdx) {
-            let section = body.substring(promptIdx + 6, infoIdx).trim();
-            section = section.replace(/^Copy\s*/i, '').replace(/\s*See all\s*$/i, '').trim();
-            return section;
-          }
-          return '';
-        }).catch(() => '');
+        await this._expandAssetPromptDetails(page);
+        const tilePrompt = await this._waitForAssetPromptText(page, {
+          minLength: Math.min(120, Math.max(20, submittedPrompt.length * 0.15)),
+          timeoutMs: 10000,
+          stableMs: 1500,
+        });
 
         if (!tilePrompt || tilePrompt.length < 20) {
           console.log(`[IMG RECOVERY] No prompt text for tile ${i + 1} — skipping`);
@@ -5868,9 +5969,10 @@ class HiggsFieldAutomation {
    * @param {string} type - 'image' or 'video'
    * @returns {Promise<string|null>} CDN URL if found, null otherwise
    */
-  async _recoverCdnUrlFromAssets(submittedPrompt, type = 'image') {
+  async _recoverCdnUrlFromAssets(submittedPrompt, type = 'image', opts = {}) {
     const page = this.page;
     if (!page) return null;
+    const minSimilarity = opts.minSimilarity || 60;
 
     const assetUrl = type === 'video'
       ? 'https://higgsfield.ai/asset/video'
@@ -5930,23 +6032,19 @@ class HiggsFieldAutomation {
         }
         if (!ready) continue;
 
-        // Scrape prompt
-        const tilePrompt = await page.evaluate(() => {
-          const body = document.body?.innerText || '';
-          const pi = body.indexOf('PROMPT');
-          const ii = body.indexOf('INFORMATION');
-          if (pi >= 0 && ii > pi) {
-            return body.substring(pi + 6, ii).replace(/^Copy\s*/i, '').replace(/\s*See all\s*$/i, '').trim();
-          }
-          return '';
-        }).catch(() => '');
+        await this._expandAssetPromptDetails(page);
+        const tilePrompt = await this._waitForAssetPromptText(page, {
+          minLength: Math.min(120, Math.max(20, submittedPrompt.length * 0.15)),
+          timeoutMs: 10000,
+          stableMs: 1500,
+        });
 
         if (!tilePrompt || tilePrompt.length < 20) continue;
 
         const similarity = this._promptSimilarity(submittedPrompt, tilePrompt);
         console.log(`[L3 RECOVERY] Tile ${i + 1} (${tile.uuid}): ${similarity}% similarity`);
 
-        if (similarity < 60) continue;
+        if (similarity < minSimilarity) continue;
 
         // MATCH — extract CDN URL from the detail page (img src in the main preview)
         const cdnUrl = await page.evaluate(() => {

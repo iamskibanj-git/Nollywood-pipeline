@@ -246,6 +246,10 @@ Requirements:
         aspectRatio,
         referenceUploadWarmupMs,
         referenceUploadAllowAnyInput,
+        requireAssetPromptMatchBeforeDownload: true,
+        promptMatchMinSimilarity: 85,
+        promptMatchMaxTilesToCheck: 6,
+        promptMatchTimeoutMs: 90000,
         useUnlimited: true,
       }, 'composite');
     } catch (genErr) {
@@ -259,6 +263,10 @@ Requirements:
           aspectRatio,
           referenceUploadWarmupMs,
           referenceUploadAllowAnyInput,
+          requireAssetPromptMatchBeforeDownload: true,
+          promptMatchMinSimilarity: 85,
+          promptMatchMaxTilesToCheck: 6,
+          promptMatchTimeoutMs: 90000,
           useUnlimited: true,
         }, 'composite');
       } else {

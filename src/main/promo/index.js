@@ -388,7 +388,7 @@ class PromoController {
 
   _isRetryablePromoImageError(error) {
     const message = String(error?.message || '');
-    return /REFERENCE_UPLOAD_FAILED|REFERENCE_GATE_FAILED|GENERATION_FAILED|credits refunded|please try again|server-side failure|timed out|Target page, context or browser has been closed|Target.*closed|page\.waitForTimeout/i.test(message);
+    return /REFERENCE_UPLOAD_FAILED|REFERENCE_GATE_FAILED|GENERATION_FAILED|PROMPT_MATCHED_DOWNLOAD_FAILED|PROMPT_MISMATCH|credits refunded|please try again|server-side failure|timed out|Target page, context or browser has been closed|Target.*closed|page\.waitForTimeout/i.test(message);
   }
 
   _fileReady(filePath) {
