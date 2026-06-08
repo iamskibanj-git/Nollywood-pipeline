@@ -183,7 +183,7 @@ Output ONLY the JSON.`;
    * @param {Array<string>} [opts.portraitPaths] - Portrait paths for character identification
    * @returns {Promise<{score: number, issues: string[], verdict: 'accept'|'review'|'reject', details: Object}>}
    */
-  async verifySceneImage(scenePath, { characters, locationDescription, blocking, portraitPaths = [] } = {}, { passThreshold = 70 } = {}) {
+  async verifySceneImage(scenePath, { characters, locationDescription, blocking, portraitPaths = [], propContract = null } = {}, { passThreshold = 70 } = {}) {
     this.logger(`Verifying scene image: ${characters.map(c => c.name).join(', ')}`);
 
     const sceneData = await this._loadImage(scenePath);
@@ -201,6 +201,14 @@ Output ONLY the JSON.`;
     if (blocking?.frame_right) blockingLines.push(`Frame-right: ${blocking.frame_right}`);
     if (blocking?.notes) blockingLines.push(`Atmosphere: ${blocking.notes}`);
 
+    const requiredProps = (propContract?.requiredProps || []).filter(p => p.requiredVisible);
+    const propLines = requiredProps.map((p, i) => {
+      const propName = p.aliases?.[0] || p.prop;
+      const holder = p.holder ? `Expected holder: @${p.holder}. ` : '';
+      const placement = p.placement || 'visible and physically anchored in the scene';
+      return `${i + 1}. ${propName}: ${holder}Placement: ${placement}. Cultural form: ${p.culturalDescription}. Reason: ${p.reason}. Must be held, touched, or resting on a visible surface; never floating.`;
+    }).join('\n');
+
     const prompt = `You are a quality control system for an AI video production pipeline. Verify this generated SCENE IMAGE matches the expected characters, setting, and blocking.
 
 EXPECTED CHARACTERS IN THIS SCENE:
@@ -212,7 +220,10 @@ ${locationDescription}
 EXPECTED BLOCKING (character positions):
 ${blockingLines.join('\n') || '(no specific blocking provided)'}
 
+${propLines ? `REQUIRED STORY PROPS (Nigerian/Nollywood grounded):\n${propLines}\n` : ''}
+
 TASK: Verify the scene image matches expectations.
+${propLines ? 'Also score PROP_REQUIREMENTS: all required story props must be visible, culturally grounded for Nigeria/Nollywood, physically anchored (held/touched/on surface), and not floating or hallucinated as foreign objects. This is CRITICAL when present.' : ''}
 
 1. CHARACTER_PRESENCE — Are ALL expected characters visible in the scene? Can you identify each one by their visual description? Are there any EXTRA people who shouldn't be there? (CRITICAL)
 2. CHARACTER_IDENTITY — Do the characters LOOK like their descriptions? (skin tone, gender, approximate age, clothing)
@@ -227,7 +238,7 @@ OUTPUT FORMAT (JSON only):
     "character_identity": { "score": 0-100, "note": "do they match descriptions" },
     "setting_match": { "score": 0-100, "note": "" },
     "blocking_positions": { "score": 0-100, "note": "" },
-    "composition_quality": { "score": 0-100, "note": "" }
+    "composition_quality": { "score": 0-100, "note": "" }${propLines ? ',\n    "prop_requirements": { "score": 0-100, "note": "which required props are visible/missing/floating/wrong cultural form" }' : ''}
   },
   "characters_identified": [
     { "name": "character_name", "found": true, "position": "where in frame", "confidence": "high|medium|low" }
@@ -254,7 +265,7 @@ Output ONLY the JSON.`;
       : await this._callVision(sceneData, prompt);
     if (!result) return this._fallbackResult('Vision API call failed');
 
-    return this._scoreSceneResult(result, { passThreshold, expectedCount: characters.length });
+    return this._scoreSceneResult(result, { passThreshold, expectedCount: characters.length, requiredPropCount: requiredProps.length });
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -450,7 +461,7 @@ Output ONLY the JSON.`;
   /**
    * Score scene image verification result.
    */
-  _scoreSceneResult(parsed, { passThreshold, expectedCount }) {
+  _scoreSceneResult(parsed, { passThreshold, expectedCount, requiredPropCount = 0 }) {
     const scores = parsed.scores || {};
 
     // Character presence is critical (3x) — wrong characters ruins everything downstream
@@ -461,6 +472,9 @@ Output ONLY the JSON.`;
       blocking_positions: 1,
       composition_quality: 1,
     };
+    if (requiredPropCount > 0) {
+      weights.prop_requirements = 2;
+    }
 
     let totalWeight = 0;
     let weightedSum = 0;
@@ -481,7 +495,11 @@ Output ONLY the JSON.`;
 
     // Extra hard check: if character_presence < 50, force fail regardless of overall
     const presenceScore = scores.character_presence?.score ?? 100;
-    const forcedFail = presenceScore < 50;
+    const propScore = requiredPropCount > 0 ? (scores.prop_requirements?.score ?? 0) : 100;
+    const forcedFail = presenceScore < 50 || propScore < 70;
+    if (propScore < 70) {
+      issues.push(`prop_requirements: required story props missing, floating, or culturally wrong (${propScore})`);
+    }
 
     const allIssues = [
       ...(parsed.critical_issues || []),

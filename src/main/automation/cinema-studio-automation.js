@@ -3217,7 +3217,7 @@ class CinemaStudioAutomation {
   // SCENE IMAGE GENERATION
   // ═══════════════════════════════════════════════════════════
 
-  async generateSceneImage({ locationImagePath, characters, lighting, outputPath, aspectRatio = '16:9', projectName, onGenClicked = null }) {
+  async generateSceneImage({ locationImagePath, characters, lighting, outputPath, aspectRatio = '16:9', projectName, onGenClicked = null, propContract = null }) {
     if (!characters || characters.length === 0) {
       throw new Error('generateSceneImage: at least one character required');
     }
@@ -3424,8 +3424,20 @@ class CinemaStudioAutomation {
     // Strip existing @-prefixes from lighting text — character names in lighting
     // will be re-tagged and converted to { at: name } segments below for proper
     // UUID pill resolution. The initial strip prevents double-@ issues.
+    const requiredProps = (propContract?.requiredProps || []).filter(p => p.requiredVisible).slice(0, 3);
+    const requiredPropText = requiredProps.length > 0
+      ? `Required Nigerian story props: ${requiredProps.map(p => {
+          const propName = p.aliases?.[0] || p.prop;
+          const holder = p.holder ? `${p.holder} has ` : 'show ';
+          const placement = p.placement || 'visible and physically anchored in the scene';
+          return `${holder}${propName} ${placement}; ${p.culturalDescription}; never floating`;
+        }).join('. ')}. `
+      : '';
+    const finalCloser = requiredPropText
+      ? `${closer} Required story props are exceptions to the no-new-props rule; do not add unrelated props.`
+      : closer;
     const cleanLighting = lighting ? lighting.replace(/@/g, '') + ' ' : '';
-    const fixedLen = opener.length + closer.length + cleanLighting.length;
+    const fixedLen = opener.length + finalCloser.length + requiredPropText.length + cleanLighting.length;
     const charCount = characters.length;
     // Budget per character for position text (account for @name + separators)
     const perCharBudget = charCount > 0
@@ -3473,6 +3485,9 @@ class CinemaStudioAutomation {
       posText = posText.replace(/[,.\s]+$/, '');
       segments.push(` ${posText}. `);
     }
+    if (requiredPropText) {
+      segments.push(requiredPropText);
+    }
     // ── LIGHTING TEXT: convert bare character names to { at: name } segments ──
     // The lighting/notes text (e.g. "illuminating adanna's bowed face") may
     // contain bare character names without @-prefix. These MUST become @element
@@ -3505,7 +3520,7 @@ class CinemaStudioAutomation {
         }
       }
     }
-    segments.push(closer);
+    segments.push(finalCloser);
 
     // ── PRE-GENERATION GATE: convert every character reference to @element segments ──
     // Scans string segments for explicit @element references and bare character

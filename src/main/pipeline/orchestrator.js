@@ -122,6 +122,186 @@ function sanitizeCinemaVideoPrompt(prompt) {
   };
 }
 
+const NIGERIAN_PROP_GROUNDING = {
+  debt_document: {
+    aliases: ['paper', 'document', 'debt document', 'debt agreement', 'debt instrument'],
+    culturalDescription: 'creased Nigerian legal/debt paper, A4 photocopy or stamped local document, not glossy Western paperwork',
+  },
+  land_title: {
+    aliases: ['land title', 'title', 'survey plan', 'registry paper', 'land document'],
+    culturalDescription: 'Nigerian land title or survey-plan folder, stamped registry paper, practical local office document',
+  },
+  envelope: {
+    aliases: ['envelope', 'letter'],
+    culturalDescription: 'plain brown or white envelope with worn edges, local office style',
+  },
+  court_file: {
+    aliases: ['file', 'folder', 'court file', 'case file'],
+    culturalDescription: 'brown Nigerian court file or registry folder, stamped and practical',
+  },
+  phone: {
+    aliases: ['phone', 'recording', 'call', 'whatsapp'],
+    culturalDescription: 'ordinary Android smartphone common in Nigeria, not a spy gadget',
+  },
+  key: {
+    aliases: ['key', 'keys'],
+    culturalDescription: 'ordinary metal house or office key, practical everyday Nigerian setting',
+  },
+  money: {
+    aliases: ['money', 'cash', 'naira', 'bribe'],
+    culturalDescription: 'Nigerian naira notes, not dollars, rupees, or foreign currency',
+  },
+  medicine: {
+    aliases: ['medicine', 'tablet', 'pills', 'drug', 'hospital bill'],
+    culturalDescription: 'local pharmacy blister pack or simple medicine bottle',
+  },
+  bangle: {
+    aliases: ['bangle', 'bracelet'],
+    culturalDescription: 'simple copper or gold bangle, culturally plausible Nigerian jewelry, not fantasy jewelry',
+  },
+  photograph: {
+    aliases: ['photograph', 'photo', 'picture'],
+    culturalDescription: 'small printed family photograph or phone photo, Nigerian family context',
+  },
+};
+
+function _normalisePropName(value = '') {
+  return String(value).toLowerCase().replace(/^@/, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function _propFamilyForText(text = '') {
+  const t = String(text).toLowerCase().replace(/[_-]+/g, ' ');
+  for (const [family, info] of Object.entries(NIGERIAN_PROP_GROUNDING)) {
+    if ((info.aliases || []).some(alias => new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}s?\\b`, 'i').test(t))) {
+      return family;
+    }
+  }
+  return null;
+}
+
+function _propInfo(family) {
+  return NIGERIAN_PROP_GROUNDING[family] || {
+    aliases: [family.replace(/_/g, ' ')],
+    culturalDescription: `culturally plausible Nigerian ${family.replace(/_/g, ' ')}`,
+  };
+}
+
+function buildScenePropContract(scene = {}) {
+  const required = [];
+  const lowConfidenceMentions = [];
+  const seen = new Set();
+
+  const addProp = ({ family, reason, holder = null, placement = '', confidence = 'high', source = '' }) => {
+    if (!family) return;
+    const info = _propInfo(family);
+    const key = `${family}|${holder || ''}|${confidence}`;
+    const entry = {
+      prop: family,
+      aliases: info.aliases,
+      requiredVisible: confidence === 'high',
+      holder,
+      placement: placement || (holder ? `visible near or held by ${holder}` : 'visible and physically anchored in the scene'),
+      culturalDescription: info.culturalDescription,
+      reason,
+      confidence,
+      source,
+    };
+    if (confidence !== 'high') {
+      lowConfidenceMentions.push(entry);
+      return;
+    }
+    if (seen.has(key)) return;
+    seen.add(key);
+    required.push(entry);
+  };
+
+  for (const rawProp of scene.props_in_scene || []) {
+    const family = _propFamilyForText(rawProp) || _normalisePropName(rawProp);
+    addProp({
+      family,
+      reason: `scene.props_in_scene includes "${rawProp}"`,
+      confidence: 'high',
+      source: 'props_in_scene',
+    });
+  }
+
+  const lines = Array.isArray(scene.lines) ? scene.lines : [];
+  const directPatterns = [
+    { re: /\bthis\s+(paper|document|envelope|file|folder|letter|bangle|key|phone|money|cash|medicine|photograph|photo|picture)\b/i, placement: 'held visibly by the speaking character or physically anchored beside them' },
+    { re: /\b(the\s+)?(?:paper|document|envelope|file|folder|letter)\s+says?\b/i, placement: 'visible enough for the speaking character to read from it' },
+    { re: /\byour\s+name\s+is\s+on\s+this\s+(paper|document|file|letter)\b/i, placement: 'visible in the speaking character\'s hand or clearly presented toward the listener' },
+    { re: /\bthis\s+date\b/i, impliedFamily: 'debt_document', placement: 'visible enough for the speaking character to inspect a date on it' },
+    { re: /\btake\s+this\b/i, placement: 'physically held out by the speaking character, pinched between fingers, not floating' },
+    { re: /\blook\s+at\s+this\b/i, placement: 'visible in the speaking character\'s hand or on a visible surface' },
+    { re: /\bwhere\s+did\s+it\s+come\s+from\b/i, placement: 'visible and physically anchored near the speaker or listener' },
+  ];
+
+  for (const line of lines) {
+    const dialogue = String(line.dialogue || '');
+    if (!dialogue.trim()) continue;
+    const speaker = String(line.speaker_id || '').trim() || null;
+    for (const pattern of directPatterns) {
+      const match = dialogue.match(pattern.re);
+      if (!match) continue;
+      const family = pattern.impliedFamily || _propFamilyForText(match[1] || dialogue);
+      const hasConcreteProp = family || (scene.props_in_scene || []).some(p => _propFamilyForText(p));
+      const resolvedFamily = family || _propFamilyForText((scene.props_in_scene || []).join(' '));
+      if (!hasConcreteProp || !resolvedFamily) continue;
+      addProp({
+        family: resolvedFamily,
+        holder: speaker,
+        placement: pattern.placement,
+        reason: `dialogue line ${line.line_number || '?'}: "${dialogue}"`,
+        confidence: 'high',
+        source: 'dialogue',
+      });
+    }
+
+    const family = _propFamilyForText(dialogue);
+    if (family && !required.some(p => p.prop === family)) {
+      addProp({
+        family,
+        holder: speaker,
+        reason: `low-confidence dialogue mention line ${line.line_number || '?'}: "${dialogue}"`,
+        confidence: 'low',
+        source: 'dialogue',
+      });
+    }
+  }
+
+  for (const clip of scene.kling_clips || []) {
+    const text = `${clip.visual_beat || ''}\n${clip.multi_shot_prompt || ''}`;
+    const family = _propFamilyForText(text);
+    if (!family) continue;
+    const hasInteraction = /\b(?:holds?|grips?|clutches?|extends?|hands?|places?|slides?|opens?|reads?|points?\s+at)\b/i.test(text);
+    addProp({
+      family,
+      reason: `clip ${clip.clip_id || '?'} references ${family.replace(/_/g, ' ')}`,
+      confidence: hasInteraction ? 'high' : 'low',
+      source: 'kling_clip',
+      placement: hasInteraction ? 'visible and physically anchored to the acting character or a visible surface' : '',
+    });
+  }
+
+  return {
+    requiredProps: required,
+    lowConfidenceMentions,
+  };
+}
+
+function formatScenePropContract(contract, { forVision = false } = {}) {
+  const required = contract?.requiredProps || [];
+  if (!required.length) return '';
+  const lines = required.map((p, idx) => {
+    const holder = p.holder ? `${p.holder} must ` : 'Scene must ';
+    const physical = p.holder
+      ? `${holder}have ${p.aliases?.[0] || p.prop} ${p.placement}.`
+      : `${holder}show ${p.aliases?.[0] || p.prop} ${p.placement}.`;
+    return `${idx + 1}. ${physical} Cultural form: ${p.culturalDescription}. Reason: ${p.reason}. The prop must be physically held, touched, or resting on a visible surface; never floating.`;
+  });
+  return `${forVision ? 'REQUIRED STORY PROPS FOR START FRAME' : 'Required Nigerian story props'}:\n${lines.join('\n')}`;
+}
+
 /**
  * Duration presets. Each defines the target and matching story structures.
  * Structures are tried in order — first one that meets or exceeds targetClips wins.
@@ -6201,7 +6381,7 @@ class PipelineOrchestrator {
    * @param {string|null} previousSceneImagePath - Path to the previous scene's output image at the SAME location (for continuity). null if first scene at this location.
    * @returns {Array} Refined characters array with spatially-grounded positions, or original on failure
    */
-  async _refineBlockingWithVision(locationImagePath, scene, characters, aspectRatio = '16:9', previousSceneImagePath = null) {
+  async _refineBlockingWithVision(locationImagePath, scene, characters, aspectRatio = '16:9', previousSceneImagePath = null, scenePropContract = null) {
     const fs = require('fs');
 
     try {
@@ -6241,6 +6421,28 @@ class PipelineOrchestrator {
         }
       }
 
+      // Use real script dialogue for scene composition. The legacy kling_clips
+      // path above is often empty because dialogue lives on scene.lines.
+      if (scene.lines && scene.lines.length > 0) {
+        const dialogueLines = scene.lines
+          .map(line => {
+            const dialogue = (line.dialogue || '').trim();
+            if (!dialogue) return '';
+            const speaker = (line.speaker_id || line.character_id || 'speaker').trim();
+            return `${speaker}: "${dialogue}"`;
+          })
+          .filter(Boolean)
+          .slice(0, 8);
+        if (dialogueLines.length > 0) {
+          dialogueContext = `\nDIALOGUE IN THIS SCENE:\n${dialogueLines.join('\n')}\nUse the dialogue to inform spatial relationships, eyelines, and any explicitly mentioned object the actor must physically handle in the start frame.`;
+        }
+      }
+
+      const propContractText = formatScenePropContract(scenePropContract, { forVision: true });
+      const locationFidelityRule = propContractText
+        ? '- LOCATION FIDELITY: The generated image must match the reference location EXACTLY. Do NOT introduce unrelated props, furniture, objects, or architectural details that are not visible in the reference image. The REQUIRED STORY PROPS above are explicit exceptions because the dialogue/story needs them in the start frame; include them as small, culturally grounded Nigerian props physically held, touched, or resting on a visible surface.'
+        : '- LOCATION FIDELITY: The generated image must match the reference location EXACTLY. Do NOT introduce props, furniture, objects, or architectural details that are not visible in the reference image. Only reference things you can actually see in the photo.';
+
       const Anthropic = require('@anthropic-ai/sdk');
       const client = new Anthropic({ apiKey });
 
@@ -6276,7 +6478,7 @@ CONTINUITY REFERENCE: The second image is the PREVIOUS SCENE at this same locati
 LOCATION IMAGE: This is the reference location where the scene takes place.
 FRAME ORIENTATION: ${orientation}
 CHARACTERS IN SCENE: ${charList} (${charCount} character${charCount > 1 ? 's' : ''})
-SCENE MOOD: ${sceneContext || 'dramatic confrontation'}${dialogueContext}${continuityClause}
+SCENE MOOD: ${sceneContext || 'dramatic confrontation'}${dialogueContext}${propContractText ? `\n\n${propContractText}` : ''}${continuityClause}
 
 YOUR TASK:
 1. Study the location image. Identify spatial anchors: furniture, doorways, counters, stalls, signage, props, depth planes, natural framing elements.
@@ -6295,7 +6497,7 @@ RULES:
 - The blocking will be used as text in an AI image generation prompt, so be descriptive but compact.
 - 180-DEGREE RULE: Imagine an invisible axis (the "line of action") between characters in conversation. The camera stays on ONE side of this axis. This means: if Character A is on the LEFT and Character B is on the RIGHT, they MUST maintain those sides for ALL scenes at this location. Never cross the line — it disorients the viewer.${charCount > 1 ? ' Place the speaker facing the listener across this axis.' : ''}
 - VISUAL CONSISTENCY: All scenes share the same location. Maintain consistent camera distance (medium-wide), consistent naturalistic lighting, and consistent documentary tone across scenes. Avoid dramatic close-ups or posed compositions.
-- LOCATION FIDELITY: The generated image must match the reference location EXACTLY. Do NOT introduce props, furniture, objects, or architectural details that are not visible in the reference image. Only reference things you can actually see in the photo.${previousSceneImagePath ? '\n- SPATIAL CONTINUITY: Characters who appeared in the previous scene at this location MUST stay on the same side / in the same position unless the scene describes them moving. If a character was seated behind the desk on the right, they must remain there. This enforces the 180-degree rule across cuts.' : ''}
+${locationFidelityRule}${previousSceneImagePath ? '\n- SPATIAL CONTINUITY: Characters who appeared in the previous scene at this location MUST stay on the same side / in the same position unless the scene describes them moving. If a character was seated behind the desk on the right, they must remain there. This enforces the 180-degree rule across cuts.' : ''}
 
 OUTPUT FORMAT (JSON array, one object per character, same order as input):
 [
@@ -7310,13 +7512,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       if (prevSceneImage) {
         this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: continuity ref from previous scene at "${sceneLocHint}": ${prevSceneImage}`);
       }
+      const scenePropContract = buildScenePropContract(scene);
+      if (scenePropContract.requiredProps.length > 0) {
+        this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: required story props: ${scenePropContract.requiredProps.map(p => p.aliases?.[0] || p.prop).join(', ')}`);
+      }
       this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: refining blocking via Claude Vision...`);
       const refinedCharacters = await this._refineBlockingWithVision(
         locInfo.imagePath,
         scene,
         dedupedCharacters,
         this.state.aspectRatio || '16:9',
-        prevSceneImage
+        prevSceneImage,
+        scenePropContract
       );
 
       // ── STASH VISION-REFINED BLOCKING ──
@@ -7327,6 +7534,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         blocking,
         location_hint: scene.location_element_hint,
         vision_refined_characters: refinedCharacters,
+        scene_prop_contract: scenePropContract,
       });
 
       // ── RETRY LOOP for scene image generation ──
@@ -7345,6 +7553,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             outputPath,
             aspectRatio: this.state.aspectRatio || '16:9',
             projectName: this._titleInitials(this.state.selectedTitle || this.state.script?.title).toUpperCase(),
+            propContract: scenePropContract,
             onGenClicked: (creditCost) => {
               if (sceneAsset) db.markAssetGenClicked(sceneAsset.id, creditCost);
             },
@@ -7394,6 +7603,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                   locationDescription: scene.location || scene.location_element_hint || '',
                   blocking,
                   portraitPaths,
+                  propContract: scenePropContract,
                 }
               );
 
@@ -11945,4 +12155,17 @@ REWRITTEN DESCRIPTION:`,
   }
 }
 
-module.exports = { PipelineOrchestrator, TIER_TEST, TIER_STANDARD, TIER_LONG_FORM, TIER_PRESTIGE, getDurationTier, DURATION_PRESETS, CINEMATIC_DURATION_PRESETS, sanitizeCinemaVideoPrompt };
+module.exports = {
+  PipelineOrchestrator,
+  TIER_TEST,
+  TIER_STANDARD,
+  TIER_LONG_FORM,
+  TIER_PRESTIGE,
+  getDurationTier,
+  DURATION_PRESETS,
+  CINEMATIC_DURATION_PRESETS,
+  sanitizeCinemaVideoPrompt,
+  buildScenePropContract,
+  formatScenePropContract,
+  NIGERIAN_PROP_GROUNDING,
+};
