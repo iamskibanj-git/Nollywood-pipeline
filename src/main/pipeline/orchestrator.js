@@ -124,11 +124,11 @@ function sanitizeCinemaVideoPrompt(prompt) {
 
 const NIGERIAN_PROP_GROUNDING = {
   debt_document: {
-    aliases: ['paper', 'document', 'debt document', 'debt agreement', 'debt instrument'],
+    aliases: ['paper', 'document', 'debt document', 'debt agreement', 'debt instrument', 'agreement', 'receipt'],
     culturalDescription: 'creased Nigerian legal/debt paper, A4 photocopy or stamped local document, not glossy Western paperwork',
   },
   land_title: {
-    aliases: ['land title', 'title', 'survey plan', 'registry paper', 'land document'],
+    aliases: ['land title', 'title', 'survey plan', 'registry paper', 'land document', 'deed', 'property paper'],
     culturalDescription: 'Nigerian land title or survey-plan folder, stamped registry paper, practical local office document',
   },
   envelope: {
@@ -136,11 +136,11 @@ const NIGERIAN_PROP_GROUNDING = {
     culturalDescription: 'plain brown or white envelope with worn edges, local office style',
   },
   court_file: {
-    aliases: ['file', 'folder', 'court file', 'case file'],
+    aliases: ['file', 'folder', 'court file', 'case file', 'petition', 'affidavit'],
     culturalDescription: 'brown Nigerian court file or registry folder, stamped and practical',
   },
   phone: {
-    aliases: ['phone', 'recording', 'call', 'whatsapp'],
+    aliases: ['phone', 'recording', 'call', 'whatsapp', 'message', 'text'],
     culturalDescription: 'ordinary Android smartphone common in Nigeria, not a spy gadget',
   },
   key: {
@@ -148,7 +148,7 @@ const NIGERIAN_PROP_GROUNDING = {
     culturalDescription: 'ordinary metal house or office key, practical everyday Nigerian setting',
   },
   money: {
-    aliases: ['money', 'cash', 'naira', 'bribe'],
+    aliases: ['money', 'cash', 'naira', 'bribe', 'notes'],
     culturalDescription: 'Nigerian naira notes, not dollars, rupees, or foreign currency',
   },
   medicine: {
@@ -162,6 +162,18 @@ const NIGERIAN_PROP_GROUNDING = {
   photograph: {
     aliases: ['photograph', 'photo', 'picture'],
     culturalDescription: 'small printed family photograph or phone photo, Nigerian family context',
+  },
+  church_item: {
+    aliases: ['bible', 'hymn book', 'offering envelope'],
+    culturalDescription: 'modest Nigerian church item, worn from use, not ornate Western cathedral styling',
+  },
+  mosque_item: {
+    aliases: ['prayer beads', 'tasbih', 'quran'],
+    culturalDescription: 'simple Islamic devotional item appropriate to a Nigerian Muslim context',
+  },
+  palace_item: {
+    aliases: ['staff', 'royal staff', 'beads', 'chief beads'],
+    culturalDescription: 'restrained Nigerian traditional authority item, not fantasy royalty or Bollywood ornament',
   },
 };
 
@@ -188,6 +200,7 @@ function _propInfo(family) {
 
 function buildScenePropContract(scene = {}) {
   const required = [];
+  const mediumConfidenceMentions = [];
   const lowConfidenceMentions = [];
   const seen = new Set();
 
@@ -206,6 +219,10 @@ function buildScenePropContract(scene = {}) {
       confidence,
       source,
     };
+    if (confidence === 'medium') {
+      mediumConfidenceMentions.push(entry);
+      return;
+    }
     if (confidence !== 'high') {
       lowConfidenceMentions.push(entry);
       return;
@@ -273,11 +290,11 @@ function buildScenePropContract(scene = {}) {
     const text = `${clip.visual_beat || ''}\n${clip.multi_shot_prompt || ''}`;
     const family = _propFamilyForText(text);
     if (!family) continue;
-    const hasInteraction = /\b(?:holds?|grips?|clutches?|extends?|hands?|places?|slides?|opens?|reads?|points?\s+at)\b/i.test(text);
+    const hasInteraction = /\b(?:holds?|grips?|clutches?|extends?|hands?|places?|slides?|opens?|reads?|checks?|shows?|points?\s+at)\b/i.test(text);
     addProp({
       family,
       reason: `clip ${clip.clip_id || '?'} references ${family.replace(/_/g, ' ')}`,
-      confidence: hasInteraction ? 'high' : 'low',
+      confidence: hasInteraction ? 'medium' : 'low',
       source: 'kling_clip',
       placement: hasInteraction ? 'visible and physically anchored to the acting character or a visible surface' : '',
     });
@@ -285,13 +302,16 @@ function buildScenePropContract(scene = {}) {
 
   return {
     requiredProps: required,
+    mediumConfidenceMentions,
     lowConfidenceMentions,
+    version: 2,
   };
 }
 
 function formatScenePropContract(contract, { forVision = false } = {}) {
   const required = contract?.requiredProps || [];
-  if (!required.length) return '';
+  const medium = contract?.mediumConfidenceMentions || [];
+  if (!required.length && !medium.length) return '';
   const lines = required.map((p, idx) => {
     const holder = p.holder ? `${p.holder} must ` : 'Scene must ';
     const physical = p.holder
@@ -299,7 +319,18 @@ function formatScenePropContract(contract, { forVision = false } = {}) {
       : `${holder}show ${p.aliases?.[0] || p.prop} ${p.placement}.`;
     return `${idx + 1}. ${physical} Cultural form: ${p.culturalDescription}. Reason: ${p.reason}. The prop must be physically held, touched, or resting on a visible surface; never floating.`;
   });
-  return `${forVision ? 'REQUIRED STORY PROPS FOR START FRAME' : 'Required Nigerian story props'}:\n${lines.join('\n')}`;
+  const mediumLines = medium.map((p, idx) => {
+    const propName = p.aliases?.[0] || p.prop;
+    return `${idx + 1}. If composition allows, include ${propName} ${p.placement || 'as a small visible Nigerian story prop'}. Cultural form: ${p.culturalDescription}. Reason: ${p.reason}.`;
+  });
+  const sections = [];
+  if (lines.length) {
+    sections.push(`${forVision ? 'REQUIRED STORY PROPS FOR START FRAME' : 'Required Nigerian story props'}:\n${lines.join('\n')}`);
+  }
+  if (mediumLines.length) {
+    sections.push(`${forVision ? 'OPTIONAL STORY PROP CUES' : 'Optional Nigerian story prop cues'}:\n${mediumLines.join('\n')}`);
+  }
+  return sections.join('\n\n');
 }
 
 /**
@@ -7535,6 +7566,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         location_hint: scene.location_element_hint,
         vision_refined_characters: refinedCharacters,
         scene_prop_contract: scenePropContract,
+        prop_contract_version: scenePropContract.version || 1,
+        required_prop_count: scenePropContract.requiredProps.length,
+        required_prop_names: scenePropContract.requiredProps.map(p => p.aliases?.[0] || p.prop),
       });
 
       // ── RETRY LOOP for scene image generation ──

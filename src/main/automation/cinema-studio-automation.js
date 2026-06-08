@@ -3424,17 +3424,33 @@ class CinemaStudioAutomation {
     // Strip existing @-prefixes from lighting text — character names in lighting
     // will be re-tagged and converted to { at: name } segments below for proper
     // UUID pill resolution. The initial strip prevents double-@ issues.
-    const requiredProps = (propContract?.requiredProps || []).filter(p => p.requiredVisible).slice(0, 3);
-    const requiredPropText = requiredProps.length > 0
-      ? `Required Nigerian story props: ${requiredProps.map(p => {
+    const resolveHolderName = (holder) => {
+      const raw = String(holder || '').replace(/^@/, '').toLowerCase();
+      const match = characters.find(c =>
+        String(c.name || '').toLowerCase() === raw ||
+        String(c.baseName || '').toLowerCase() === raw
+      );
+      return match?.name || holder;
+    };
+    const promptProps = [
+      ...(propContract?.requiredProps || []).filter(p => p.requiredVisible),
+      ...(propContract?.mediumConfidenceMentions || []),
+    ].slice(0, 4);
+    const requiredProps = (propContract?.requiredProps || []).filter(p => p.requiredVisible);
+    const requiredPropText = promptProps.length > 0
+      ? `Nigerian story props: ${promptProps.map(p => {
           const propName = p.aliases?.[0] || p.prop;
-          const holder = p.holder ? `${p.holder} has ` : 'show ';
+          const holder = p.holder ? `${resolveHolderName(p.holder)} has ` : 'show ';
           const placement = p.placement || 'visible and physically anchored in the scene';
-          return `${holder}${propName} ${placement}; ${p.culturalDescription}; never floating`;
+          const required = p.requiredVisible ? 'must appear' : 'optional cue';
+          return `${holder}${propName} ${placement}; ${p.culturalDescription}; ${required}; never floating`;
         }).join('. ')}. `
       : '';
+    const propAwareCloser = requiredProps.length > 0
+      ? 'Photorealistic cinematic still, shallow depth of field, 35mm. Natural candid moment - no posing, no eye contact with camera. Location must match the attached image exactly. Do not add unrelated props, furniture, or objects. Required story props are allowed and must appear physically anchored.'
+      : 'Photorealistic cinematic still, shallow depth of field, 35mm. Natural candid moment - no posing, no eye contact with camera. Location must match the attached image exactly. Do not add unrelated props, furniture, or objects. Optional story prop cues may appear only if natural and physically anchored.';
     const finalCloser = requiredPropText
-      ? `${closer} Required story props are exceptions to the no-new-props rule; do not add unrelated props.`
+      ? propAwareCloser
       : closer;
     const cleanLighting = lighting ? lighting.replace(/@/g, '') + ' ' : '';
     const fixedLen = opener.length + finalCloser.length + requiredPropText.length + cleanLighting.length;

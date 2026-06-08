@@ -223,7 +223,7 @@ ${blockingLines.join('\n') || '(no specific blocking provided)'}
 ${propLines ? `REQUIRED STORY PROPS (Nigerian/Nollywood grounded):\n${propLines}\n` : ''}
 
 TASK: Verify the scene image matches expectations.
-${propLines ? 'Also score PROP_REQUIREMENTS: all required story props must be visible, culturally grounded for Nigeria/Nollywood, physically anchored (held/touched/on surface), and not floating or hallucinated as foreign objects. This is CRITICAL when present.' : ''}
+${propLines ? 'Also score PROP_REQUIREMENTS: every required story prop must be visible, culturally grounded for Nigeria/Nollywood, physically anchored (held/touched/on surface), and not floating. If a holder is specified, the prop must be held by, touched by, or immediately beside that character. Penalize foreign/genre-wrong substitutions such as glossy Western contracts, dollars, spy gadgets, fantasy jewelry, or Bollywood-coded ornament. This is CRITICAL when present.' : ''}
 
 1. CHARACTER_PRESENCE — Are ALL expected characters visible in the scene? Can you identify each one by their visual description? Are there any EXTRA people who shouldn't be there? (CRITICAL)
 2. CHARACTER_IDENTITY — Do the characters LOOK like their descriptions? (skin tone, gender, approximate age, clothing)
