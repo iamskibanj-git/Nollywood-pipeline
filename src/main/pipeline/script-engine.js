@@ -58,6 +58,15 @@ CINEMATIC-SPECIFIC FAILURE MODES (automatic critical issues):
 Log cinematic-specific issues with category values: 'blocking', 'kling_clips', 'element_hint', 'props_consistency', 'realism', 'procedure'.
 `;
 
+class ScriptValidationError extends Error {
+  constructor(message, draftScript, diagnostics) {
+    super(message);
+    this.name = 'ScriptValidationError';
+    this.draftScript = draftScript;
+    this.diagnostics = diagnostics;
+  }
+}
+
 class ScriptEngine {
   constructor(apiKey) {
     this.client = new Anthropic({ apiKey });
@@ -312,6 +321,23 @@ Standard cinematic widescreen composition. Wide establishing shots, two-shots, a
     }
 
     // ── POST-GENERATION VALIDATION ──
+    let diagnostics = this._inspectScriptCompleteness(finalScript, storyBrief);
+    if (diagnostics.oversizedClips.length > 0) {
+      try {
+        finalScript = await this._repairOversizedClipLineRefs(finalScript, storyBrief, diagnostics, onProgress);
+        diagnostics = this._inspectScriptCompleteness(finalScript, storyBrief);
+      } catch (repairErr) {
+        diagnostics.ok = false;
+        diagnostics.errors.unshift({
+          type: 'oversized_line_refs_repair_failed',
+          message: `Script repair failed: ${repairErr.message}`,
+        });
+        throw new ScriptValidationError(diagnostics.errors[0].message, finalScript, diagnostics);
+      }
+    }
+    if (diagnostics.errors.length > 0) {
+      throw new ScriptValidationError(diagnostics.errors[0].message, finalScript, diagnostics);
+    }
     this._validateScriptCompleteness(finalScript, storyBrief);
 
     // Sanitize blocking
@@ -1391,10 +1417,359 @@ Generate Chapters ${startChapter}-${endChapter} now. Respond with valid JSON onl
   }
 
   /**
+   * Repair generated cinematic scenes where Claude packed 4+ dialogue lines
+   * into one Kling clip. The repair call is scene-scoped and may only replace
+   * scene.kling_clips; all story/dialogue metadata must remain unchanged.
+   */
+  async _repairOversizedClipLineRefs(script, storyBrief, diagnostics, onProgress) {
+    if (!diagnostics?.oversizedClips?.length) return script;
+    const repairedScript = script;
+    const sceneKeys = new Map();
+
+    for (const item of diagnostics.oversizedClips) {
+      const key = `${item.chapter}::${item.scene}`;
+      if (!sceneKeys.has(key)) sceneKeys.set(key, []);
+      sceneKeys.get(key).push(item);
+    }
+
+    console.log(`[SCRIPT-REPAIR] Repairing ${diagnostics.oversizedClips.length} oversized clip(s) across ${sceneKeys.size} scene(s)`);
+    if (onProgress) onProgress(`\n[Repair] Fixing ${diagnostics.oversizedClips.length} oversized Kling clip(s)...`);
+
+    for (const [key, oversizedItems] of sceneKeys.entries()) {
+      const [chapterNumRaw, sceneNumRaw] = key.split('::');
+      const chapterNum = Number(chapterNumRaw);
+      const sceneNum = sceneNumRaw === '?' ? '?' : Number(sceneNumRaw);
+      const chapter = (repairedScript.chapters || []).find(ch => ch.chapter_number === chapterNum);
+      if (!chapter) throw new Error(`[SCRIPT-REPAIR] Could not find chapter ${chapterNum} for oversized clip repair`);
+      const scene = (chapter.scenes || []).find(sc => String(sc.scene_number || '?') === String(sceneNum));
+      if (!scene) throw new Error(`[SCRIPT-REPAIR] Could not find Ch${chapterNum} Scene ${sceneNum} for oversized clip repair`);
+
+      const relevantCharacterIds = new Set([
+        ...(scene.characters_present || []),
+        ...(scene.lines || []).map(l => String(l.speaker_id || '').replace(/^@/, '')).filter(Boolean),
+      ]);
+      const relevantCharacters = (repairedScript.character_bible || []).filter(c => {
+        const keys = [c.id, c.element_name_hint, c.name, c.description_label]
+          .filter(Boolean)
+          .map(v => String(v).replace(/^@/, '').toLowerCase());
+        return keys.some(v => relevantCharacterIds.has(v) || relevantCharacterIds.has(`@${v}`));
+      });
+
+      const repairPrompt = `You are repairing ONLY the kling_clips array for one cinematic Nollywood scene.
+
+The previous script is good, but these clip ids illegally contain 4+ line_refs:
+${oversizedItems.map(i => `- ${i.clipId}: [${i.lineRefs.join(', ')}]`).join('\n')}
+
+Hard requirements:
+- Return JSON only: { "kling_clips": [...] }
+- Preserve the scene dialogue lines exactly. Do not add, remove, renumber, or rewrite scene.lines.
+- Rewrite ONLY kling_clips.
+- Every scene line_number must be covered exactly once across kling_clips.
+- Each kling_clip.line_refs array must contain 1-3 existing line numbers, never 4+.
+- Use sequential clip groups in story order.
+- Every kling_clip must have duration_seconds: 15.
+- Every kling_clip must include a real multi_shot_prompt with exactly 3 shots and Nigerian English dialogue syntax.
+- Every kling_clip must include visual_beat.
+- Do not use [AUTO-SPLIT] placeholders.
+
+Character bible subset:
+${JSON.stringify(relevantCharacters, null, 2)}
+
+Scene JSON:
+${JSON.stringify(scene, null, 2)}
+
+Return the repaired kling_clips JSON now.`;
+
+      const repairText = await this._streamWithRetry({
+        model: this.model,
+        max_tokens: 8192,
+        temperature: 0.2,
+        system: 'You are a precise JSON repair engine. Return raw JSON only. No markdown. No prose.',
+        messages: [{ role: 'user', content: repairPrompt }],
+        onProgress,
+        label: `Repair Ch${chapterNum} Sc${sceneNum} kling_clips`,
+      }, 2);
+
+      const parsed = this._safeParseScriptJson(repairText);
+      const repairedClips = parsed?.kling_clips || parsed?.scene?.kling_clips || (Array.isArray(parsed) ? parsed : null);
+      if (!Array.isArray(repairedClips) || repairedClips.length === 0) {
+        throw new Error(`[SCRIPT-REPAIR] Ch${chapterNum} Sc${sceneNum}: repair returned no kling_clips`);
+      }
+
+      const coverage = this._validateSceneKlingClipCoverage(scene, repairedClips);
+      if (!coverage.ok) {
+        throw new Error(`[SCRIPT-REPAIR] Ch${chapterNum} Sc${sceneNum}: invalid repaired clips — ${coverage.errors.join('; ')}`);
+      }
+
+      scene.kling_clips = repairedClips;
+      console.log(`[SCRIPT-REPAIR] Ch${chapterNum} Sc${sceneNum}: repaired ${repairedClips.length} kling clip(s)`);
+    }
+
+    return repairedScript;
+  }
+
+  _validateSceneKlingClipCoverage(scene, clips) {
+    const errors = [];
+    const lineNumbers = (scene.lines || [])
+      .map(l => l.line_number ?? l.id)
+      .filter(n => n !== undefined && n !== null)
+      .map(Number);
+    const expected = new Set(lineNumbers);
+    const seen = new Map();
+    const clipIds = new Set();
+
+    let previousLastRef = null;
+    for (const clip of clips || []) {
+      if (!clip.clip_id) errors.push('clip missing clip_id');
+      if (clip.clip_id) {
+        if (clipIds.has(clip.clip_id)) errors.push(`duplicate clip_id ${clip.clip_id}`);
+        clipIds.add(clip.clip_id);
+      }
+      if (clip.duration_seconds !== 15) {
+        errors.push(`${clip.clip_id || 'clip'} duration_seconds must be 15`);
+      }
+      if (!clip.visual_beat || String(clip.visual_beat).trim().length === 0) {
+        errors.push(`${clip.clip_id || 'clip'} missing visual_beat`);
+      }
+      const refs = (clip.line_refs || []).map(Number);
+      if (refs.length < 1 || refs.length > 3) {
+        errors.push(`${clip.clip_id || 'clip'} has ${refs.length} line_refs`);
+      }
+      for (let i = 1; i < refs.length; i++) {
+        if (refs[i] !== refs[i - 1] + 1) {
+          errors.push(`${clip.clip_id || 'clip'} line_refs must be contiguous and ascending`);
+          break;
+        }
+      }
+      if (previousLastRef !== null && refs.length && refs[0] <= previousLastRef) {
+        errors.push(`${clip.clip_id || 'clip'} is out of line order`);
+      }
+      if (refs.length) previousLastRef = refs[refs.length - 1];
+      if (clip.multi_shot_prompt && clip.multi_shot_prompt.startsWith('[AUTO-SPLIT')) {
+        errors.push(`${clip.clip_id || 'clip'} has AUTO-SPLIT placeholder prompt`);
+      }
+      if (!clip.multi_shot_prompt || String(clip.multi_shot_prompt).trim().length < 30) {
+        errors.push(`${clip.clip_id || 'clip'} missing real multi_shot_prompt`);
+      }
+      const shotMatches = String(clip.multi_shot_prompt || '').match(/\bShot\s*\d+\b/gi) || [];
+      if (shotMatches.length !== 3) {
+        errors.push(`${clip.clip_id || 'clip'} must have exactly 3 shots`);
+      }
+      for (const ref of refs) {
+        if (!expected.has(ref)) errors.push(`${clip.clip_id || 'clip'} references unknown line ${ref}`);
+        if (!seen.has(ref)) seen.set(ref, []);
+        seen.get(ref).push(clip.clip_id || 'clip');
+      }
+    }
+
+    for (const n of lineNumbers) {
+      const holders = seen.get(n) || [];
+      if (holders.length === 0) errors.push(`line ${n} is not covered`);
+      if (holders.length > 1) errors.push(`line ${n} is covered multiple times (${holders.join(', ')})`);
+    }
+
+    return { ok: errors.length === 0, errors };
+  }
+
+  /**
+   * Inspect script completeness without throwing. This is intentionally
+   * side-effect free so repair code can decide whether to fix or fail while
+   * _validateScriptCompleteness() keeps the historical throwing contract.
+   */
+  _inspectScriptCompleteness(script, storyBrief) {
+    const expectedChapters = storyBrief.chapters || 5;
+    const chapters = script?.chapters || [];
+    const actualChapters = chapters.length;
+    const isCinematicStoryDriven = storyBrief.storyDriven && storyBrief.generatorMode === 'cinematic';
+    const expectedClips = storyBrief.targetClips || 50;
+    const diagnostics = {
+      ok: true,
+      errors: [],
+      warnings: [],
+      stats: {
+        expectedChapters,
+        actualChapters,
+        expectedClips,
+        totalClips: 0,
+        totalScenes: 0,
+        totalLines: 0,
+        maxCharsPerScene: 0,
+      },
+      chapterMismatch: null,
+      underTarget: null,
+      overloadedScenes: [],
+      oversizedClips: [],
+      autoSplitClips: [],
+      unknownRefs: [],
+    };
+
+    const fail = (type, message, extra = {}) => {
+      diagnostics.ok = false;
+      diagnostics.errors.push({ type, message, ...extra });
+    };
+
+    if (actualChapters !== expectedChapters) {
+      diagnostics.chapterMismatch = {
+        expected: expectedChapters,
+        actual: actualChapters,
+        chaptersPresent: chapters.map(c => c.chapter_number),
+      };
+      if (actualChapters === 0 || actualChapters < expectedChapters * 0.5) {
+        fail(
+          'chapter_count',
+          `Script generation failed: got ${actualChapters} chapters but expected ${expectedChapters}. Script is too incomplete to proceed.`,
+          diagnostics.chapterMismatch
+        );
+      } else {
+        diagnostics.warnings.push({
+          type: 'chapter_count',
+          message: `Chapter count mismatch: expected ${expectedChapters}, got ${actualChapters}`,
+          ...diagnostics.chapterMismatch,
+        });
+      }
+    }
+
+    if (isCinematicStoryDriven) {
+      for (const ch of chapters) {
+        for (const sc of (ch.scenes || [])) {
+          diagnostics.stats.totalScenes++;
+          diagnostics.stats.totalLines += (sc.lines || []).length;
+          diagnostics.stats.totalClips += (sc.kling_clips || []).length;
+          const charsInScene = (sc.characters_present || []).length;
+          diagnostics.stats.maxCharsPerScene = Math.max(diagnostics.stats.maxCharsPerScene, charsInScene);
+          if (charsInScene > 3) {
+            diagnostics.overloadedScenes.push({
+              chapter: ch.chapter_number,
+              scene: sc.scene_number || '?',
+              count: charsInScene,
+              label: `Ch${ch.chapter_number} S${sc.scene_number || '?'} (${charsInScene} chars)`,
+            });
+          }
+
+          for (const clip of (sc.kling_clips || [])) {
+            const refs = clip.line_refs || [];
+            if (refs.length > 3) {
+              const fallbackId = `Ch${ch.chapter_number} S${sc.scene_number || '?'}`;
+              diagnostics.oversizedClips.push({
+                chapter: ch.chapter_number,
+                scene: sc.scene_number || '?',
+                clipId: clip.clip_id || fallbackId,
+                lineRefs: refs,
+                count: refs.length,
+                label: `${clip.clip_id || fallbackId} (${refs.length} line_refs)`,
+              });
+            }
+            if (clip.multi_shot_prompt && clip.multi_shot_prompt.startsWith('[AUTO-SPLIT')) {
+              diagnostics.autoSplitClips.push({
+                chapter: ch.chapter_number,
+                scene: sc.scene_number || '?',
+                clipId: clip.clip_id || `Ch${ch.chapter_number} S${sc.scene_number || '?'}`,
+              });
+            }
+          }
+        }
+      }
+
+      if (diagnostics.stats.totalClips < expectedClips * 0.5) {
+        diagnostics.underTarget = {
+          totalClips: diagnostics.stats.totalClips,
+          expectedClips,
+          threshold: Math.floor(expectedClips * 0.5),
+          ratio: diagnostics.stats.totalClips / expectedClips,
+        };
+        fail(
+          'clip_count_too_low',
+          `Script generation failed: only ${diagnostics.stats.totalClips} clips produced (target ~${expectedClips}, minimum 50% = ${Math.floor(expectedClips * 0.5)}). Script is too incomplete to proceed.`,
+          diagnostics.underTarget
+        );
+      } else if (expectedClips >= 100 && diagnostics.stats.totalClips < expectedClips * 0.8) {
+        diagnostics.underTarget = {
+          totalClips: diagnostics.stats.totalClips,
+          expectedClips,
+          threshold: Math.floor(expectedClips * 0.8),
+          ratio: diagnostics.stats.totalClips / expectedClips,
+        };
+        fail(
+          'clip_count_under_80',
+          `Script generation failed: only ${diagnostics.stats.totalClips} clips produced (target ~${expectedClips}, minimum 80% = ${Math.floor(expectedClips * 0.8)}). Regenerate the script before asset creation.`,
+          diagnostics.underTarget
+        );
+      } else if (diagnostics.stats.totalClips < expectedClips * 0.8) {
+        diagnostics.underTarget = {
+          totalClips: diagnostics.stats.totalClips,
+          expectedClips,
+          threshold: Math.floor(expectedClips * 0.8),
+          ratio: diagnostics.stats.totalClips / expectedClips,
+        };
+        diagnostics.warnings.push({
+          type: 'clip_count_low',
+          message: `Clip count LOW: ${diagnostics.stats.totalClips} clips (target ~${expectedClips}, 80% threshold = ${Math.floor(expectedClips * 0.8)})`,
+          ...diagnostics.underTarget,
+        });
+      }
+
+      if (diagnostics.overloadedScenes.length > 0) {
+        fail(
+          'too_many_characters',
+          `Kling hard limit: max 3 characters per scene. ${diagnostics.overloadedScenes.length} scene(s) exceed this: ` +
+            `${diagnostics.overloadedScenes.slice(0, 5).map(s => s.label).join(', ')}${diagnostics.overloadedScenes.length > 5 ? '...' : ''}. ` +
+            `Regenerate the script — scene splitting must happen at outline level.`,
+          { overloadedScenes: diagnostics.overloadedScenes }
+        );
+      }
+
+      if (diagnostics.oversizedClips.length > 0) {
+        fail(
+          'oversized_line_refs',
+          `${diagnostics.oversizedClips.length} cinematic clip(s) exceed the 3-line limit: ` +
+            `${diagnostics.oversizedClips.slice(0, 5).map(c => c.label).join(', ')}${diagnostics.oversizedClips.length > 5 ? '...' : ''}. ` +
+            `Regenerate the script so each kling_clip has its own real multi_shot_prompt.`,
+          { oversizedClips: diagnostics.oversizedClips }
+        );
+      }
+
+      if (diagnostics.autoSplitClips.length > 0) {
+        fail(
+          'auto_split_placeholder',
+          `${diagnostics.autoSplitClips.length} clip(s) have [AUTO-SPLIT] placeholder prompts that would waste video credits: ` +
+            `${diagnostics.autoSplitClips.slice(0, 5).map(c => c.clipId).join(', ')}${diagnostics.autoSplitClips.length > 5 ? '...' : ''}. ` +
+            `Regenerate the script to fix oversized clips at the source.`,
+          { autoSplitClips: diagnostics.autoSplitClips }
+        );
+      }
+    }
+
+    const characterIds = new Set((script?.character_bible || []).map(c => c.element_name_hint || c.id));
+    const unknownRefs = new Set();
+    for (const ch of chapters) {
+      for (const sc of (ch.scenes || [])) {
+        for (const charId of (sc.characters_present || [])) {
+          if (!characterIds.has(charId)) unknownRefs.add(charId);
+        }
+      }
+    }
+    diagnostics.unknownRefs = [...unknownRefs];
+    if (diagnostics.unknownRefs.length > 0) {
+      diagnostics.warnings.push({
+        type: 'unknown_character_refs',
+        message: `Unknown character references: ${diagnostics.unknownRefs.join(', ')}`,
+        refs: diagnostics.unknownRefs,
+      });
+    }
+
+    return diagnostics;
+  }
+
+  /**
    * Validate that a generated script has the expected structure.
    * Throws on critical issues (wrong chapter count), warns on minor ones.
    */
   _validateScriptCompleteness(script, storyBrief) {
+    const diagnostics = this._inspectScriptCompleteness(script, storyBrief);
+    if (diagnostics.errors.length > 0) {
+      throw new Error(diagnostics.errors[0].message);
+    }
+
     const expectedChapters = storyBrief.chapters || 5;
     const actualChapters = (script.chapters || []).length;
     const isCinematicStoryDriven = storyBrief.storyDriven && storyBrief.generatorMode === 'cinematic';
@@ -3027,4 +3402,4 @@ Freshness matters: character names are part of channel variety, and repeated nam
   }
 }
 
-module.exports = { ScriptEngine };
+module.exports = { ScriptEngine, ScriptValidationError };

@@ -379,6 +379,103 @@ Files changed:
 - `prompts/structure-review-prompt.txt` — Realism + Procedure review guidance and issue categories
 - `AGENTS.md` — this section
 
+**Session 30X — Script-Generation Repair Layer (June 15, 2026 — Phase 1 Implemented):**
+
+Live 30-minute cinematic run exposed a costly script-stage failure mode. Three full retries of the same `title-chosen` project spent roughly $6 in Claude/API cost and never reached asset generation:
+
+1. Attempt 1 produced a complete script (10 chapters, 135 clips) but failed `_validateScriptCompleteness()` because `ch8_sc5_c4` had 4 `line_refs`.
+2. Attempt 2 produced a structurally valid script shape but only 128 clips against target ~164; the 80% minimum is 131, so it missed by 3 clips.
+3. Attempt 3 produced 146 clips (clip-count pass) but failed because `ch1_sc7_c3` and `ch5_sc3_c4` each had 4 `line_refs`.
+
+Diagnosis:
+- `script-engine.js::generateScript()` validates after all Phase B chapters are generated but before `_sanitizeBlocking()`, `_fixBlockingShotConsistency()`, `_sanitizeKlingClipPrompts()`, disk `script.json`, DB `script_json`, structural review, or the orchestrator's approval/regeneration loop.
+- Near-good scripts are discarded before persistence. The existing `MAX_SCRIPT_REGEN` loop in `orchestrator.js` only applies after integrity validation succeeds, so it does not help these failures.
+- The hard gates are correct for credit protection; the missing piece is a cheap repair layer before hard fail.
+
+Implementation status:
+
+- **Phase 1 implemented:** structured validation diagnostics, `ScriptValidationError` with draft/diagnostics payload, failed-draft artifact persistence in `orchestrator.js`, and scene-level `kling_clips` repair for oversized `line_refs`.
+- **Still planned:** under-target clip-count expansion and per-chapter validation/repair during Phase B generation.
+
+Implementation plan:
+
+1. **Return structured validation diagnostics instead of throwing immediately.**
+   - Refactor or wrap `_validateScriptCompleteness()` so cinematic story-driven validation can return `{ ok, errors, stats, oversizedClips, underTarget, overloadedScenes, autoSplitClips }`.
+   - Keep a throwing public path for tests/back-compat, but give `generateScript()` a repair-aware path.
+   - Preserve existing hard-stop semantics after repair attempts are exhausted.
+   - **Implemented:** `_inspectScriptCompleteness()` now returns diagnostics; `_validateScriptCompleteness()` keeps the throwing contract.
+
+2. **Add scene-level `kling_clips` repair for `line_refs.length > 3`.**
+   - Detect offending clips by chapter/scene/clip id.
+   - For each affected scene, make a small Claude call with the scene JSON, relevant character bible entries, and offending ids.
+   - Instruct Claude to preserve `lines`, `blocking`, `characters_present`, `character_outfits`, `background_roles`, `props_in_scene`, location fields, and dialogue text.
+   - Rewrite only `scene.kling_clips`.
+   - Require sequential coverage of existing line numbers, 1-3 `line_refs` per clip, no gaps/duplicates, real 3-shot `multi_shot_prompt` for every new clip, and no `[AUTO-SPLIT]` placeholders.
+   - Replace only the repaired scene's `kling_clips`, then re-run validation.
+   - **Implemented:** `_repairOversizedClipLineRefs()` repairs affected scenes and `_validateSceneKlingClipCoverage()` rejects gaps, duplicates, unknown lines, >3 refs, duplicate clip ids, missing real prompts, missing `visual_beat`, non-15s durations, non-3-shot prompts, out-of-order refs, and `[AUTO-SPLIT]`.
+
+3. **Add under-target clip expansion for near misses.**
+   - If total clips are below the 80% minimum but at least a configurable near-miss floor (suggested: 70% of target, and always if the deficit is <= 15 clips), do not full-regenerate.
+   - Pick lowest-clip chapters/scenes or scenes whose outline `target_clips` were underfilled.
+   - Ask Claude to expand selected scenes by adding dialogue lines and matching valid `kling_clips`, while preserving plot continuity and metadata.
+   - Bound the repair: max 2 expansion calls, max +10-15 clips per pass, then hard-fail if still below threshold.
+
+4. **Validate each Phase B chapter immediately.**
+   - After each chapter call, run cheap chapter-local checks: exactly one chapter, correct `chapter_number`, no >3 character scenes, no 4+ `line_refs`, reasonable clip count vs `chOutline.target_clips`.
+   - Repair/regenerate only the current chapter before moving on.
+   - This avoids paying for chapters 6-10 after chapter 1 already contains an invalid clip.
+
+5. **Persist failed-but-repairable drafts for forensic/manual recovery.**
+   - Before throwing after final repair failure, write `script.failed.json` and `script-validation-failure.json` in the project directory.
+   - Do not advance DB stage, do not create assets, and do not mark `script-done`.
+   - This preserves paid generation output for inspection or manual/surgical repair.
+   - **Implemented:** `ScriptValidationError` carries `draftScript` and `diagnostics`; `orchestrator.js` catches that error type around `generateScript()` and writes both artifacts before rethrowing.
+
+6. **Tighten prompt wording to match validator exactly.**
+   - Current cinematic scaffold contains tension between "Each clip covers EXACTLY 3 dialogue lines. Not 1, not 2..." and the later last-clip exception.
+   - Replace with validator-aligned language: partition scene lines into sequential groups of at most 3; use 3 whenever available; only the final clip in a scene may contain 1 or 2 lines; never create 4+ `line_refs`.
+
+Testing plan:
+- Extend `test/test-script-integrity-guards.js` with a 4-line clip repair case: repaired clips cover all original lines with max 3 refs and real prompts.
+- Negative repair-output test added: invalid repair responses (bad duration, missing `visual_beat`, 4+ refs, or wrong shot count) are rejected.
+- Add a near-miss clip count case: expansion pass can bring 128/164-style output over the 80% floor without changing title/character bible.
+- Add repair exhaustion coverage: still throws and writes failure artifacts.
+- Add per-chapter validation coverage: invalid chapter gets repaired before final assembly.
+- Use fixture-sized scenes and mocked Claude repair calls for unit tests; do not require live API for regression tests.
+
+Tests run for Phase 1:
+- `node test/test-script-integrity-guards.js` — passed
+- `node test/test-structural-review-skeleton.js` — passed
+- `node test/test-cinematic-silent-dialogue-sanitizer.js` — passed
+- `node -c src/main/pipeline/script-engine.js` — passed
+- `node -c src/main/pipeline/orchestrator.js` — passed
+- `node test/test-cinematic-asset-flow.js` — failed on existing asset-row adoption assertion (`dialogue clip row should be adopted and tagged`); this path is unrelated to script repair but should be investigated separately.
+
+**Session 30Y — Live-Run Cinematic Prompt Target Repair (June 15, 2026):**
+
+Context: After Session 30X let the live 30-minute cinematic run reach the script approval gate, the structural reviewer flagged prompt-level risks that did not justify another full script regeneration: character `@` refs used as possessive locations (for example `@amara's apartment`) and Shot 2/3 hard camera targets pointing at a non-speaking character. The original caveat came from Kling 3.0, while the live run uses Cinema Studio 3.5 / Seedance 2.0; because prompt preview is currently bypassed for Cinema Studio 3.5 and clip re-generation is expensive, the mitigation is deterministic runtime repair rather than human preview.
+
+Implementation:
+- Added `orchestrator.js::_repairCinematicShotTargets(prompt, clipId, elemMap)`.
+- Hooked it into `_runCinematicVideoStage()` after existing element resolution, bare-name fixes, dialogue `@` stripping, and dialogue sanitizer; before rules engine, grounding prefix, final sanitizer, `db.markAssetGenerating()`, and `generateClip()`.
+- Repair is intentionally narrow:
+  - de-tags possessive place phrases such as `@amara_o1_xxxx_0615's apartment` to `Amara's apartment`;
+  - only in Shot 2/3, retargets hard visual commands (`CUT TO @other`, `CLOSE-UP ON @other`, `MEDIUM ON @other`, `CAMERA FINDS @other`, `PUSH IN ON @other`) when the target differs from the shot's dialogue speaker;
+  - leaves Shot 1 multi-character establishing prompts untouched;
+  - leaves softer non-target references untouched;
+  - does not edit dialogue quotes.
+- Logs each repair with `[SHOT-TARGET-REPAIR]` so the live terminal shows what was changed.
+
+Regression coverage:
+- `test/test-cinematic-shot-target-repair.js` verifies possessive-location de-tagging, Shot 2 hard-target retargeting, Shot 1 preservation, dialogue preservation, and soft-reference preservation.
+- Re-ran `test/test-cinematic-silent-dialogue-sanitizer.js`, `test/test-script-integrity-guards.js`, and `node -c src/main/pipeline/orchestrator.js`.
+
+Operational note:
+- This protects prompts compiled after the app process restarts. It does not change an already-running Electron process. For a live run stopped at script approval, restart Electron before approving if this mitigation must apply to the current project.
+
+Operational rule until implemented:
+- Do not keep retrying full script generation after repeated near-miss cinematic validation failures. Stop after 2-3 failures and implement/trigger surgical repair, because no Higgsfield credits are at risk yet but API cost accumulates quickly.
+
 **Session 30R — Batch Prompt-Preview Mode (M4):**
 
 M4 — Batch prompt-preview gate:

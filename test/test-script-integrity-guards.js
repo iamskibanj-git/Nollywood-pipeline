@@ -49,6 +49,31 @@ function makeScriptWithClips(count) {
   };
 }
 
+function makeOversizedClipDraft() {
+  return {
+    character_bible: [{ id: 'character_1', element_name_hint: 'ada' }],
+    chapters: [{
+      chapter_number: 1,
+      scenes: [{
+        scene_number: 1,
+        characters_present: ['ada'],
+        lines: [
+          { line_number: 1, speaker_id: '@ada', dialogue: 'One' },
+          { line_number: 2, speaker_id: '@ada', dialogue: 'Two' },
+          { line_number: 3, speaker_id: '@ada', dialogue: 'Three' },
+          { line_number: 4, speaker_id: '@ada', dialogue: 'Four' },
+        ],
+        kling_clips: [{
+          clip_id: 'ch1_sc1_c1',
+          duration_seconds: 15,
+          line_refs: [1, 2, 3, 4],
+          multi_shot_prompt: 'Real prompt that should be repaired',
+        }],
+      }],
+    }],
+  };
+}
+
 function assertThrowsMessage(fn, pattern) {
   assert.throws(fn, err => {
     assert.match(err.message, pattern);
@@ -56,7 +81,7 @@ function assertThrowsMessage(fn, pattern) {
   });
 }
 
-function main() {
+async function main() {
   const engine = makeEngine();
 
   assertThrowsMessage(() => {
@@ -91,7 +116,57 @@ function main() {
     );
   }, /minimum 80%/);
 
+  const repairEngine = makeEngine();
+  repairEngine.model = 'test-model';
+  repairEngine._streamWithRetry = async () => JSON.stringify({
+    kling_clips: [
+      {
+        clip_id: 'ch1_sc1_c1',
+        duration_seconds: 15,
+        line_refs: [1, 2, 3],
+        visual_beat: 'Ada grips the table edge',
+        multi_shot_prompt: 'Shot 1 (WIDE): @ada stands at the table.\n[@ada, speaking in tense Nigerian English accent]: "One."\n\nShot 2 (MEDIUM): @ada grips the edge.\n[@ada, speaking in tense Nigerian English accent]: "Two."\n\nShot 3 (CLOSE-UP): @ada keeps her eyes steady.\n[@ada, speaking in tense Nigerian English accent]: "Three."',
+      },
+      {
+        clip_id: 'ch1_sc1_c2',
+        duration_seconds: 15,
+        line_refs: [4],
+        visual_beat: 'Ada steps back',
+        multi_shot_prompt: 'Shot 1 (WIDE): @ada remains beside the table.\n[@ada, speaking in quiet Nigerian English accent]: "Four."\n\nShot 2 (MEDIUM): @ada steps back slowly.\n[@ada, speaking in quiet Nigerian English accent]: "Four."\n\nShot 3 (CLOSE-UP): @ada exhales through her nose.\n[@ada, speaking in quiet Nigerian English accent]: "Four."',
+      },
+    ],
+  });
+
+  const draft = makeOversizedClipDraft();
+  const diagnostics = repairEngine._inspectScriptCompleteness(draft, makeStoryBrief({ targetClips: 1 }));
+  assert.strictEqual(diagnostics.oversizedClips.length, 1);
+  const repaired = await repairEngine._repairOversizedClipLineRefs(draft, makeStoryBrief({ targetClips: 1 }), diagnostics);
+  const repairedClips = repaired.chapters[0].scenes[0].kling_clips;
+  assert.strictEqual(repairedClips.length, 2);
+  assert.ok(repairedClips.every(c => c.line_refs.length <= 3));
+  assert.deepStrictEqual(repairedClips.flatMap(c => c.line_refs), [1, 2, 3, 4]);
+
+  const badRepairEngine = makeEngine();
+  badRepairEngine.model = 'test-model';
+  badRepairEngine._streamWithRetry = async () => JSON.stringify({
+    kling_clips: [{
+      clip_id: 'ch1_sc1_c1',
+      duration_seconds: 10,
+      line_refs: [1, 2, 3, 4],
+      multi_shot_prompt: 'Shot 1: @ada speaks.\nShot 2: @ada reacts.\nShot 3: @ada waits.\nShot 4: @ada leaves.',
+    }],
+  });
+  const badDraft = makeOversizedClipDraft();
+  const badDiagnostics = badRepairEngine._inspectScriptCompleteness(badDraft, makeStoryBrief({ targetClips: 1 }));
+  await assert.rejects(
+    () => badRepairEngine._repairOversizedClipLineRefs(badDraft, makeStoryBrief({ targetClips: 1 }), badDiagnostics),
+    /duration_seconds must be 15|missing visual_beat|has 4 line_refs|exactly 3 shots/
+  );
+
   console.log('script integrity guard regression checks passed');
 }
 
-main();
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

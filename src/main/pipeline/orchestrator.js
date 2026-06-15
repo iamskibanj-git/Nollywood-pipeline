@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
-const { ScriptEngine } = require('./script-engine');
+const { ScriptEngine, ScriptValidationError } = require('./script-engine');
 const { HiggsFieldAutomation } = require('../automation/higgsfield');
 const { VideoAssembler } = require('../assembly/assembler');
 const { YouTubeResearcher } = require('../research/youtube-scraper');
@@ -1672,9 +1672,30 @@ class PipelineOrchestrator {
               this.log(`Generating full script with character bible${attemptLabel}...`);
               this.emit({ type: 'stage', stage: 'script', substage: 'script' });
 
-              const script = await this.scriptEngine.generateScript(brief, (partial) => {
-                this.emit({ type: 'script-progress', partial });
-              }, this.state.researchData);
+              let script;
+              try {
+                script = await this.scriptEngine.generateScript(brief, (partial) => {
+                  this.emit({ type: 'script-progress', partial });
+                }, this.state.researchData);
+              } catch (e) {
+                if (e instanceof ScriptValidationError || e.name === 'ScriptValidationError') {
+                  const failedScriptPath = path.join(projectDir, 'script.failed.json');
+                  const validationPath = path.join(projectDir, 'script-validation-failure.json');
+                  try {
+                    if (e.draftScript) {
+                      fs.writeFileSync(failedScriptPath, JSON.stringify(e.draftScript, null, 2));
+                    }
+                    if (e.diagnostics) {
+                      fs.writeFileSync(validationPath, JSON.stringify(e.diagnostics, null, 2));
+                    }
+                    this.log(`[SCRIPT] Saved failed draft for repair: ${failedScriptPath}`, 'warn');
+                    this.log(`[SCRIPT] Saved validation diagnostics: ${validationPath}`, 'warn');
+                  } catch (writeErr) {
+                    this.log(`[SCRIPT] Failed to save validation artifacts: ${writeErr.message}`, 'warn');
+                  }
+                }
+                throw e;
+              }
 
               this.state.script = script;
               fs.writeFileSync(path.join(projectDir, 'script.json'), JSON.stringify(script, null, 2));
@@ -6336,6 +6357,114 @@ class PipelineOrchestrator {
   }
 
   /**
+   * Repair high-risk cinematic prompt target drift before paid video generation.
+   *
+   * This is deliberately narrower than the full rules engine:
+   * - Character possessives used as locations become plain human text so the
+   *   @ autocomplete does not bind a person when the prompt means a place.
+   * - Shot 2/3 hard visual target commands are retargeted only when they point
+   *   at a different character than the shot's dialogue speaker.
+   *
+   * @param {string} prompt
+   * @param {string} clipId
+   * @param {Object} elemMap - base/suffixed character aliases -> canonical element name
+   * @returns {{prompt: string, fixes: string[]}}
+   */
+  _repairCinematicShotTargets(prompt, clipId = 'clip', elemMap = {}) {
+    if (!prompt) return { prompt, fixes: [] };
+
+    const fixes = [];
+    let fixed = prompt;
+
+    const canonicalByAlias = new Map();
+    for (const [rawAlias, rawCanonical] of Object.entries(elemMap || {})) {
+      const alias = String(rawAlias || '').replace(/^@/, '').toLowerCase();
+      const canonical = String(rawCanonical || '').replace(/^@/, '').toLowerCase();
+      if (!alias || !canonical) continue;
+      canonicalByAlias.set(alias, canonical);
+      canonicalByAlias.set(canonical, canonical);
+    }
+
+    const normalizeName = (name) => {
+      const lower = String(name || '').replace(/^@/, '').toLowerCase();
+      return canonicalByAlias.get(lower) || lower;
+    };
+
+    const humanizeName = (name) => {
+      const canonical = normalizeName(name);
+      let base = canonical
+        .replace(/_o\d+_[a-z0-9]+_\d{4}$/i, '')
+        .replace(/_[a-z]{2,8}_\d{4}$/i, '')
+        .replace(/_o\d+$/i, '');
+
+      for (const [alias, canonicalName] of canonicalByAlias.entries()) {
+        if (canonicalName === canonical && !/^character_\d+$/i.test(alias) && alias.length < base.length) {
+          base = alias;
+        }
+      }
+
+      return base
+        .split('_')
+        .filter(Boolean)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ') || String(name || '').replace(/^@/, '');
+    };
+
+    // De-tag possessive character references when the next word makes the
+    // phrase a place, not a visual subject: "@amara's apartment" -> "Amara's apartment".
+    const placeWords = [
+      'apartment', 'office', 'house', 'home', 'room', 'bedroom', 'kitchen',
+      'compound', 'mansion', 'flat', 'shop', 'stall', 'salon', 'parlor',
+      'parlour', 'church', 'school', 'hospital', 'clinic', 'restaurant',
+      'hotel', 'lounge', 'car', 'vehicle', 'estate', 'veranda', 'balcony',
+      'living room', 'sitting room', 'market stall',
+    ];
+    const placePattern = placeWords
+      .sort((a, b) => b.length - a.length)
+      .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'))
+      .join('|');
+    const possessivePlaceRe = new RegExp(`@([a-z0-9_]+)'s\\s+(${placePattern})\\b`, 'gi');
+    fixed = fixed.replace(possessivePlaceRe, (match, name, place) => {
+      const replacement = `${humanizeName(name)}'s ${place}`;
+      fixes.push(`de-tagged possessive location "${match}" -> "${replacement}"`);
+      return replacement;
+    });
+
+    const shotRe = /Shot\s*(2|3)\s*\(([^)]*)\)\s*:\s*([\s\S]*?)(?=\nShot\s*\d+\s*\(|$)/gi;
+    fixed = fixed.replace(shotRe, (fullMatch, shotNum, header, body) => {
+      const dialogueMatch = body.match(/\[@([a-z0-9_]+)[^\]]*\]:\s*"[^"]*"/i);
+      if (!dialogueMatch) return fullMatch;
+
+      const speaker = dialogueMatch[1];
+      const speakerCanonical = normalizeName(speaker);
+      const speakerToken = `@${speaker}`;
+      const dialogueStart = body.indexOf(dialogueMatch[0]);
+      const direction = dialogueStart >= 0 ? body.slice(0, dialogueStart) : body;
+      const dialogueAndRest = dialogueStart >= 0 ? body.slice(dialogueStart) : '';
+
+      const hardTargetRe = /\b(CUT\s+TO|CLOSE(?:-|\s*)UP\s+ON|EXTREME\s+CLOSE(?:-|\s*)UP\s+ON|ECU\s+ON|CU\s+ON|MEDIUM\s+ON|CAMERA\s+FINDS|PUSH(?:ES)?\s+IN\s+ON|SLOW\s+PUSH(?:-|\s*)IN\s+ON)\s+@([a-z0-9_]+)/gi;
+      let changed = false;
+      let repairedDirection = direction.replace(hardTargetRe, (match, command, target) => {
+        const targetCanonical = normalizeName(target);
+        if (targetCanonical === speakerCanonical) return match;
+        changed = true;
+        fixes.push(`Shot ${shotNum}: retargeted "${match}" to ${speakerToken} (speaker/visual target mismatch)`);
+        return `${command} ${speakerToken}`;
+      });
+
+      if (!changed) return fullMatch;
+      const speakerEscaped = speaker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      repairedDirection = repairedDirection.replace(
+        new RegExp(`(@${speakerEscaped}\\.?\\s+)(?:His|Her|Their)\\b`, 'gi'),
+        "$1The speaker's"
+      );
+      return `Shot ${shotNum} (${header}): ${repairedDirection}${dialogueAndRest}`;
+    });
+
+    return { prompt: fixed, fixes };
+  }
+
+  /**
    * Prepare an image for Claude Vision using magic-byte MIME detection.
    * Higgsfield often saves WebP bytes under a .png filename; Claude rejects
    * those when the media_type follows the extension instead of the actual file.
@@ -8854,6 +8983,20 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         if (sanitized.replacements > 0) {
           finalMultiShotPrompt = sanitized.prompt;
           this.log(`[CINEMATIC] ${clipId}: sanitized ${sanitized.replacements} risky dialogue phrase(s) before video prompt submission`);
+        }
+      }
+
+      // ── REPAIR HIGH-RISK SHOT TARGETS BEFORE SUBMISSION ──
+      // Keep this conservative: de-tag character possessives used as locations,
+      // and retarget only hard Shot 2/3 camera commands when they point at a
+      // different character than the dialogue speaker.
+      {
+        const repair = this._repairCinematicShotTargets(finalMultiShotPrompt, clipId, elemMap);
+        if (repair.fixes.length > 0) {
+          finalMultiShotPrompt = repair.prompt;
+          for (const fix of repair.fixes) {
+            this.log(`[SHOT-TARGET-REPAIR] ${clipId}: ${fix}`);
+          }
         }
       }
 
