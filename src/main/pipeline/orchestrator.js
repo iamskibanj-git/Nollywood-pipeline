@@ -38,6 +38,7 @@ const KLING_CLIP_DURATION = 15;      // Fixed 15s per Kling clip — duration al
 const KLING_CREDITS_PER_CLIP = 11;   // ~11 credits per Kling multi-shot clip
 const KLING_CREDITS_PER_SCENE = 2;   // ~2 credits per scene image (Nano Banana Pro)
 const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
+const MAX_PORTRAIT_PROVIDER_MISS_RETRIES = 2;
 const TEMP_SKIP_CINEMA35_PROMPT_PREVIEW = true;
 const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = false;
 
@@ -483,6 +484,11 @@ const TIER_TEST = 'test';
 const TIER_STANDARD = 'standard';
 const TIER_LONG_FORM = 'long-form';
 const TIER_PRESTIGE = 'prestige';
+const BROWSER_INSPECT_FLAG_PATH = path.join(__dirname, '..', '..', '..', '.higgsfield-browser-inspect');
+
+function isBrowserInspectionMode() {
+  return process.env.HIGGSFIELD_BROWSER_INSPECT === '1' || fs.existsSync(BROWSER_INSPECT_FLAG_PATH);
+}
 
 /**
  * Classify a duration preset into a tier for structural scaffolding purposes.
@@ -1293,6 +1299,11 @@ class PipelineOrchestrator {
       const producedStories = this.getProducedStories(this.state.selectedPoolId || null);
       this.emit({ type: 'dedup-data', stories: producedStories });
 
+      if (isBrowserInspectionMode()) {
+        await this._enterHiggsfieldBrowserInspection();
+        return { success: true, mode: 'browser-inspection' };
+      }
+
       // ── Determine starting stage for resume ──
       let resumeStage = isResume ? activeProject.stage : null;
 
@@ -2071,6 +2082,28 @@ class PipelineOrchestrator {
                 this.cancelled = true;
                 this.log(`Portrait generation aborted (cancelled or browser closed) — asset reset to pending, pipeline halting`, 'warn');
                 return { success: false, reason: 'cancelled' };
+              }
+
+              if (err.retryableProviderMiss && !err.detectedCdnUrl && !fs.existsSync(portraitPath)) {
+                this._portraitProviderMissRetries = this._portraitProviderMissRetries || {};
+                const retryKey = String(asset.id);
+                const attempts = this._portraitProviderMissRetries[retryKey] || 0;
+                if (attempts < MAX_PORTRAIT_PROVIDER_MISS_RETRIES) {
+                  const nextAttempt = attempts + 1;
+                  this._portraitProviderMissRetries[retryKey] = nextAttempt;
+                  db.resetAsset(asset.id);
+                  db.logEvent(projectId, 'provider_miss_retry', {
+                    stage: 'portraits',
+                    assetId: asset.id,
+                    assetLabel,
+                    attempt: nextAttempt,
+                    detail: `Submitted Higgsfield job produced no recoverable local/Asset Library output; retrying ${nextAttempt}/${MAX_PORTRAIT_PROVIDER_MISS_RETRIES}`,
+                  });
+                  this.log(`[PORTRAIT] ${assetLabel}: submitted job produced no recoverable output; retrying (${nextAttempt}/${MAX_PORTRAIT_PROVIDER_MISS_RETRIES})`, 'warn');
+                  incompletePortraits.splice(incompletePortraits.indexOf(asset) + 1, 0, asset);
+                  continue;
+                }
+                this.log(`[PORTRAIT] ${assetLabel}: provider-miss retry budget exhausted (${MAX_PORTRAIT_PROVIDER_MISS_RETRIES})`, 'error');
               }
 
               // ── NSFW REJECTION: rewrite character description + retry ──
@@ -12075,6 +12108,46 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
 
     return { success: false, reason: 'No active publish context' };
+  }
+
+  async _enterHiggsfieldBrowserInspection() {
+    const project = this.state.project || {};
+    const aspectRatio = this.state.aspectRatio || project.brief?.aspectRatio || '16:9';
+    const cinemaProjectId = this.state.higgsfield_project_id || null;
+    this.log('[INSPECT] HIGGSFIELD_BROWSER_INSPECT=1 - opening Higgsfield browser inspection workspace before pipeline stages', 'warn');
+
+    let result = null;
+    if (this.automation && typeof this.automation.openInspectionWorkspace === 'function') {
+      result = await this.automation.openInspectionWorkspace({ cinemaProjectId, aspectRatio });
+      this.log(`[INSPECT] Browser inspection snapshot: ${result.snapshotPath}`);
+      for (const tab of result.tabs || []) {
+        this.log(`[INSPECT] Tab ${tab.label}: ${tab.url || tab.error}`);
+      }
+    } else if (this.automation) {
+      await this.automation.ensureBrowser();
+      await this.automation.page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    }
+
+    this.paused = true;
+    this.state.status = 'waiting_approval';
+    this.emit({
+      type: 'waiting',
+      gate: 'browser-inspection',
+      detail: {
+        snapshotPath: result?.snapshotPath || null,
+        debugPort: process.env.HIGGSFIELD_DEBUG_PORT || '9223',
+        aspectRatio,
+        cinemaProjectId,
+      },
+    });
+    this.log('[INSPECT] Pipeline suspended for browser inspection. Click Resume to exit inspection mode; restart without HIGGSFIELD_BROWSER_INSPECT=1 to run production.', 'warn');
+
+    await new Promise((resolve) => { this._pauseResolver = resolve; });
+    this._pauseResolver = null;
+    this.paused = false;
+    this.state.status = 'idle';
+    this.emit({ type: 'resumed' });
+    this.log('[INSPECT] Browser inspection mode exited. Production stages were not run.', 'warn');
   }
 
   async _pauseForHiggsfieldVerification(label, message) {

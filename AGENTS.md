@@ -763,6 +763,14 @@ Implementation is gated behind explicit green-light. Estimated 20-25 hours acros
 
 ## Aspect Ratio (Session 8)
 
+Image automation UI drift note (2026-06-15): Nano Banana Pro may expose image aspect/resolution only as visible chip/dropdown controls (`9:16`, `2K`) rather than native `<select>` elements. `generateImage()` must actively set and confirm the visible controls, use native selects only as a fallback when available, and hard-fail before Generate if aspect or resolution cannot be confirmed.
+
+Temporary live UI inspection mode (2026-06-15): set `HIGGSFIELD_BROWSER_INSPECT=1` before clicking Continue to open the app-owned headed Playwright browser and suspend before any pipeline stage or asset mutation. It opens Nano Banana, Assets, Veo, and Cinema Studio inspection tabs, writes `ui-inspection/higgsfield-ui-snapshot_*.json` plus screenshots under the project folder, and exposes remote debugging on `HIGGSFIELD_DEBUG_PORT` (default `9223`). Resume exits inspection mode; restart without the env var to run production.
+
+Live inspection findings (2026-06-15): Nano Banana quality dropdown option labels are concatenated with entitlement text (`1KUnlimited`, `2KUnlimited`, `4K`), so automation must match resolution options by prefix rather than exact text. Always press Escape before opening a toolbar dropdown because a previously open menu can leave option buttons visible near the toolbar and confuse control discovery. The old Veo URL (`/create/video`) now lands on the unified `/generate` Cinema Studio surface in the inspected session; treat staged Veo and Cinema Studio setup as suspect until their current toolbar flows are separately revalidated.
+
+Portrait provider-miss retry (2026-06-15): A live Nano Banana portrait run can submit successfully, capture a job id, then never materialize in API polling, History/CDN, Asset Library recovery, or the local output path before the 420s timeout. Treat that as a retryable Higgsfield-side provider miss only when `generateImage()` marks `retryableProviderMiss`, no `detectedCdnUrl` is present, and the expected local file does not exist. The portrait stage resets and requeues that same asset up to 2 times, logging `provider_miss_retry`, then hard-fails after the retry budget. Do not apply this to pre-generation settings failures, NSFW/session/cancel errors, or any case where recovery found a CDN/local file.
+
 Each project has a single `aspect_ratio` column (migration 007), chosen at Start Research time and **locked once generation begins** (setter throws if any project_assets rows exist). MVP supports `16:9` (YouTube long-form, default) and `9:16` (Shorts / TikTok / Reels). Portrait and outfit-portrait image generations follow the project/global aspect ratio unless a stage explicitly documents an override.
 
 **How it threads through the pipeline:**

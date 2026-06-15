@@ -1109,7 +1109,7 @@
       badge.className = `status-badge ${status}`;
       badge.textContent = status.replace('_', ' ').toUpperCase();
 
-      const operatorResumeGate = ['preflight-failed', 'credits-exhausted', 'higgsfield-verification-required'].includes(state.currentApprovalGate);
+      const operatorResumeGate = ['preflight-failed', 'credits-exhausted', 'higgsfield-verification-required', 'browser-inspection'].includes(state.currentApprovalGate);
       document.getElementById('btn-pause').disabled = status !== 'running';
       document.getElementById('btn-cancel').disabled = status === 'idle' || status === 'complete';
       document.getElementById('btn-pause').style.display = (status === 'paused' || operatorResumeGate) ? 'none' : 'inline-block';
@@ -4293,6 +4293,16 @@
             const d = event.detail || {};
             const label = d.label ? ` during ${d.label}` : '';
             const msg = `⚠ Higgsfield Verification Required${label}\n\nComplete the slider challenge in the Higgsfield browser window, then click Resume.`;
+            updateLog(msg, 'warn');
+            document.getElementById('btn-pause').style.display = 'none';
+            document.getElementById('btn-resume-pipeline').style.display = 'inline-block';
+            document.getElementById('btn-resume-pipeline').disabled = false;
+          }
+          if (event.gate === 'browser-inspection') {
+            const d = event.detail || {};
+            const snapshot = d.snapshotPath ? `\nSnapshot: ${d.snapshotPath}` : '';
+            const project = d.cinemaProjectId ? `\nCinema project: ${d.cinemaProjectId}` : '';
+            const msg = `Higgsfield Browser Inspection Mode\n\nThe pipeline is suspended before any generation work. Inspect the launched Playwright browser tabs and settings, then click Resume to exit inspection mode.${snapshot}\nDebug: http://127.0.0.1:${d.debugPort || '9223'}${project}`;
             updateLog(msg, 'warn');
             document.getElementById('btn-pause').style.display = 'none';
             document.getElementById('btn-resume-pipeline').style.display = 'inline-block';

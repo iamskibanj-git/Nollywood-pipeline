@@ -12,6 +12,7 @@ projects/
 
 # Higgsfield browser session cookies (sensitive)
 higgsfield-session.json
+.higgsfield-browser-inspect
 
 # Branding assets (binary, tracked separately if needed)
 config/branding*.png

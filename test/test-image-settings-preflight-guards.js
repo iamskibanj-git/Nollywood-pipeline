@@ -23,12 +23,24 @@ function main() {
   );
 
   assert(
-    higgsfieldSource.includes('[PRE-GEN] IMAGE_SETTINGS_MISMATCH: aspect ratio'),
-    'image generation must hard-fail when aspect cannot be confirmed'
+    higgsfieldSource.includes('readVisibleImageSettings'),
+    'image generation must read visible Nano Banana setting chips'
   );
   assert(
-    higgsfieldSource.includes('[PRE-GEN] IMAGE_SETTINGS_MISMATCH: resolution selector missing'),
-    'image generation must hard-fail when resolution selector is missing'
+    higgsfieldSource.includes('setVisibleImageDropdown'),
+    'image generation must be able to set settings through visible dropdown controls'
+  );
+  assert(
+    higgsfieldSource.includes('ensureImageAspect') && higgsfieldSource.includes('ensureImageResolution'),
+    'image generation must actively ensure both aspect and resolution before submit'
+  );
+  assert(
+    higgsfieldSource.includes('Native aspect <select> unavailable or not confirmed'),
+    'image generation must fall back when native selects disappear from the UI'
+  );
+  assert(
+    higgsfieldSource.includes("kind === 'resolution' && textUpper.startsWith(targetUpper)"),
+    'image resolution option matching must handle labels like 2KUnlimited'
   );
   assert(
     higgsfieldSource.includes('final image settings wrong before Generate'),

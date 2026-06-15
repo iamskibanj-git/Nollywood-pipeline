@@ -30,6 +30,11 @@ const VIDEO_GEN_TIMEOUT_MS = Number(process.env.VIDEO_GEN_TIMEOUT_MS) || 600000;
 const IMAGE_GEN_TIMEOUT_MS = Number(process.env.IMAGE_GEN_TIMEOUT_MS) || 420000; // 7 min
 const START_FRAME_SETTLE_TIMEOUT_MS = Number(process.env.START_FRAME_SETTLE_TIMEOUT_MS) || 180000; // 3 min
 const START_FRAME_SETTLE_EXTRA_MS   = Number(process.env.START_FRAME_SETTLE_EXTRA_MS)   || 30000;  // 30s buffer
+const BROWSER_INSPECT_FLAG_PATH = path.join(__dirname, '..', '..', '..', '.higgsfield-browser-inspect');
+
+function isBrowserInspectionMode() {
+  return process.env.HIGGSFIELD_BROWSER_INSPECT === '1' || fs.existsSync(BROWSER_INSPECT_FLAG_PATH);
+}
 
 /**
  * HiggsFieldAutomation
@@ -99,6 +104,21 @@ class HiggsFieldAutomation {
     }
   }
 
+  _getBrowserLaunchArgs() {
+    const args = [
+      '--start-maximized',
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-gpu',
+    ];
+    if (isBrowserInspectionMode()) {
+      const debugPort = process.env.HIGGSFIELD_DEBUG_PORT || '9223';
+      args.push(`--remote-debugging-port=${debugPort}`);
+      console.log(`[BROWSER] Inspection mode: remote debugging enabled on http://127.0.0.1:${debugPort}`);
+    }
+    return args;
+  }
+
   async ensureBrowser() {
     // Check if existing page is still alive — a closed page needs full reinit
     if (this.page) {
@@ -138,12 +158,7 @@ class HiggsFieldAutomation {
     // responsive layout shifts that caused missing toolbar elements at 1400x850.
     this.browser = await chromium.launch({
       headless: false,
-      args: [
-        '--start-maximized',
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',            // Stability on Windows
-        '--disable-gpu',           // Prevents GPU rendering issues
-      ],
+      args: this._getBrowserLaunchArgs(),
     });
 
     // Detect user manually closing the browser window.
@@ -413,7 +428,7 @@ class HiggsFieldAutomation {
 
       this.browser = await chromium.launch({
         headless: false,
-        args: ['--start-maximized', '--disable-blink-features=AutomationControlled'],
+        args: this._getBrowserLaunchArgs(),
       });
       console.log('[CTX] ✓ Browser relaunched');
     }
@@ -436,7 +451,7 @@ class HiggsFieldAutomation {
         try { await this.browser.close().catch(() => {}); } catch (_) {}
         this.browser = await chromium.launch({
           headless: false,
-          args: ['--start-maximized', '--disable-blink-features=AutomationControlled'],
+          args: this._getBrowserLaunchArgs(),
         });
         newContext = await this.browser.newContext({
           viewport: null,
@@ -497,6 +512,84 @@ class HiggsFieldAutomation {
     } catch (_) {
       return null;
     }
+  }
+
+  async openInspectionWorkspace({ cinemaProjectId = null, aspectRatio = '16:9' } = {}) {
+    await this.ensureBrowser();
+
+    const imageUrl = this.selectors.imageGeneration.url;
+    const videoUrl = this.selectors.videoGeneration.url;
+    const assetUrl = this.selectors.assetHistory?.url || 'https://higgsfield.ai/asset/all';
+    const cinemaUrl = cinemaProjectId
+      ? `https://higgsfield.ai/cinema-studio?cinematic-project-id=${cinemaProjectId}`
+      : 'https://higgsfield.ai/cinema-studio';
+
+    const context = this.page.context();
+    const tabs = [
+      { label: 'nano-banana-image', url: imageUrl, page: this.page },
+      { label: 'assets-all', url: assetUrl, page: await context.newPage() },
+      { label: 'veo-video', url: videoUrl, page: await context.newPage() },
+      { label: 'cinema-studio', url: cinemaUrl, page: await context.newPage() },
+    ];
+
+    const inspectDir = path.join(this.projectDir || process.cwd(), 'ui-inspection');
+    fs.mkdirSync(inspectDir, { recursive: true });
+
+    const snapshots = [];
+    for (const tab of tabs) {
+      try {
+        await tab.page.goto(tab.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await tab.page.waitForTimeout(2500);
+        const snapshot = await tab.page.evaluate(() => {
+          const visible = (el) => {
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+          };
+          const describe = (el) => {
+            const r = el.getBoundingClientRect();
+            return {
+              tag: el.tagName.toLowerCase(),
+              role: el.getAttribute('role') || '',
+              aria: el.getAttribute('aria-label') || '',
+              text: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 160),
+              value: el.value || '',
+              checked: typeof el.checked === 'boolean' ? el.checked : null,
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+            };
+          };
+          const controls = [...document.querySelectorAll('button, select, input, textarea, [role="button"], [role="textbox"], [contenteditable="true"]')]
+            .filter(visible)
+            .map(describe)
+            .slice(0, 250);
+          return {
+            title: document.title,
+            url: location.href,
+            controls,
+            bodyText: document.body.innerText.slice(0, 4000),
+          };
+        });
+        const screenshotPath = path.join(inspectDir, `${tab.label}.png`);
+        await tab.page.screenshot({ path: screenshotPath, fullPage: false }).catch(() => {});
+        snapshots.push({ label: tab.label, requestedUrl: tab.url, expectedAspect: aspectRatio, screenshotPath, ...snapshot });
+      } catch (e) {
+        snapshots.push({ label: tab.label, requestedUrl: tab.url, error: e.message });
+      }
+    }
+
+    const snapshotPath = path.join(inspectDir, `higgsfield-ui-snapshot_${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+    fs.writeFileSync(snapshotPath, JSON.stringify({
+      capturedAt: new Date().toISOString(),
+      debugPort: process.env.HIGGSFIELD_DEBUG_PORT || '9223',
+      cinemaProjectId,
+      aspectRatio,
+      tabs: snapshots,
+    }, null, 2));
+    console.log(`[BROWSER] Inspection snapshot written: ${snapshotPath}`);
+    return { snapshotPath, tabs: snapshots.map(t => ({ label: t.label, url: t.url || t.requestedUrl, error: t.error || null, screenshotPath: t.screenshotPath || null })) };
   }
 
   async generateImage({ prompt, outputPath, references = [], useUnlimited = true, aspectRatio = '16:9', referenceCdnUrl = '', onGenClicked = null, referenceUploadWarmupMs = 0, referenceUploadAllowAnyInput = false, requireAssetPromptMatchBeforeDownload = false, promptMatchMinSimilarity = 80, promptMatchMaxTilesToCheck = 8, promptMatchTimeoutMs = 90000 }) {
@@ -728,6 +821,136 @@ class HiggsFieldAutomation {
       // Fix: select → verify value → if mismatch, dispatch React-friendly events
       // and retry up to 3 times. Log the final DOM value so we can audit in
       // post-mortem if an unexpected aspect still slips through.
+      const readVisibleImageSettings = async () => page.evaluate(() => {
+        const ratios = new Set(['auto', '1:1', '3:4', '4:3', '2:3', '3:2', '9:16', '16:9', '5:4', '4:5', '21:9']);
+        const visible = [...document.querySelectorAll('button')].map((b) => {
+          const r = b.getBoundingClientRect();
+          const text = (b.textContent || '').trim().replace(/\s+/g, ' ');
+          return { text, x: r.x, y: r.y, width: r.width, height: r.height };
+        }).filter(b => b.width > 0 && b.height > 0 && b.y > window.innerHeight * 0.45);
+        let aspect = null;
+        let resolution = null;
+        for (const b of visible) {
+          if (!aspect && ratios.has(b.text.toLowerCase())) aspect = b.text;
+          if (!resolution && /^[1248]k$/i.test(b.text)) resolution = b.text.toUpperCase();
+        }
+        return { aspect, resolution, buttons: visible.map(b => b.text).filter(Boolean).slice(0, 30) };
+      }).catch(() => ({ aspect: null, resolution: null, buttons: [] }));
+
+      const setNativeSelectValue = async (selector, index, value) => {
+        const selects = await page.$$(selector);
+        const target = selects[index];
+        if (!target) return false;
+        await target.selectOption(value).catch(() => {});
+        await target.evaluate((el, val) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+          if (setter) setter.call(el, val);
+          else el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, value).catch(() => {});
+        await page.waitForTimeout(350);
+        const actual = await target.evaluate((el) => el.value).catch(() => null);
+        return String(actual || '').toLowerCase() === String(value || '').toLowerCase();
+      };
+
+      const setVisibleImageDropdown = async ({ kind, targetLabel }) => {
+        const target = String(targetLabel || '').trim();
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(150);
+        const controlClick = await page.evaluate(({ kind }) => {
+          const ratioPattern = /^(?:Auto|1:1|3:4|4:3|2:3|3:2|9:16|16:9|5:4|4:5|21:9)$/i;
+          const resolutionPattern = /^[1248]K$/i;
+          const candidates = [];
+          for (const b of document.querySelectorAll('button')) {
+            const r = b.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0 || r.y < window.innerHeight * 0.45) continue;
+            const text = (b.textContent || '').trim().replace(/\s+/g, ' ');
+            if (!text) continue;
+            const matches = kind === 'aspect' ? ratioPattern.test(text) : resolutionPattern.test(text);
+            if (matches) candidates.push({ el: b, text, x: r.x, y: r.y, width: r.width, height: r.height });
+          }
+          candidates.sort((a, b) => b.y - a.y || a.x - b.x);
+          const picked = candidates[0];
+          if (!picked) return { clicked: false, reason: 'control-not-found', candidates: [] };
+          picked.el.click();
+          return { clicked: true, text: picked.text, x: Math.round(picked.x), y: Math.round(picked.y), candidates: candidates.map(c => c.text) };
+        }, { kind }).catch(e => ({ clicked: false, reason: e.message, candidates: [] }));
+
+        if (!controlClick.clicked) {
+          console.warn(`[IMG] ${kind} visible control not found (${controlClick.reason || 'unknown'}), candidates=${JSON.stringify(controlClick.candidates || [])}`);
+          return false;
+        }
+        console.log(`[IMG] ${kind} control clicked: "${controlClick.text}" at (${controlClick.x}, ${controlClick.y})`);
+        await page.waitForTimeout(500);
+
+        const optionClick = await page.evaluate(({ target, controlY, kind }) => {
+          const matches = [];
+          for (const el of document.querySelectorAll('button, div, span, li, [role="option"], [role="menuitem"], label')) {
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) continue;
+            const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+            const textUpper = text.toUpperCase();
+            const targetUpper = target.toUpperCase();
+            const isTarget = text === target || (kind === 'resolution' && textUpper.startsWith(targetUpper));
+            if (!isTarget) continue;
+            if (controlY && Math.abs(r.y - controlY) < 18) continue;
+            if (r.y < window.innerHeight * 0.15) continue;
+            matches.push({ el, text, x: r.x, y: r.y, width: r.width, height: r.height });
+          }
+          matches.sort((a, b) => a.y - b.y || a.x - b.x);
+          const picked = matches[0];
+          if (!picked) return { clicked: false, target };
+          picked.el.click();
+          return { clicked: true, text: picked.text, x: Math.round(picked.x), y: Math.round(picked.y) };
+        }, { target, controlY: controlClick.y, kind }).catch(e => ({ clicked: false, reason: e.message }));
+
+        if (!optionClick.clicked) {
+          console.warn(`[IMG] ${kind} option "${target}" not found in visible dropdown`);
+          await page.keyboard.press('Escape').catch(() => {});
+          return false;
+        }
+        console.log(`[IMG] ${kind} option selected: "${optionClick.text}" at (${optionClick.x}, ${optionClick.y})`);
+        await page.waitForTimeout(500);
+        return true;
+      };
+
+      const ensureImageAspect = async (targetAspect) => {
+        if (await setNativeSelectValue(sel.aspectRatioSelect, sel.aspectRatioSelectIndex || 0, targetAspect)) return true;
+        console.log(`[IMG] Native aspect <select> unavailable or not confirmed - using visible aspect menu for ${targetAspect}`);
+        await setVisibleImageDropdown({ kind: 'aspect', targetLabel: targetAspect });
+        const state = await readVisibleImageSettings();
+        const ok = state.aspect === targetAspect;
+        if (!ok) console.warn(`[IMG] Visible aspect confirm failed: got ${state.aspect || 'unknown'}, buttons=${JSON.stringify(state.buttons)}`);
+        return ok;
+      };
+
+      const ensureImageResolution = async (targetResolutionValue) => {
+        const targetLabel = String(targetResolutionValue || '').toUpperCase();
+        if (await setNativeSelectValue(sel.resolutionSelect, sel.resolutionSelectIndex || 1, targetResolutionValue)) return true;
+        console.log(`[IMG] Native resolution <select> unavailable or not confirmed - using visible resolution menu for ${targetLabel}`);
+        await setVisibleImageDropdown({ kind: 'resolution', targetLabel });
+        const state = await readVisibleImageSettings();
+        const ok = String(state.resolution || '').toUpperCase() === targetLabel;
+        if (!ok) console.warn(`[IMG] Visible resolution confirm failed: got ${state.resolution || 'unknown'}, buttons=${JSON.stringify(state.buttons)}`);
+        return ok;
+      };
+
+      let imageSettingsConfigured = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const aspectOk = await ensureImageAspect(_aspect);
+        const resolutionOk = await ensureImageResolution(sel.resolutionValue);
+        if (aspectOk && resolutionOk) {
+          console.log(`[IMG] Image settings confirmed via adaptive controls (aspect=${_aspect}, resolution=${String(sel.resolutionValue).toUpperCase()}, attempt ${attempt})`);
+          imageSettingsConfigured = true;
+          break;
+        }
+        console.warn(`[IMG] Adaptive image settings attempt ${attempt} incomplete (aspectOk=${aspectOk}, resolutionOk=${resolutionOk})`);
+      }
+
+      if (!imageSettingsConfigured) {
+        console.warn('[IMG] Adaptive image settings failed — falling back to legacy native <select> path');
+
       console.log(`[IMG] Setting aspect ratio to ${_aspect}...`);
       const aspectSelectIdx = sel.aspectRatioSelectIndex || 0;
       let aspectSetOk = false;
@@ -816,6 +1039,8 @@ class HiggsFieldAutomation {
       }
       if (!resolutionSetOk) {
         throw new Error(`[PRE-GEN] IMAGE_SETTINGS_MISMATCH: resolution ${sel.resolutionValue} could not be confirmed before Generate. Refusing to submit image generation.`);
+      }
+
       }
 
       // Toggle Unlimited mode based on throttle state
@@ -1019,24 +1244,11 @@ class HiggsFieldAutomation {
       // controls after initial setup. Re-read immediately before enabling/clicking
       // Generate, and hard-fail if the form no longer matches the requested spec.
       {
-        const readFinalImageSettings = () => page.evaluate(({ aspectSelector, aspectIndex, resolutionSelector, resolutionIndex }) => {
-          const aspectSelects = Array.from(document.querySelectorAll(aspectSelector));
-          const resolutionSelects = Array.from(document.querySelectorAll(resolutionSelector));
-          return {
-            aspect: aspectSelects[aspectIndex]?.value || null,
-            resolution: resolutionSelects[resolutionIndex]?.value || null,
-          };
-        }, {
-          aspectSelector: sel.aspectRatioSelect,
-          aspectIndex: sel.aspectRatioSelectIndex || 0,
-          resolutionSelector: sel.resolutionSelect,
-          resolutionIndex: sel.resolutionSelectIndex || 1,
-        }).catch(() => ({ aspect: null, resolution: null }));
-
-        let finalSettings = await readFinalImageSettings();
+        const targetResolutionLabel = String(sel.resolutionValue || '').toUpperCase();
+        let finalSettings = await readVisibleImageSettings();
 
         let aspectOk = finalSettings.aspect === _aspect;
-        let resolutionOk = String(finalSettings.resolution || '').toLowerCase() === String(sel.resolutionValue || '').toLowerCase();
+        let resolutionOk = String(finalSettings.resolution || '').toUpperCase() === targetResolutionLabel;
         if (!aspectOk || !resolutionOk) {
           console.warn(
             `[IMG] PRE-GEN GATE: image settings drifted before Generate ` +
@@ -1044,47 +1256,20 @@ class HiggsFieldAutomation {
             `resolution=${finalSettings.resolution || 'unknown'} need ${sel.resolutionValue}) — re-setting now`
           );
 
-          if (!aspectOk) {
-            const aspectSelects = await page.$$(sel.aspectRatioSelect);
-            const aspectTarget = aspectSelects[sel.aspectRatioSelectIndex || 0];
-            if (aspectTarget) {
-              await aspectTarget.selectOption(_aspect).catch(() => {});
-              await aspectTarget.evaluate((el, val) => {
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
-                if (setter) setter.call(el, val);
-                else el.value = val;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-              }, _aspect).catch(() => {});
-            }
-          }
-
-          if (!resolutionOk) {
-            const resolutionSelects = await page.$$(sel.resolutionSelect);
-            const resolutionTarget = resolutionSelects[sel.resolutionSelectIndex || 1];
-            if (resolutionTarget) {
-              await resolutionTarget.selectOption(sel.resolutionValue).catch(() => {});
-              await resolutionTarget.evaluate((el, val) => {
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
-                if (setter) setter.call(el, val);
-                else el.value = val;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-              }, sel.resolutionValue).catch(() => {});
-            }
-          }
+          if (!aspectOk) aspectOk = await ensureImageAspect(_aspect);
+          if (!resolutionOk) resolutionOk = await ensureImageResolution(sel.resolutionValue);
 
           await page.waitForTimeout(500);
-          finalSettings = await readFinalImageSettings();
+          finalSettings = await readVisibleImageSettings();
           aspectOk = finalSettings.aspect === _aspect;
-          resolutionOk = String(finalSettings.resolution || '').toLowerCase() === String(sel.resolutionValue || '').toLowerCase();
+          resolutionOk = String(finalSettings.resolution || '').toUpperCase() === targetResolutionLabel;
         }
 
         if (!aspectOk || !resolutionOk) {
           throw new Error(
             `[PRE-GEN] IMAGE_SETTINGS_MISMATCH: final image settings wrong before Generate ` +
             `(aspect=${finalSettings.aspect || 'unknown'} need ${_aspect}, ` +
-            `resolution=${finalSettings.resolution || 'unknown'} need ${sel.resolutionValue}). Refusing to submit.`
+            `resolution=${finalSettings.resolution || 'unknown'} need ${targetResolutionLabel}). Refusing to submit.`
           );
         }
         console.log(`[IMG] PRE-GEN GATE: image settings verified (aspect=${finalSettings.aspect}, resolution=${finalSettings.resolution})`);
@@ -1259,9 +1444,20 @@ class HiggsFieldAutomation {
           // and get written to DB, causing the wrong portrait to be downloaded
           // on the next restart.
           delete err.detectedCdnUrl;
+          err.retryableProviderMiss = true;
+          err.generationSubmitted = true;
+          err.recoveryAttempted = true;
+          err.recoveryMatched = false;
+          err.outputPathExists = fs.existsSync(outputPath);
           console.warn('[IMG] Last-chance recovery found no match — cleared detectedCdnUrl, throwing original timeout error');
         } catch (recoveryErr) {
           delete err.detectedCdnUrl;
+          err.retryableProviderMiss = true;
+          err.generationSubmitted = true;
+          err.recoveryAttempted = true;
+          err.recoveryMatched = false;
+          err.recoveryError = recoveryErr.message;
+          err.outputPathExists = fs.existsSync(outputPath);
           console.warn(`[IMG] Last-chance recovery failed: ${recoveryErr.message} — cleared detectedCdnUrl, throwing original timeout error`);
         }
       }
