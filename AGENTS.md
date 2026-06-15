@@ -763,12 +763,12 @@ Implementation is gated behind explicit green-light. Estimated 20-25 hours acros
 
 ## Aspect Ratio (Session 8)
 
-Each project has a single `aspect_ratio` column (migration 007), chosen at Start Research time and **locked once generation begins** (setter throws if any project_assets rows exist). MVP supports `16:9` (YouTube long-form, default) and `9:16` (Shorts / TikTok / Reels). Portraits are always 1:1 regardless of project aspect.
+Each project has a single `aspect_ratio` column (migration 007), chosen at Start Research time and **locked once generation begins** (setter throws if any project_assets rows exist). MVP supports `16:9` (YouTube long-form, default) and `9:16` (Shorts / TikTok / Reels). Portrait and outfit-portrait image generations follow the project/global aspect ratio unless a stage explicitly documents an override.
 
 **How it threads through the pipeline:**
 
 - **UI:** Aspect dropdown sits next to the Duration dropdown on both pool + fresh-start cards. Resume card shows a badge (e.g. "18/18 assets complete · 9:16 (vertical)")
-- **Automation (image):** `generateImage({..., aspectRatio})` — the Nano Banana Pro page has a native `<select>` (12 options, wrapped in a custom dark popup). `selectOption()` is the whole story; no popup-click dance.
+- **Automation (image):** `generateImage({..., aspectRatio})` — the Nano Banana Pro page has a native `<select>` (12 options, wrapped in a custom dark popup). The caller-supplied `aspectRatio` is authoritative for portraits, outfit portraits, and scenes; it comes from the project/global aspect ratio chosen at project start unless a specific stage intentionally overrides it. Image automation must hard-fail before Generate if aspect or resolution cannot be confirmed.
 - **Automation (video):** `generateVideo({..., aspectRatio})` — Veo 3.1 Lite page ALSO has a native `<select>` behind its chip UI (confirmed via DevTools). Replaces the older fragile `setVideoDropdownOption('Ratio', ...)` button path; that helper remains only as a fallback.
 - **Dedup:** `findExistingGeneration(prompt, type, aspectRatio)` now JOINs `projects.aspect_ratio` — a 16:9 scene cannot reuse a 9:16 scene with the same prompt, even across projects.
 - **Script prompt:** `{{ASPECT_FRAMING_GUIDANCE}}` injects a vertical-framing clause for 9:16 projects (single-character framing, avoid wide establishing shots, medium-close bias). 16:9 gets a passthrough (no restrictions).

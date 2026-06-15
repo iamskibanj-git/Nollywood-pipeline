@@ -715,7 +715,7 @@ class HiggsFieldAutomation {
         console.log('[IMG] No references provided for this generation');
       }
 
-      // Set aspect ratio — dynamic, driven by caller (portraits=1:1, scenes=project aspect).
+      // Set aspect ratio — dynamic, driven by caller (project/global aspect for portraits/scenes unless explicitly overridden).
       //
       // Hardening rationale: a prior run produced mixed aspects (9:16, 9:16, 16:9)
       // for 3 consecutive location gens when the project was set to 9:16. Root cause
@@ -772,15 +772,50 @@ class HiggsFieldAutomation {
         }
       }
       if (!aspectSetOk) {
-        console.warn(`[IMG] WARNING: aspect ratio ${_aspect} could not be confirmed on <select>. Higgsfield may use its default — generation will proceed but output aspect may not match.`);
+        throw new Error(`[PRE-GEN] IMAGE_SETTINGS_MISMATCH: aspect ratio ${_aspect} could not be confirmed before Generate. Refusing to submit image generation.`);
       }
 
       // Set resolution to 2K
       console.log('[IMG] Setting resolution to 2K...');
       const resSelects = await page.$$(sel.resolutionSelect);
-      if (resSelects[sel.resolutionSelectIndex || 1]) {
-        await resSelects[sel.resolutionSelectIndex || 1].selectOption(sel.resolutionValue);
+      const resTarget = resSelects[sel.resolutionSelectIndex || 1];
+      if (!resTarget) {
+        throw new Error('[PRE-GEN] IMAGE_SETTINGS_MISMATCH: resolution selector missing before Generate. Refusing to submit image generation.');
+      }
+      let resolutionSetOk = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await resTarget.selectOption(sel.resolutionValue);
+        } catch (e) {
+          console.warn(`[IMG] resolution selectOption failed on attempt ${attempt}: ${e.message}`);
+        }
         await page.waitForTimeout(300);
+        const actualResolution = await resTarget.evaluate((el) => el.value).catch(() => null);
+        if (String(actualResolution || '').toLowerCase() === String(sel.resolutionValue || '').toLowerCase()) {
+          console.log(`[IMG] Resolution confirmed ${sel.resolutionValue} (attempt ${attempt})`);
+          resolutionSetOk = true;
+          break;
+        }
+        console.warn(`[IMG] Resolution mismatch after attempt ${attempt}: wanted ${sel.resolutionValue}, got ${actualResolution}. Retrying with React-friendly events...`);
+        await resTarget.evaluate((el, val) => {
+          const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLSelectElement.prototype, 'value'
+          )?.set;
+          if (setter) setter.call(el, val);
+          else el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, sel.resolutionValue).catch(() => {});
+        await page.waitForTimeout(400);
+        const afterDispatch = await resTarget.evaluate((el) => el.value).catch(() => null);
+        if (String(afterDispatch || '').toLowerCase() === String(sel.resolutionValue || '').toLowerCase()) {
+          console.log(`[IMG] Resolution confirmed ${sel.resolutionValue} via event dispatch (attempt ${attempt})`);
+          resolutionSetOk = true;
+          break;
+        }
+      }
+      if (!resolutionSetOk) {
+        throw new Error(`[PRE-GEN] IMAGE_SETTINGS_MISMATCH: resolution ${sel.resolutionValue} could not be confirmed before Generate. Refusing to submit image generation.`);
       }
 
       // Toggle Unlimited mode based on throttle state
@@ -978,6 +1013,81 @@ class HiggsFieldAutomation {
         }
       } else {
         console.log(`[IMG] PRE-GEN GATE: Prompt verified (${finalStripped.length} chars) — ready to Generate`);
+      }
+
+      // Final settings gate: references, toggles, or React re-renders can drift
+      // controls after initial setup. Re-read immediately before enabling/clicking
+      // Generate, and hard-fail if the form no longer matches the requested spec.
+      {
+        const readFinalImageSettings = () => page.evaluate(({ aspectSelector, aspectIndex, resolutionSelector, resolutionIndex }) => {
+          const aspectSelects = Array.from(document.querySelectorAll(aspectSelector));
+          const resolutionSelects = Array.from(document.querySelectorAll(resolutionSelector));
+          return {
+            aspect: aspectSelects[aspectIndex]?.value || null,
+            resolution: resolutionSelects[resolutionIndex]?.value || null,
+          };
+        }, {
+          aspectSelector: sel.aspectRatioSelect,
+          aspectIndex: sel.aspectRatioSelectIndex || 0,
+          resolutionSelector: sel.resolutionSelect,
+          resolutionIndex: sel.resolutionSelectIndex || 1,
+        }).catch(() => ({ aspect: null, resolution: null }));
+
+        let finalSettings = await readFinalImageSettings();
+
+        let aspectOk = finalSettings.aspect === _aspect;
+        let resolutionOk = String(finalSettings.resolution || '').toLowerCase() === String(sel.resolutionValue || '').toLowerCase();
+        if (!aspectOk || !resolutionOk) {
+          console.warn(
+            `[IMG] PRE-GEN GATE: image settings drifted before Generate ` +
+            `(aspect=${finalSettings.aspect || 'unknown'} need ${_aspect}, ` +
+            `resolution=${finalSettings.resolution || 'unknown'} need ${sel.resolutionValue}) — re-setting now`
+          );
+
+          if (!aspectOk) {
+            const aspectSelects = await page.$$(sel.aspectRatioSelect);
+            const aspectTarget = aspectSelects[sel.aspectRatioSelectIndex || 0];
+            if (aspectTarget) {
+              await aspectTarget.selectOption(_aspect).catch(() => {});
+              await aspectTarget.evaluate((el, val) => {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+                if (setter) setter.call(el, val);
+                else el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              }, _aspect).catch(() => {});
+            }
+          }
+
+          if (!resolutionOk) {
+            const resolutionSelects = await page.$$(sel.resolutionSelect);
+            const resolutionTarget = resolutionSelects[sel.resolutionSelectIndex || 1];
+            if (resolutionTarget) {
+              await resolutionTarget.selectOption(sel.resolutionValue).catch(() => {});
+              await resolutionTarget.evaluate((el, val) => {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+                if (setter) setter.call(el, val);
+                else el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              }, sel.resolutionValue).catch(() => {});
+            }
+          }
+
+          await page.waitForTimeout(500);
+          finalSettings = await readFinalImageSettings();
+          aspectOk = finalSettings.aspect === _aspect;
+          resolutionOk = String(finalSettings.resolution || '').toLowerCase() === String(sel.resolutionValue || '').toLowerCase();
+        }
+
+        if (!aspectOk || !resolutionOk) {
+          throw new Error(
+            `[PRE-GEN] IMAGE_SETTINGS_MISMATCH: final image settings wrong before Generate ` +
+            `(aspect=${finalSettings.aspect || 'unknown'} need ${_aspect}, ` +
+            `resolution=${finalSettings.resolution || 'unknown'} need ${sel.resolutionValue}). Refusing to submit.`
+          );
+        }
+        console.log(`[IMG] PRE-GEN GATE: image settings verified (aspect=${finalSettings.aspect}, resolution=${finalSettings.resolution})`);
       }
 
       // ── RE-ENABLE GENERATE BUTTON — typing is done, ready for intentional click ──
