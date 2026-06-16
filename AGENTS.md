@@ -3835,6 +3835,8 @@ Normalize scraped names by extracting the `@name`, stripping leading `@`, and re
 
 The composer `@name` autocomplete path is currently not reliable as an existence gate. In live testing, Image mode + Cinematic Cameras accepted typed text into the Lexical prompt and opened a tiny `[role=listbox]`, but the listbox stayed empty even though the element existed. Use the Elements modal/list scrape as the source of truth for "element exists"; keep composer mention checks diagnostic only.
 
+Important distinction: this limitation applies only to the pre-flight existence/listing gate. Actual scene-image and video prompt construction still must resolve character/location references through Higgsfield's `@` autocomplete so the prompt receives real element reference chips/UUIDs. The current prompt typing code intentionally types `@`, pauses, then types the full element name slowly and hard-fails if the exact autocomplete option cannot be selected. Do not replace generation prompt `@` references with plain text.
+
 Higgsfield can render duplicate overlapping image composers/toolbars at the same Y coordinate. One row may be the active Cinematic Cameras row while a stale row still shows controls such as `Soul 2.0`, `3:4`, `2k`, `Color transfer`. Toolbar state reads must not mix the active model from one row with aspect/resolution/grid from the stale row. Read aspect/resolution/grid only from controls to the right of the selected active model button. Live verification after the fix:
 ```text
 _readToolbarState() -> image, cinematic-cameras, 16:9, 2K, 1x1, cost 2
@@ -3849,3 +3851,20 @@ scraped exactly: codex_elem_test_0615
 elementExists('codex_elem_test_0615') === true
 modal closed afterward
 ```
+
+Live reference-image upload check for Cinema Studio image generation:
+```text
+Current coded path: + reference picker -> Uploads tab -> visible Upload media DOM click
+Result: filechooser timeout; visible tile click did not fire a chooser
+
+Hidden file input fallback test:
+input[type=file] accept=image/jpeg,image/jpg,image/png,image/webp,image/heic,image/heif
+setInputFiles(local image) produced backend proof:
+POST /media/batch 200
+PUT CloudFront/S3 200
+POST /media/<id>/upload 200
+new uploaded tile appeared
+clicking the new tile showed "Added to prompt box"
+_checkSceneReferenceAttached() -> { attached: true, method: "img-left-of-textbox" }
+```
+If patching this path, prefer the visible trusted-click/filechooser path first when it works, then fall back to the hidden image file input only when it produces backend upload proof and a selectable new tile. Do not continue to Generate without both backend proof and `_checkSceneReferenceAttached()`.

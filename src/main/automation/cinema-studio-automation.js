@@ -2759,6 +2759,12 @@ class CinemaStudioAutomation {
     }
     await page.waitForTimeout(1500);
 
+    const preUploadImageSrcs = await page.evaluate(() => {
+      return [...document.querySelectorAll('img')]
+        .map((img) => img.currentSrc || img.src || '')
+        .filter(Boolean);
+    }).catch(() => []);
+
     // ── Step 4: Upload via fileChooser ─────────────────────────────────
     try {
       const [fileChooser] = await Promise.all([
@@ -2814,9 +2820,17 @@ class CinemaStudioAutomation {
         return { visibleElements: allText.slice(0, 20), fileInputs };
       }).catch(() => ({ error: 'evaluate failed' }));
       this.log(`[REF] Upload FAILED — page state: ${JSON.stringify(failState)}`);
-      await page.keyboard.press('Escape').catch(() => {});
-      detachUploadListener();
-      throw new Error(`HARD STOP: Upload failed — ${e.message.split('\n')[0]}`);
+
+      const fallbackResult = await this._uploadReferenceViaHiddenImageInput(localPath).catch((fallbackError) => ({
+        ok: false,
+        reason: fallbackError.message,
+      }));
+      if (!fallbackResult.ok) {
+        await page.keyboard.press('Escape').catch(() => {});
+        detachUploadListener();
+        throw new Error(`HARD STOP: Upload failed — ${e.message.split('\n')[0]}; hidden input fallback: ${fallbackResult.reason}`);
+      }
+      this.log(`[REF] Hidden file input fallback accepted file: ${JSON.stringify(fallbackResult)}`);
     }
 
     // ── Step 5: Wait for upload to process ────────────────────────────
@@ -2865,6 +2879,13 @@ class CinemaStudioAutomation {
     await page.waitForTimeout(2000);
 
     // ── Step 6: Dismiss picker ────────────────────────────────────────
+    const selectedUploadedTile = await this._selectNewlyUploadedReferenceTile(preUploadImageSrcs);
+    if (!selectedUploadedTile.ok) {
+      detachUploadListener();
+      throw new Error(`START_FRAME_UPLOAD_NOT_SELECTABLE: ${selectedUploadedTile.reason}`);
+    }
+    this.log(`[REF] Selected uploaded reference tile: ${JSON.stringify(selectedUploadedTile)}`);
+
     const tbClicked = await page.evaluate(() => {
       const tb = document.querySelector('[role="textbox"]');
       if (tb) { tb.click(); return true; }
@@ -2920,7 +2941,87 @@ class CinemaStudioAutomation {
   // ═══════════════════════════════════════════════════════════
   // ASPECT RATIO
   // ═══════════════════════════════════════════════════════════
+  async _uploadReferenceViaHiddenImageInput(localPath) {
+    const page = this._ensurePageAlive();
+    const inputs = page.locator('input[type="file"]');
+    const count = await inputs.count().catch(() => 0);
+    const attempts = [];
 
+    for (let i = count - 1; i >= 0; i--) {
+      const input = inputs.nth(i);
+      const accept = await input.getAttribute('accept').catch(() => '');
+      const isImageInput = !accept ||
+        /image/i.test(accept) ||
+        /\.(jpg|jpeg|png|webp|heic|heif)/i.test(accept) ||
+        /image\/(jpeg|jpg|png|webp|heic|heif)/i.test(accept);
+      attempts.push({ index: i, accept: accept || '', image: isImageInput });
+      if (!isImageInput) continue;
+
+      await input.setInputFiles(localPath);
+      await page.waitForTimeout(2000);
+      return { ok: true, index: i, accept: accept || '', attempts };
+    }
+
+    return { ok: false, reason: `no image file input found (${JSON.stringify(attempts)})`, attempts };
+  }
+
+  async _selectNewlyUploadedReferenceTile(preUploadImageSrcs = []) {
+    const page = this._ensurePageAlive();
+    const before = new Set(preUploadImageSrcs || []);
+
+    const tile = await page.evaluate((beforeList) => {
+      const beforeSrcs = new Set(beforeList || []);
+      const images = [...document.querySelectorAll('img')]
+        .map((img) => {
+          const r = img.getBoundingClientRect();
+          const src = img.currentSrc || img.src || '';
+          return {
+            src,
+            cx: r.x + r.width / 2,
+            cy: r.y + r.height / 2,
+            x: r.x,
+            y: r.y,
+            w: r.width,
+            h: r.height,
+            isNew: !!src && !beforeSrcs.has(src),
+          };
+        })
+        .filter((img) =>
+          img.isNew &&
+          img.w >= 60 &&
+          img.h >= 60 &&
+          img.x > 300 &&
+          img.y > 50 &&
+          img.y < window.innerHeight * 0.85
+        )
+        .sort((a, b) => a.y - b.y || a.x - b.x);
+
+      const chosen = images[0];
+      if (!chosen) return { ok: false, reason: 'no new uploaded image tile found' };
+      return {
+        ok: true,
+        cx: Math.round(chosen.cx),
+        cy: Math.round(chosen.cy),
+        x: Math.round(chosen.x),
+        y: Math.round(chosen.y),
+        w: Math.round(chosen.w),
+        h: Math.round(chosen.h),
+        srcHint: chosen.src.slice(0, 120),
+      };
+    }, [...before]).catch((e) => ({ ok: false, reason: e.message }));
+
+    if (!tile.ok) return tile;
+
+    await page.mouse.click(tile.cx, tile.cy);
+    await page.waitForTimeout(1500);
+
+    const selected = await page.evaluate(() => {
+      const body = document.body.innerText || '';
+      return body.includes('Added to prompt box') || body.includes('Added');
+    }).catch(() => false);
+
+    return { ...tile, selected };
+  }
 
   async _setAspectRatio(targetAspect) {
     const page = this._ensurePageAlive();
