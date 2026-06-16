@@ -313,7 +313,7 @@ TASK: Verify the location image.
 4. MOOD_SETTING — Does the atmosphere, lighting, and mood feel right for the described location? (time of day, indoor/outdoor, color warmth)
 5. COMPOSITION — Is the image well-composed as a background reference? (good framing, appropriate depth, usable as a scene backdrop)
 6. UPRIGHT_ORIENTATION — Is the visual content upright? The road/ground should be horizontal, buildings/trees should stand vertically, and any readable signage/text should not be sideways or upside down. If the scene content appears rotated 90 degrees, sideways, or upside down, this is a CRITICAL failure even when the file canvas dimensions are correct.
-7. COHERENT_SINGLE_SPACE — Does the image depict one coherent location? Fail if the frame is visibly split into unrelated spaces, such as an office on one side and a home interior on the other, or if a hard vertical seam divides two different environments.
+7. COHERENT_SINGLE_SPACE — Does the image depict one coherent location? Fail if the frame is visibly split into unrelated spaces, such as an office on one side and a home interior on the other, an indoor police station stacked above an exterior street scene, or if a hard vertical/horizontal seam divides two different environments.
 
 OUTPUT FORMAT (JSON only):
 {
@@ -324,13 +324,13 @@ OUTPUT FORMAT (JSON only):
     "mood_setting": { "score": 0-100, "note": "" },
     "composition": { "score": 0-100, "note": "" },
     "upright_orientation": { "score": 0-100, "note": "100 if upright; below 70 if rotated/sideways/upside down" },
-    "coherent_single_space": { "score": 0-100, "note": "100 if one coherent space; below 70 if split into unrelated rooms/settings" }
+    "coherent_single_space": { "score": 0-100, "note": "100 if one coherent space; below 70 if split into unrelated rooms/settings or indoor/exterior panels" }
   },
-  "critical_issues": ["e.g. 'person visible in background', 'scene content is rotated 90 degrees/sideways', 'image is split between office and home interior', 'CNN on TV screen — should be Nigerian channel', 'European portraits on wall'"],
+  "critical_issues": ["e.g. 'person visible in background', 'scene content is rotated 90 degrees/sideways', 'image is split between office and home interior', 'image is split between police station interior and exterior street', 'CNN on TV screen — should be Nigerian channel', 'European portraits on wall'"],
   "minor_issues": ["e.g. 'slightly different lighting than expected', 'missing some described details'"]
 }
 
-NO_PEOPLE, UPRIGHT_ORIENTATION, COHERENT_SINGLE_SPACE, and CULTURAL_AUTHENTICITY are the highest priorities. Any human figure = score 0 for no_people. Any sideways/rotated/upside-down scene content = score below 70 for upright_orientation. Any hard split between unrelated locations = score below 70 for coherent_single_space. Any clearly foreign/Western cultural marker in a non-Western setting = score below 40 for cultural_authenticity.
+NO_PEOPLE, UPRIGHT_ORIENTATION, COHERENT_SINGLE_SPACE, and CULTURAL_AUTHENTICITY are the highest priorities. Any human figure = score 0 for no_people. Any sideways/rotated/upside-down scene content = score below 70 for upright_orientation. Any hard split, collage, or stacked panel layout between unrelated locations or indoor/exterior views = score below 70 for coherent_single_space. Any clearly foreign/Western cultural marker in a non-Western setting = score below 40 for cultural_authenticity.
 
 Output ONLY the JSON.`;
 

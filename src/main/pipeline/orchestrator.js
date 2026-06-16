@@ -22,6 +22,8 @@ const CULTURAL_GROUNDING = {
     interior_markers: 'Nigerian home interior — ankara/aso-oke fabric accents, carved wooden furniture, African sculptures or masks as decor, family photos of Black/African people, local TV (NTA/Channels TV if screen visible), terrazzo or tile floors, ceiling fan.',
     // Workplace-specific markers for offices, law firms, banks, clinics, etc.
     workplace_markers: 'Nigerian professional workplace — tasteful African artwork, framed Nigerian certificates or awards, local newspapers/files, polished desk or reception furniture, subtle ankara/aso-oke accent fabric, Black/African family photo or staff photo if photos are visible. Keep it one coherent workplace, not a home interior.',
+    // Civic/security interiors need indoor institutional cues, not street/exterior cues.
+    civic_markers: 'Nigerian civic/security facility interior — raised service counter or front desk, wooden benches, notice boards, barred service windows where appropriate, fluorescent lighting, painted concrete walls, official Nigerian signage or forms. Keep it one coherent indoor facility, not an exterior street view.',
     // Exterior-specific markers for outdoor scenes
     exterior_markers: 'Nigerian street/exterior — tropical vegetation, concrete/painted buildings, corrugated roofing where appropriate, hand-painted signage, warm dusty light, Lagos/Abuja/Enugu architecture style.',
     // Negative markers — what MUST NOT appear (for verification)
@@ -5341,7 +5343,13 @@ class PipelineOrchestrator {
     // authority. Putting "9:16" or "vertical composition" in the prompt confuses
     // the model into composing landscape content rotated into a portrait canvas.
     const loc = location || 'a setting';
-    const details = locationDetails || '';
+    const details = String(locationDetails || '')
+      .replace(/\bcrowded\b/gi, 'empty')
+      .replace(/\bofficers?\s+in\s+uniform\s+behind\s+a\s+raised\s+counter\b/gi, 'empty raised service counter with police notices')
+      .replace(/\b(?:officers?|staff|customers?|patients?|worshippers?|guards?|visitors?|clerks?|workers?)\b[^,.]*(?=,|\.|$)/gi, 'empty area')
+      .replace(/\s*,\s*empty area\s*(?=,|\.|$)/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
     // Cultural grounding — anchor to target nationality to prevent Western defaults
     const nationality = 'Nigerian'; // Locked — all Nollywood productions
@@ -5352,9 +5360,12 @@ class PipelineOrchestrator {
       // home-interior grounding, or the model can split the image into two
       // unrelated spaces.
       const locLower = (loc + ' ' + details).toLowerCase();
-      const isWorkplace = /\b(office|law firm|firm|solicitor|solicitors|chamber|chambers|workplace|boardroom|conference room|reception|bank|clinic|hospital|ward|court|courthouse|studio|shop|store|restaurant|bar)\b/i.test(locLower);
-      const isInterior = /\b(room|kitchen|bedroom|living|apartment|flat|house|parlour|parlor|bathroom|corridor|hallway|foyer|study|library|dining|lounge|balcony|church|mosque|cell|prison)\b/i.test(locLower);
-      culturalAnchors = isWorkplace
+      const isCivic = /\b(police|station|front desk|counter|cell|prison|court|courthouse|government|ministry|municipal|civic)\b/i.test(locLower);
+      const isWorkplace = /\b(office|law firm|firm|solicitor|solicitors|chamber|chambers|workplace|boardroom|conference room|reception|bank|clinic|hospital|ward|studio|shop|store|restaurant|bar)\b/i.test(locLower);
+      const isInterior = /\b(interior|room|kitchen|bedroom|living|apartment|flat|house|parlour|parlor|bathroom|corridor|hallway|foyer|study|library|dining|lounge|balcony|church|mosque)\b/i.test(locLower);
+      culturalAnchors = isCivic
+        ? (grounding.civic_markers || grounding.workplace_markers || grounding.interior_markers)
+        : isWorkplace
         ? (grounding.workplace_markers || grounding.interior_markers)
         : (isInterior ? grounding.interior_markers : grounding.exterior_markers);
     }
