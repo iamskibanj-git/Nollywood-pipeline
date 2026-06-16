@@ -827,6 +827,7 @@ class HiggsfieldElements {
       await this._closeCreationForm(page);
       throw new Error(`Element form has only ${previewCount} image preview(s); expected at least 2`);
     }
+    this.log(`Element form has ${previewCount}/${uploadImagePaths.length} required image previews confirmed before Create`);
 
     await this._clickCurrentElementCreate(page);
     const created = await this._waitForCurrentElementCreated(page, normalized);
@@ -967,31 +968,122 @@ class HiggsfieldElements {
     if (!(await this._waitForElementPreviewCount(page, before + 1, 30000))) {
       throw new Error(`Image ${index + 1}/${total} was not attached to element form`);
     }
+    this.log(`Element image ${index + 1}/${total} attached; previews=${before + 1}+`);
   }
 
   async _openCurrentElementUploadPicker(page) {
-    const target = await page.evaluate(() => {
+    const findTarget = async () => page.evaluate(() => {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
       };
-      return [...document.querySelectorAll('div, button')]
+
+      const dialog = [...document.querySelectorAll('[role="dialog"], div')]
         .map((el) => {
           const r = el.getBoundingClientRect();
           const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-          return { text, cx: r.x + r.width / 2, cy: r.y + Math.min(58, r.height * 0.38), x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
+          return { el, text, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
         })
-        .filter((c) => c.visible && /^Upload media\b/i.test(c.text) && c.x > 500 && c.y > 50 && c.y < 520 && c.w >= 80 && c.h >= 70)
-        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0] || null;
+        .filter((d) =>
+          d.visible &&
+          d.w > 500 &&
+          d.h > 300 &&
+          d.text.includes('New Element') &&
+          d.text.includes('Category') &&
+          d.text.includes('Upload media')
+        )
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0]?.el || document.body;
+
+      return [...dialog.querySelectorAll('div, button, [role="button"], label')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const lower = text.toLowerCase();
+
+          let cx = r.x + r.width / 2;
+          let cy = r.y + Math.min(58, r.height * 0.38);
+          let clickKind = 'upper-center';
+          const innerPlus = [...el.querySelectorAll('button, [role="button"], svg, [class*="plus"], [class*="Plus"]')]
+            .map((child) => {
+              const cr = child.getBoundingClientRect();
+              return {
+                tag: child.tagName.toLowerCase(),
+                x: cr.x,
+                y: cr.y,
+                w: cr.width,
+                h: cr.height,
+                cx: cr.x + cr.width / 2,
+                cy: cr.y + cr.height / 2,
+                text: (child.textContent || '').trim(),
+              };
+            })
+            .filter((c) =>
+              c.w >= 12 && c.h >= 12 &&
+              c.x >= r.x - 2 && c.y >= r.y - 2 &&
+              c.x + c.w <= r.x + r.width + 2 &&
+              c.y + c.h <= r.y + r.height + 2
+            )
+            .sort((a, b) => {
+              const aSvg = a.tag === 'svg' ? 1 : 0;
+              const bSvg = b.tag === 'svg' ? 1 : 0;
+              if (aSvg !== bSvg) return bSvg - aSvg;
+              return (a.w * a.h) - (b.w * b.h);
+            })[0] || null;
+          if (innerPlus) {
+            cx = innerPlus.cx;
+            cy = innerPlus.cy;
+            clickKind = `inner-${innerPlus.tag}`;
+          }
+
+          let score = 0;
+          if (lower.includes('upload media')) score += 100;
+          if (lower.includes('drag') && lower.includes('upload')) score += 80;
+          if (lower.includes('click to upload')) score += 80;
+          if (innerPlus) score += 40;
+          if (r.x > window.innerWidth * 0.42) score += 30;
+          if (r.w > 250 && r.h > 180) score += 20;
+          if (r.y < 120 || r.y > window.innerHeight - 140) score -= 80;
+
+          return { text, cx, cy, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el), score, clickKind };
+        })
+        .filter((c) =>
+          c.visible &&
+          c.score > 0 &&
+          c.x > 250 &&
+          c.y > 80 &&
+          c.y < window.innerHeight - 80 &&
+          c.w >= 80 &&
+          c.h >= 70
+        )
+        .sort((a, b) => b.score - a.score || (b.w * b.h) - (a.w * a.h))[0] || null;
     });
+
+    let target = null;
+    const started = Date.now();
+    let polls = 0;
+    while (Date.now() - started < 30000) {
+      polls++;
+      target = await findTarget();
+      if (target) break;
+      if (polls % 4 === 0) this.log(`Waiting for New Element upload tile (${Math.round((Date.now() - started) / 1000)}s)...`);
+      await page.waitForTimeout(1000);
+    }
     if (!target) throw new Error('Upload media tile not found in element form');
-    await page.mouse.click(target.cx, target.cy);
-    const opened = await page.waitForFunction(() => {
-      const body = document.body.innerText || '';
-      return body.includes('Uploads') && body.includes('Add to Element');
-    }, { timeout: 10000 }).then(() => true).catch(() => false);
-    if (!opened) throw new Error('Upload media picker did not open');
+
+    this.log(`Element upload tile target: "${target.text || '(no text)'}" ${Math.round(target.w)}x${Math.round(target.h)} at (${Math.round(target.cx)}, ${Math.round(target.cy)}), click=${target.clickKind}, score=${target.score}`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await page.mouse.click(target.cx, target.cy);
+      const opened = await page.waitForFunction(() => {
+        const body = document.body.innerText || '';
+        return body.includes('Uploads') && body.includes('Add to Element');
+      }, { timeout: 8000 }).then(() => true).catch(() => false);
+      if (opened) return;
+      this.log(`Upload media picker did not open after tile click ${attempt}/3; retrying...`, 'warn');
+      await page.waitForTimeout(1000);
+      target = await findTarget() || target;
+    }
+    throw new Error('Upload media picker did not open');
   }
 
   async _uploadIntoCurrentElementPicker(page, filePath) {
