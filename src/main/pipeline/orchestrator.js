@@ -20,6 +20,8 @@ const CULTURAL_GROUNDING = {
     prompt_suffix: 'Nigerian setting. African decor, local artwork, warm earth tones. Nigerian cultural elements — no Western/European cultural markers, no foreign TV channels, no European portraits or artwork on walls.',
     // Interior-specific markers for indoor scenes
     interior_markers: 'Nigerian home interior — ankara/aso-oke fabric accents, carved wooden furniture, African sculptures or masks as decor, family photos of Black/African people, local TV (NTA/Channels TV if screen visible), terrazzo or tile floors, ceiling fan.',
+    // Workplace-specific markers for offices, law firms, banks, clinics, etc.
+    workplace_markers: 'Nigerian professional workplace — tasteful African artwork, framed Nigerian certificates or awards, local newspapers/files, polished desk or reception furniture, subtle ankara/aso-oke accent fabric, Black/African family photo or staff photo if photos are visible. Keep it one coherent workplace, not a home interior.',
     // Exterior-specific markers for outdoor scenes
     exterior_markers: 'Nigerian street/exterior — tropical vegetation, concrete/painted buildings, corrugated roofing where appropriate, hand-painted signage, warm dusty light, Lagos/Abuja/Enugu architecture style.',
     // Negative markers — what MUST NOT appear (for verification)
@@ -1347,7 +1349,7 @@ class PipelineOrchestrator {
           // path). The generic resume can't reconstruct this — clear the gate
           // and let the video gen loop re-encounter the clip naturally.
           const PER_CLIP_GATES = ['prompt-preview', 'clip-review'];
-          const RECONSTRUCTIBLE_STAGE_GATES = ['scene-images-ready'];
+          const RECONSTRUCTIBLE_STAGE_GATES = ['elements-ready', 'scene-images-ready'];
 
           // ── STALE GATE CHECK ──
           // If clips have already been generated, earlier gates (scenes, dialogue-triage)
@@ -5346,10 +5348,15 @@ class PipelineOrchestrator {
     const grounding = CULTURAL_GROUNDING[nationality];
     let culturalAnchors = '';
     if (grounding) {
-      // Detect indoor vs outdoor from location text
+      // Detect location subtype. Office/workplace prompts must not receive
+      // home-interior grounding, or the model can split the image into two
+      // unrelated spaces.
       const locLower = (loc + ' ' + details).toLowerCase();
-      const isInterior = /room|kitchen|bedroom|living|office|apartment|flat|house|parlour|parlor|bathroom|corridor|hallway|foyer|study|library|dining|lounge|balcony|studio|shop|store|bar|restaurant|church|mosque|hospital|clinic|ward|cell|prison/i.test(locLower);
-      culturalAnchors = isInterior ? grounding.interior_markers : grounding.exterior_markers;
+      const isWorkplace = /\b(office|law firm|firm|solicitor|solicitors|chamber|chambers|workplace|boardroom|conference room|reception|bank|clinic|hospital|ward|court|courthouse|studio|shop|store|restaurant|bar)\b/i.test(locLower);
+      const isInterior = /\b(room|kitchen|bedroom|living|apartment|flat|house|parlour|parlor|bathroom|corridor|hallway|foyer|study|library|dining|lounge|balcony|church|mosque|cell|prison)\b/i.test(locLower);
+      culturalAnchors = isWorkplace
+        ? (grounding.workplace_markers || grounding.interior_markers)
+        : (isInterior ? grounding.interior_markers : grounding.exterior_markers);
     }
 
     return `${loc}. ${details}. ${culturalAnchors}. Empty — no people, no characters, no figures, no human silhouettes anywhere in frame. Photorealistic cinematic still, natural lighting, shallow depth of field, warm color grade, film grain.`.replace(/\s+/g, ' ').trim();

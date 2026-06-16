@@ -312,6 +312,8 @@ TASK: Verify the location image.
 3. CULTURAL_AUTHENTICITY — Does the image look culturally authentic to the specified setting? Are there any out-of-place elements from a different culture (Western TV channels, European artwork, non-local architecture)? (CRITICAL for immersion)
 4. MOOD_SETTING — Does the atmosphere, lighting, and mood feel right for the described location? (time of day, indoor/outdoor, color warmth)
 5. COMPOSITION — Is the image well-composed as a background reference? (good framing, appropriate depth, usable as a scene backdrop)
+6. UPRIGHT_ORIENTATION — Is the visual content upright? The road/ground should be horizontal, buildings/trees should stand vertically, and any readable signage/text should not be sideways or upside down. If the scene content appears rotated 90 degrees, sideways, or upside down, this is a CRITICAL failure even when the file canvas dimensions are correct.
+7. COHERENT_SINGLE_SPACE — Does the image depict one coherent location? Fail if the frame is visibly split into unrelated spaces, such as an office on one side and a home interior on the other, or if a hard vertical seam divides two different environments.
 
 OUTPUT FORMAT (JSON only):
 {
@@ -320,13 +322,15 @@ OUTPUT FORMAT (JSON only):
     "description_match": { "score": 0-100, "note": "how well it matches the description" },
     "cultural_authenticity": { "score": 0-100, "note": "culturally appropriate? any foreign/out-of-place elements?" },
     "mood_setting": { "score": 0-100, "note": "" },
-    "composition": { "score": 0-100, "note": "" }
+    "composition": { "score": 0-100, "note": "" },
+    "upright_orientation": { "score": 0-100, "note": "100 if upright; below 70 if rotated/sideways/upside down" },
+    "coherent_single_space": { "score": 0-100, "note": "100 if one coherent space; below 70 if split into unrelated rooms/settings" }
   },
-  "critical_issues": ["e.g. 'person visible in background', 'CNN on TV screen — should be Nigerian channel', 'European portraits on wall'"],
+  "critical_issues": ["e.g. 'person visible in background', 'scene content is rotated 90 degrees/sideways', 'image is split between office and home interior', 'CNN on TV screen — should be Nigerian channel', 'European portraits on wall'"],
   "minor_issues": ["e.g. 'slightly different lighting than expected', 'missing some described details'"]
 }
 
-NO_PEOPLE and CULTURAL_AUTHENTICITY are the highest priorities. Any human figure = score 0 for no_people. Any clearly foreign/Western cultural marker in a non-Western setting = score below 40 for cultural_authenticity.
+NO_PEOPLE, UPRIGHT_ORIENTATION, COHERENT_SINGLE_SPACE, and CULTURAL_AUTHENTICITY are the highest priorities. Any human figure = score 0 for no_people. Any sideways/rotated/upside-down scene content = score below 70 for upright_orientation. Any hard split between unrelated locations = score below 70 for coherent_single_space. Any clearly foreign/Western cultural marker in a non-Western setting = score below 40 for cultural_authenticity.
 
 Output ONLY the JSON.`;
 
@@ -529,9 +533,11 @@ Output ONLY the JSON.`;
   _scoreLocationResult(parsed, { passThreshold }) {
     const scores = parsed.scores || {};
 
-    // no_people and cultural_authenticity are critical (3x/2.5x)
+    // no_people, upright/coherent space, and cultural authenticity are critical.
     const weights = {
       no_people: 3,
+      upright_orientation: 3,
+      coherent_single_space: 3,
       cultural_authenticity: 2.5,
       description_match: 2,
       mood_setting: 1.5,
@@ -557,11 +563,15 @@ Output ONLY the JSON.`;
 
     // Hard checks — force fail for critical violations
     const noPeopleScore = scores.no_people?.score ?? 100;
+    const uprightScore = scores.upright_orientation?.score ?? 100;
+    const coherentScore = scores.coherent_single_space?.score ?? 100;
     const culturalScore = scores.cultural_authenticity?.score ?? 100;
-    const forcedFail = noPeopleScore < 50 || culturalScore < 40;
+    const forcedFail = noPeopleScore < 50 || uprightScore < 70 || coherentScore < 70 || culturalScore < 40;
 
     let failReason = '';
     if (noPeopleScore < 50) failReason = 'no_people<50';
+    else if (uprightScore < 70) failReason = 'upright_orientation<70';
+    else if (coherentScore < 70) failReason = 'coherent_single_space<70';
     else if (culturalScore < 40) failReason = 'cultural_authenticity<40';
 
     const allIssues = [
