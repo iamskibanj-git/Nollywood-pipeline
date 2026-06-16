@@ -1283,7 +1283,16 @@ class CinemaVideoAutomation extends KlingAutomation {
         const label = el.getAttribute('aria-label') || el.getAttribute('name') || '';
         const groupLabel = el.closest('[aria-label]')?.getAttribute('aria-label') || '';
         const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && /duration/i.test(`${label} ${groupLabel}`)) {
+        const min = el.getAttribute('aria-valuemin') || el.getAttribute('min') || '';
+        const max = el.getAttribute('aria-valuemax') || el.getAttribute('max') || '';
+        if (r.width > 0 && r.height > 0 && (/duration/i.test(`${label} ${groupLabel}`) || (min === '4' && max === '15'))) {
+          let node = el;
+          for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+            const nr = node.getBoundingClientRect();
+            if (nr.width > 80 && nr.height >= 20 && nr.height <= 70) {
+              return { x: nr.x, y: nr.y, w: nr.width, h: nr.height };
+            }
+          }
           return { x: r.x, y: r.y, w: r.width, h: r.height };
         }
       }
@@ -1381,7 +1390,26 @@ class CinemaVideoAutomation extends KlingAutomation {
       const pattern = new RegExp(patternSource, 'i');
       const vh = window.innerHeight;
       const vw = window.innerWidth;
+      const activeCinemaRoot = () => {
+        const roots = [];
+        for (const el of document.querySelectorAll('div, section, form')) {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 300 && r.height > 20 && r.height < 170
+            && r.y > vh * 0.55
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) {
+            roots.push({ el, r, text });
+          }
+        }
+        roots.sort((a, b) => (a.r.height - b.r.height) || (b.r.y - a.r.y));
+        return roots[0]?.el || null;
+      };
+      const activeRoot = activeCinemaRoot();
       const inCinemaToolbar = (el) => {
+        if (activeRoot && activeRoot.contains(el)) return true;
         let node = el;
         for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
           const r = node.getBoundingClientRect();
@@ -1408,10 +1436,10 @@ class CinemaVideoAutomation extends KlingAutomation {
           && inCinemaToolbar(el)
         ) {
           const exact = pattern.test(text) && text.length <= 30;
-          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text, exact });
+          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text, exact, active: !!(activeRoot && activeRoot.contains(el)) });
         }
       }
-      candidates.sort((a, b) => Number(b.exact) - Number(a.exact) || a.x - b.x);
+      candidates.sort((a, b) => Number(b.active) - Number(a.active) || Number(b.exact) - Number(a.exact) || a.x - b.x);
       const c = candidates[0];
       return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), left: c.x, top: c.y, right: c.x + c.w, bottom: c.y + c.h, text: c.text } : null;
     }, chipPattern.source).catch(() => null);
@@ -1525,7 +1553,26 @@ class CinemaVideoAutomation extends KlingAutomation {
   async _bottomToolbarHasValue(targetText) {
     return this.automation.page.evaluate((target) => {
       const vh = window.innerHeight;
+      const activeCinemaRoot = () => {
+        const roots = [];
+        for (const el of document.querySelectorAll('div, section, form')) {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 300 && r.height > 20 && r.height < 170
+            && r.y > vh * 0.55
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) {
+            roots.push({ el, r });
+          }
+        }
+        roots.sort((a, b) => (a.r.height - b.r.height) || (b.r.y - a.r.y));
+        return roots[0]?.el || null;
+      };
+      const activeRoot = activeCinemaRoot();
       const inCinemaToolbar = (el) => {
+        if (activeRoot && activeRoot.contains(el)) return true;
         let node = el;
         for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
           const r = node.getBoundingClientRect();
@@ -1551,7 +1598,26 @@ class CinemaVideoAutomation extends KlingAutomation {
     return this.automation.page.evaluate((patternSource) => {
       const pattern = new RegExp(patternSource, 'i');
       const vh = window.innerHeight;
+      const activeCinemaRoot = () => {
+        const roots = [];
+        for (const el of document.querySelectorAll('div, section, form')) {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 300 && r.height > 20 && r.height < 170
+            && r.y > vh * 0.55
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) {
+            roots.push({ el, r });
+          }
+        }
+        roots.sort((a, b) => (a.r.height - b.r.height) || (b.r.y - a.r.y));
+        return roots[0]?.el || null;
+      };
+      const activeRoot = activeCinemaRoot();
       const inCinemaToolbar = (el) => {
+        if (activeRoot && activeRoot.contains(el)) return true;
         let node = el;
         for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
           const r = node.getBoundingClientRect();
@@ -1570,10 +1636,10 @@ class CinemaVideoAutomation extends KlingAutomation {
         const r = el.getBoundingClientRect();
         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
         if (r.y > vh * 0.60 && r.width > 0 && r.height > 0 && pattern.test(text) && inCinemaToolbar(el)) {
-          candidates.push({ x: r.x, text });
+          candidates.push({ x: r.x, text, active: !!(activeRoot && activeRoot.contains(el)) });
         }
       }
-      candidates.sort((a, b) => a.x - b.x);
+      candidates.sort((a, b) => Number(b.active) - Number(a.active) || a.x - b.x);
       return candidates[0]?.text || null;
     }, pattern.source).catch(() => null);
   }

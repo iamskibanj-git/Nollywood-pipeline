@@ -3894,3 +3894,12 @@ Live no-Generate verification after the fix:
 start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached, @image1 resolved as "Image 1"
 element dry-run: opened project Elements panel, observed eligible-visual/Use, @codex_elem_test_0615 resolved and persisted eligible
 ```
+
+Cinema Studio 3.5 video toolbar drift (live 2026-06-16):
+```text
+active row before setup: Cinema Studio 3.5 / 9:16 / 480p / 8s / 1/4 / On, cost 28
+duration control is a Radix slider: role=slider, aria-valuemin=4, aria-valuemax=15
+the slider thumb itself is only ~4px wide; drag the wider parent track, not the thumb box
+active row after setup: Cinema Studio 3.5 / 9:16 / 480p / 15s / 1/4 / On, cost 52.5
+```
+Higgsfield can render a stale overlapping video toolbar at the same Y coordinate (`Kling 2.6 / 16:9 / 5s / On`). Video toolbar helpers must prefer the active bottom row whose compact container contains `Cinema Studio 3.5`; otherwise duration/aspect/audio reads can bind to stale Kling controls. Keep the no-Generate toolbar verification before resuming long production runs when Higgsfield UI changes.
