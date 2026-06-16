@@ -214,21 +214,20 @@ class CinemaVideoAutomation extends KlingAutomation {
 
       const selected = await this._selectExactMentionOption(name);
       if (!selected.ok) {
-        this.log(`[PROMPT] WARN: exact @mention option not found for @${name}; leaving typed text in prompt. Options: ${JSON.stringify(selected.options || [])}`);
-        continue;
+        throw new Error(`[PRE-GEN] Required Cinema Studio @mention did not resolve for @${name}. Options: ${JSON.stringify(selected.options || [])}`);
       }
       this.log(`[PROMPT] Strict @mention selected: @${name} → "${selected.text}"`);
       expectedMentionCounts.set(name, (expectedMentionCounts.get(name) || 0) + 1);
 
       const audit = await this._auditPromptMentionChips(expectedMentionCounts);
       if (!audit.ok) {
-        this.log(`[PROMPT] WARN: @mention chip audit warning after @${name}: ${audit.reason}`);
+        throw new Error(`[PRE-GEN] @mention chip audit failed after @${name}: ${audit.reason}`);
       }
     }
 
     const finalAudit = await this._auditPromptMentionChips(expectedMentionCounts);
     if (!finalAudit.ok) {
-      this.log(`[PROMPT] WARN: final @mention chip audit warning: ${finalAudit.reason}`);
+      throw new Error(`[PRE-GEN] Final @mention chip audit failed: ${finalAudit.reason}`);
     }
   }
 
@@ -248,7 +247,10 @@ class CinemaVideoAutomation extends KlingAutomation {
       const optionNodes = [
         ...document.querySelectorAll('[role="option"]'),
         ...document.querySelectorAll('[role="listbox"] [role="option"]'),
+        ...document.querySelectorAll('[role="menu"] [role="menuitem"]'),
+        ...document.querySelectorAll('[role="menuitem"]'),
         ...document.querySelectorAll('[data-radix-popper-content-wrapper] [role="option"]'),
+        ...document.querySelectorAll('[data-radix-popper-content-wrapper] [role="menuitem"]'),
         ...document.querySelectorAll('[class*="dropdown"] [role="option"], [class*="autocomplete"] [role="option"]'),
       ];
       const seen = new Set();
@@ -273,8 +275,16 @@ class CinemaVideoAutomation extends KlingAutomation {
         });
       }
       const exact = options
-        .filter(o => o.normalized === targetName || o.tokens[0] === targetName)
-        .filter(o => !o.tokens.some(token => token !== targetName && token.includes(targetName)))
+        .filter(o => {
+          const compact = o.normalized.replace(/\s+/g, '');
+          const firstCompact = String(o.tokens[0] || '').replace(/\s+/g, '');
+          return o.normalized === targetName || o.tokens[0] === targetName ||
+            compact === targetName || firstCompact === targetName;
+        })
+        .filter(o => !o.tokens.some(token => {
+          const compactToken = token.replace(/\s+/g, '');
+          return token !== targetName && compactToken !== targetName && token.includes(targetName);
+        }))
         .sort((a, b) => {
           const aExact = a.normalized === targetName ? 0 : 1;
           const bExact = b.normalized === targetName ? 0 : 1;
@@ -299,7 +309,8 @@ class CinemaVideoAutomation extends KlingAutomation {
     const expected = Object.fromEntries([...expectedCounts.entries()]);
     return page.evaluate((expectedByName) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const expectedNames = new Set(Object.keys(expectedByName));
+      const canonical = (value) => clean(value).toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
+      const expectedNames = new Set(Object.keys(expectedByName).map(canonical));
       const chipTexts = [];
       const seenNodes = new Set();
       const root = document.querySelector('[role="textbox"]') || document;
@@ -310,7 +321,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         const chipRoot = el.closest('[data-beautiful-mention]') || el.closest('[contenteditable="false"]') || el;
         if (seenNodes.has(chipRoot)) continue;
         seenNodes.add(chipRoot);
-        const text = clean(chipRoot.innerText || chipRoot.textContent || '').toLowerCase().replace(/^@/, '');
+        const text = canonical(chipRoot.innerText || chipRoot.textContent || '');
         if (!text || !/[a-z0-9_]/.test(text)) continue;
         chipTexts.push(text);
       }
@@ -324,13 +335,51 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
       const missing = [];
       for (const [name, expectedCount] of Object.entries(expectedByName)) {
-        if ((counts[name] || 0) < expectedCount) {
-          missing.push(`${name} expected ${expectedCount}, found ${counts[name] || 0}`);
+        const key = canonical(name);
+        if ((counts[key] || 0) < expectedCount) {
+          missing.push(`${name} expected ${expectedCount}, found ${counts[key] || 0}`);
         }
       }
       if (missing.length > 0) return { ok: false, reason: `missing mention chip(s): ${missing.join('; ')}` };
       return { ok: true, chips: chipTexts };
     }, expected).catch(err => ({ ok: false, reason: err.message }));
+  }
+
+  async _verifyPromptMentionResolution(name, { label = 'reference' } = {}) {
+    const page = this.automation.page;
+    const cleanName = String(name || '').trim().replace(/^@+/, '').toLowerCase();
+    if (!cleanName) return { ok: false, reason: 'empty name' };
+
+    await this._focusPromptTextboxForTyping();
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Delete');
+    await page.waitForTimeout(200);
+    await page.keyboard.type('@', { delay: 0 });
+    await page.waitForTimeout(500);
+    await page.keyboard.type(cleanName, { delay: 85 });
+    await page.waitForTimeout(1700);
+
+    const selected = await this._selectExactMentionOption(cleanName);
+    if (!selected.ok) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.keyboard.press('Control+A').catch(() => {});
+      await page.keyboard.press('Delete').catch(() => {});
+      return {
+        ok: false,
+        reason: `@${cleanName} did not resolve for ${label}`,
+        options: selected.options || [],
+      };
+    }
+
+    const audit = await this._auditPromptMentionChips(new Map([[cleanName, 1]]));
+    await page.keyboard.press('Control+A').catch(() => {});
+    await page.keyboard.press('Delete').catch(() => {});
+    await page.waitForTimeout(300);
+    if (!audit.ok) {
+      return { ok: false, reason: audit.reason || `@${cleanName} chip audit failed`, options: selected.options || [] };
+    }
+    return { ok: true, selected: selected.text, chips: audit.chips || [] };
   }
 
   async _setGenerateSafetyLock(locked) {
@@ -1556,6 +1605,11 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     await this._selectEligibleSceneImageAndAttach(this._lastEligibleSceneUploadCard || card);
+    const imageProof = await this._verifyPromptMentionResolution('image1', { label: 'attached start frame' });
+    if (!imageProof.ok) {
+      throw new Error(`[PRE-GEN] Attached start frame did not resolve as @image1: ${imageProof.reason}; options=${JSON.stringify(imageProof.options || [])}`);
+    }
+    this.log(`Start frame @image1 prompt reference verified (${imageProof.selected || 'resolved'})`);
     this.log(`Start frame uploaded and eligible (${Math.round(card.waitMs / 1000)}s upload/eligibility window)`);
   }
 
@@ -1567,6 +1621,24 @@ class CinemaVideoAutomation extends KlingAutomation {
     }).catch(() => false);
 
     if (await pickerAlreadyOpen()) return;
+
+    const referencesPlusTarget = await this._findReferencesPlusControl();
+    if (referencesPlusTarget) {
+      this.log(`[CINEMA-VIDEO] Opening scene upload picker via References + control: ${JSON.stringify(referencesPlusTarget)}`);
+      await page.mouse.click(referencesPlusTarget.x, referencesPlusTarget.y);
+      await page.waitForTimeout(1500);
+      if (await pickerAlreadyOpen()) return;
+      throw new Error(`Scene upload picker did not open after clicking References +: ${JSON.stringify(referencesPlusTarget)}`);
+    }
+
+    const startFrameTarget = await this._findOptionalStartFrameControl();
+    if (startFrameTarget) {
+      this.log(`[CINEMA-VIDEO] Opening scene upload picker via Optional Start Frame control: ${JSON.stringify(startFrameTarget)}`);
+      await page.mouse.click(startFrameTarget.x, startFrameTarget.y);
+      await page.waitForTimeout(1500);
+      if (await pickerAlreadyOpen()) return;
+      throw new Error(`Scene upload picker did not open after clicking Optional Start Frame: ${JSON.stringify(startFrameTarget)}`);
+    }
 
     const explicitTarget = await this._findAddReferenceMediaControl();
     if (explicitTarget) {
@@ -1596,6 +1668,106 @@ class CinemaVideoAutomation extends KlingAutomation {
 
     const diagnostics = await this._diagnoseReferenceMediaControls();
     throw new Error(`Add reference media control not found; refusing unsafe scene upload click: ${JSON.stringify(diagnostics)}`);
+  }
+
+  async _findReferencesPlusControl() {
+    const page = this.automation.page;
+    const candidates = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width >= 24 && r.width <= 56 && r.height >= 24 && r.height <= 56
+          && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top > innerHeight * 0.55 && r.bottom < innerHeight
+          && r.left > innerWidth * 0.05 && r.left < innerWidth * 0.60;
+      };
+      const inVideoComposer = (el) => {
+        let node = el;
+        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = clean(node.textContent);
+          if (
+            r.width > 350 && r.height > 70
+            && r.y > innerHeight * 0.45
+            && /Cinema Studio 3\.5/i.test(text)
+            && !/Nano Banana/i.test(text)
+          ) return true;
+        }
+        return false;
+      };
+      const results = [];
+      for (const el of document.querySelectorAll('button, [role="button"]')) {
+        if (!visible(el) || !inVideoComposer(el)) continue;
+        const r = el.getBoundingClientRect();
+        const label = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
+        if (/generate|decrement|increment|image|video/i.test(label)) continue;
+        const text = clean(el.innerText || el.textContent || '');
+        const hasPlus = text === '+' || !!el.querySelector('svg, path');
+        if (!hasPlus && !/reference/i.test(label)) continue;
+        results.push({
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          label: label.slice(0, 80),
+          text,
+        });
+      }
+      results.sort((a, b) => a.x - b.x);
+      return results.slice(0, 6);
+    }).catch(() => []);
+
+    for (const candidate of candidates) {
+      await page.mouse.move(candidate.x, candidate.y);
+      await page.waitForTimeout(350);
+      const tooltip = await page.evaluate(() => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        return [...document.querySelectorAll('[role="tooltip"], [data-radix-popper-content-wrapper], div')]
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            return { text: clean(el.innerText || el.textContent || ''), w: r.width, h: r.height, y: r.y };
+          })
+          .filter(item => item.w > 20 && item.h > 10 && item.y >= 0 && /\bReferences?\b/i.test(item.text))
+          .map(item => item.text)
+          .sort((a, b) => a.length - b.length)[0] || '';
+      }).catch(() => '');
+      if (tooltip || candidate.text === '+') return { ...candidate, tooltip };
+    }
+    return candidates[0] || null;
+  }
+
+  async _findOptionalStartFrameControl() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visibleRect = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        if (r.width < 40 || r.height < 40 || s.display === 'none' || s.visibility === 'hidden') return null;
+        if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return null;
+        return r;
+      };
+
+      const matches = [];
+      for (const el of document.querySelectorAll('button, [role="button"], div')) {
+        const r = visibleRect(el);
+        if (!r || r.y < innerHeight * 0.45 || r.width > 140 || r.height > 140) continue;
+        const label = clean([el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText || el.textContent].filter(Boolean).join(' '));
+        if (!/Optional\s*Start\s*Frame/i.test(label)) continue;
+        if (/generate|general/i.test(label)) continue;
+        matches.push({
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          label: label.slice(0, 120),
+          area: r.width * r.height,
+        });
+      }
+      matches.sort((a, b) => a.area - b.area || b.y - a.y || a.x - b.x);
+      return matches[0] || null;
+    }).catch(() => null);
   }
 
   async _findAddReferenceMediaControl() {
@@ -1805,11 +1977,51 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _clickUploadMediaControl() {
     const page = this.automation.page;
-    const uploadCard = page.locator('div.cursor-pointer').filter({ hasText: 'Upload media' }).first();
-    await uploadCard.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
-    const box = await uploadCard.boundingBox().catch(() => null);
-    if (box) {
-      await uploadCard.click({ force: true, timeout: 5000 });
+    const plusTarget = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const uploadCards = [...document.querySelectorAll('button, [role="button"], div, label')]
+        .filter(visible)
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
+        .filter(o => /Upload media/i.test(o.text) && o.r.width > 120 && o.r.height > 80)
+        .sort((a, b) => (a.r.y - b.r.y) || (a.r.x - b.r.x));
+
+      for (const card of uploadCards) {
+        const controls = [...card.el.querySelectorAll('button, [role="button"], div, span')]
+          .filter(visible)
+          .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || ''), aria: clean(el.getAttribute('aria-label') || '') }))
+          .filter(o => {
+            const cx = o.r.x + o.r.width / 2;
+            const cy = o.r.y + o.r.height / 2;
+            return cx >= card.r.left && cx <= card.r.right && cy >= card.r.top && cy <= card.r.bottom
+              && o.r.width >= 24 && o.r.width <= 72 && o.r.height >= 24 && o.r.height <= 72
+              && (o.text === '+' || /upload|add/i.test(o.aria) || !!o.el.querySelector('svg, path'));
+          })
+          .sort((a, b) => {
+            const ay = a.r.y + a.r.height / 2;
+            const by = b.r.y + b.r.height / 2;
+            const targetY = card.r.y + card.r.height * 0.35;
+            return Math.abs(ay - targetY) - Math.abs(by - targetY);
+          });
+        const target = controls[0];
+        const r = target?.r || card.r;
+        return {
+          x: Math.round(r.x + r.width / 2),
+          y: Math.round(r.y + r.height / 2),
+          text: target ? (target.text || target.aria || 'inner-plus') : card.text,
+          card: { x: Math.round(card.r.x), y: Math.round(card.r.y), w: Math.round(card.r.width), h: Math.round(card.r.height) },
+        };
+      }
+      return null;
+    }).catch(() => null);
+    if (plusTarget) {
+      this.log(`[CINEMA-VIDEO] Clicking Upload media plus control: ${JSON.stringify(plusTarget)}`);
+      await page.mouse.click(plusTarget.x, plusTarget.y);
       return;
     }
 
@@ -1859,6 +2071,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
         const makeCard = (img, cardEl) => {
           const cr = cardEl.getBoundingClientRect();
+          const ir = img.getBoundingClientRect();
           const text = clean(cardEl.innerText || cardEl.textContent || '');
           const checkEl = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
             .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
@@ -1870,10 +2083,12 @@ class CinemaVideoAutomation extends KlingAutomation {
             text,
             x: Math.round(cr.x + cr.width / 2),
             y: Math.round(cr.y + cr.height / 2),
+            imageX: Math.round(ir.x + ir.width / 2),
+            imageY: Math.round(ir.y + ir.height / 2),
             checkX: Math.round(target.x + target.width / 2),
             checkY: Math.round(target.y + target.height / 2),
             rect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
-            statusReady: /check eligibility|eligible|checking/i.test(text),
+            statusReady: /uploading|checking content|check eligibility|eligible|use/i.test(text) || !!(img.currentSrc || img.src),
             waitMs: 0,
           };
         };
@@ -1884,7 +2099,7 @@ class CinemaVideoAutomation extends KlingAutomation {
             const text = clean(node.innerText || node.textContent || '');
             if (r.width >= 70 && r.width <= 280 && r.height >= 70 && r.height <= 280) {
               fallback = node;
-              if (/check eligibility|eligible|checking/i.test(text)) return node;
+              if (/uploading|checking content|check eligibility|eligible|use/i.test(text)) return node;
             }
           }
           return fallback;
@@ -1893,7 +2108,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         for (const img of document.querySelectorAll('img')) {
           const src = img.currentSrc || img.src;
           const r = img.getBoundingClientRect();
-          if (!src || beforeSet.has(src) || r.width < 60 || r.height < 60 || r.y < 50) continue;
+          if (!src || beforeSet.has(src) || r.width < 60 || r.height < 60 || r.y < 50 || r.y > innerHeight - 80) continue;
           const cardEl = statusCardForImage(img);
           cards.push(makeCard(img, cardEl));
         }
@@ -1933,6 +2148,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const makeCard = (img, cardEl) => {
         const cr = cardEl.getBoundingClientRect();
+        const ir = img?.getBoundingClientRect?.();
         const text = clean(cardEl.innerText || cardEl.textContent || '');
         const checkEl = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
           .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
@@ -1944,6 +2160,8 @@ class CinemaVideoAutomation extends KlingAutomation {
           text,
           x: Math.round(cr.x + cr.width / 2),
           y: Math.round(cr.y + cr.height / 2),
+          imageX: ir ? Math.round(ir.x + ir.width / 2) : Math.round(cr.x + cr.width / 2),
+          imageY: ir ? Math.round(ir.y + ir.height / 2) : Math.round(cr.y + cr.height / 2),
           checkX: Math.round(target.x + target.width / 2),
           checkY: Math.round(target.y + target.height / 2),
           rect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
@@ -1956,17 +2174,13 @@ class CinemaVideoAutomation extends KlingAutomation {
           const text = clean(node.innerText || node.textContent || '');
           if (r.width >= 70 && r.width <= 280 && r.height >= 70 && r.height <= 280) {
             fallback = node;
-            if (/check eligibility|eligible|checking/i.test(text)) return node;
+            if (/uploading|checking content|check eligibility|eligible|use/i.test(text)) return node;
           }
         }
         return fallback;
       };
-      let img = original.src ? [...document.querySelectorAll('img')].find(candidate => {
-        const current = candidate.currentSrc || candidate.src;
-        const r = candidate.getBoundingClientRect();
-        return current === original.src && r.width > 50 && r.height > 50;
-      }) : null;
-      if (!img && original.rect) {
+      let img = null;
+      if (original.rect) {
         const originalCx = original.x || (original.rect.x + original.rect.w / 2);
         const originalCy = original.y || (original.rect.y + original.rect.h / 2);
         const candidates = [...document.querySelectorAll('img')]
@@ -1980,9 +2194,16 @@ class CinemaVideoAutomation extends KlingAutomation {
               distance: Math.hypot(cx - originalCx, cy - originalCy),
             };
           })
-          .filter(o => o.r.width > 50 && o.r.height > 50 && o.r.y > 50 && o.distance < 90)
+          .filter(o => o.r.width > 50 && o.r.height > 50 && o.r.y > 50 && o.r.y < innerHeight - 20 && o.distance < 120)
           .sort((a, b) => a.distance - b.distance);
         img = candidates[0]?.img || null;
+      }
+      if (!img && original.src) {
+        img = [...document.querySelectorAll('img')].find(candidate => {
+          const current = candidate.currentSrc || candidate.src;
+          const r = candidate.getBoundingClientRect();
+          return current === original.src && r.width > 50 && r.height > 50 && r.y > 50 && r.y < innerHeight - 20;
+        }) || null;
       }
       if (!img) return null;
       const cardEl = statusCardForImage(img);
@@ -2014,6 +2235,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const makeCard = (img, cardEl) => {
         const cr = cardEl.getBoundingClientRect();
+        const ir = img?.getBoundingClientRect?.();
         const text = clean(cardEl.innerText || cardEl.textContent || '');
         const checkEl = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
           .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
@@ -2025,6 +2247,8 @@ class CinemaVideoAutomation extends KlingAutomation {
           text,
           x: Math.round(cr.x + cr.width / 2),
           y: Math.round(cr.y + cr.height / 2),
+          imageX: ir ? Math.round(ir.x + ir.width / 2) : Math.round(cr.x + cr.width / 2),
+          imageY: ir ? Math.round(ir.y + ir.height / 2) : Math.round(cr.y + cr.height / 2),
           checkX: Math.round(target.x + target.width / 2),
           checkY: Math.round(target.y + target.height / 2),
           rect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
@@ -2037,7 +2261,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           const text = clean(node.innerText || node.textContent || '');
           if (r.width >= 70 && r.width <= 280 && r.height >= 70 && r.height <= 280) {
             fallback = node;
-            if (/check eligibility|eligible|checking/i.test(text)) return node;
+            if (/uploading|checking content|check eligibility|eligible|use/i.test(text)) return node;
           }
         }
         return fallback;
@@ -2055,9 +2279,11 @@ class CinemaVideoAutomation extends KlingAutomation {
       const text = clean(cardEl?.innerText || cardEl?.textContent || '');
       const card = cardEl ? makeCard(img, cardEl) : null;
       if (/not eligible/i.test(text)) return { status: 'not-eligible', card };
+      if (/uploading/i.test(text)) return { status: 'uploading', card };
       if (/checking content|checking/i.test(text)) return { status: 'checking', card };
       if (/check eligibility/i.test(text)) return { status: 'check', card };
       if (/\beligible\b/i.test(text)) return { status: 'eligible', card };
+      if (img || (src && !/upload media/i.test(text))) return { status: 'eligible', card };
 
       return { status: 'pending', card };
     }, current).catch(() => ({ status: 'pending', card: null }));
@@ -2228,14 +2454,32 @@ class CinemaVideoAutomation extends KlingAutomation {
   async _selectEligibleSceneImageAndAttach(card) {
     const page = this.automation.page;
     const beforeCount = await this._composerStartFrameAttachmentCount();
-    const statusResult = await this._readSceneCardStatus(card, { hoverMs: 1500 });
+    let statusResult = await this._readSceneCardStatus(card, { hoverMs: 1500 });
     if (statusResult.status !== 'eligible') {
       throw new Error(`Cannot select scene image; card status is ${statusResult.status}`);
     }
 
-    const current = statusResult.card || card;
-    await page.mouse.click(current.x, current.y);
-    await page.waitForTimeout(2500);
+    let current = statusResult.card || card;
+    this.log('Scene image eligible; waiting for reference tile to settle before selecting');
+    await page.waitForTimeout(5000);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      statusResult = await this._readSceneCardStatus(current, { hoverMs: 1200 });
+      current = statusResult.card || current;
+      if (statusResult.status === 'eligible') break;
+      if (statusResult.status === 'not-eligible') {
+        throw new Error('Cannot select scene image; settled card became not-eligible');
+      }
+      await page.waitForTimeout(2000);
+    }
+    if (statusResult.status !== 'eligible') {
+      throw new Error(`Cannot select scene image after settle wait; card status is ${statusResult.status}`);
+    }
+
+    const clickX = current.imageX || current.x;
+    const clickY = current.imageY || current.y;
+    this.log(`Selecting settled scene reference image at (${clickX}, ${clickY})`);
+    await page.mouse.click(clickX, clickY);
+    await page.waitForTimeout(3500);
 
     await this._clickPromptTextbox();
     await page.waitForTimeout(4000);
@@ -2292,7 +2536,7 @@ class CinemaVideoAutomation extends KlingAutomation {
   async _checkOneElementEligibility(name) {
     const page = this.automation.page;
     await this._closePickerAndReturnToComposer();
-    await this._openElementsPickerViaAtButton();
+    await this._ensureElementsPickerOpen();
     const card = await this._waitForElementCard(name, 60000);
     if (!card) {
       await this._closePickerAndReturnToComposer();
@@ -2305,7 +2549,22 @@ class CinemaVideoAutomation extends KlingAutomation {
       await page.waitForTimeout(2000);
       status = await this._waitForElementEligibility(card, 300000, { returnOnCheck: false, useFallbackStatus: false });
     }
-    if (status === 'eligible' || status === 'not-eligible') {
+    if (status === 'eligible' || status === 'eligible-visual') {
+      await this._closePickerAndReturnToComposer();
+      const mentionProof = await this._verifyPromptMentionResolution(name, { label: 'eligible video element' });
+      if (!mentionProof.ok) {
+        this._rememberElementEligibility(name, 'not-eligible', { reason: mentionProof.reason, options: mentionProof.options || [] });
+        return 'not-eligible';
+      }
+      await this._ensureElementsPickerOpen().catch(() => {});
+      const proof = await this._snapshotElementCardProof(name).catch(() => ({}));
+      const textProof = proof.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
+      this.log(`Element @${name} prompt reference verified and persisted: eligible${textProof}`);
+      this._rememberElementEligibility(name, 'eligible', { ...proof, promptProof: mentionProof });
+      await this._closePickerAndReturnToComposer();
+      return 'eligible';
+    }
+    if (status === 'not-eligible') {
       const proof = await this._snapshotElementCardProof(name).catch(() => ({}));
       const textProof = proof.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
       this.log(`Element @${name} final eligibility persisted: ${status}${textProof}`);
@@ -2384,7 +2643,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
       };
       const body = clean(document.body?.innerText || '');
-      if (!/(Uploads|Image Generations|Video Generations)[\s\S]{0,160}\bElements\b/i.test(body)) return false;
+      if (!/(Assets|Uploads|Image Generations|Video Generations|My Elements)[\s\S]{0,220}\bElements\b/i.test(body)) return false;
       return [...document.querySelectorAll('button, [role="tab"], div, span')]
         .filter(visible)
         .some(el => clean(el.innerText || el.textContent || '') === 'Elements');
@@ -2393,8 +2652,31 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _ensureElementsPickerOpen() {
     if (await this._isElementsPickerOpen()) return true;
+    await this._openElementsPickerViaProjectButton().catch(() => {});
+    if (await this._isElementsPickerOpen()) return true;
     await this._openElementsPickerViaAtButton();
     return this._isElementsPickerOpen();
+  }
+
+  async _openElementsPickerViaProjectButton() {
+    const page = this.automation.page;
+    const target = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const candidates = [...document.querySelectorAll('button, [role="button"], div')]
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '') }))
+        .filter(o => o.r.width > 30 && o.r.height > 20 && o.r.y > 60 && o.r.y < innerHeight * 0.45 && /^Elements$/i.test(o.text))
+        .sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x);
+      const item = candidates[0];
+      return item ? {
+        x: Math.round(item.r.x + item.r.width / 2),
+        y: Math.round(item.r.y + item.r.height / 2),
+        text: item.text,
+      } : null;
+    }).catch(() => null);
+    if (!target) throw new Error('Project Elements button not found');
+    this.log(`[CINEMA-VIDEO] Opening Elements panel via project Elements button at (${target.x}, ${target.y})`);
+    await page.mouse.click(target.x, target.y);
+    await page.waitForTimeout(1200);
   }
 
   async _closePickerAndReturnToComposer() {
@@ -2488,9 +2770,10 @@ class CinemaVideoAutomation extends KlingAutomation {
           .find(child => /check eligibility/i.test(textOf(child)));
         const cr = checkBtn ? checkBtn.getBoundingClientRect() : r;
         const statusText = /not eligible/i.test(text) ? 'not-eligible'
-          : /checking content|checking/i.test(text) ? 'checking'
+          : /face\/ip checking|checking content|checking/i.test(text) ? 'checking'
           : /check eligibility/i.test(text) ? 'check'
           : /\beligible\b/i.test(text) ? 'eligible'
+          : /\bUse\b/i.test(text) ? 'eligible-visual'
           : 'unknown';
         cards.push({
           x: Math.round(r.x + r.width / 2),
@@ -2550,7 +2833,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           const r = el.getBoundingClientRect();
           const text = clean(el.innerText || el.textContent || '');
           const score = (/(Uploads|Image Generations|Video Generations|Elements|Liked)/i.test(text) ? 5 : 0)
-            + (/Check eligibility|Checking content|Character/i.test(text) ? 5 : 0)
+            + (/Check eligibility|Face\/IP checking|Checking content|Character|\bUse\b/i.test(text) ? 5 : 0)
             + (r.width > 600 && r.height > 300 ? 3 : 0)
             + Math.min(4, Math.floor((el.scrollHeight - el.clientHeight) / 300));
           return { el, r, score };
@@ -2735,7 +3018,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         this.log(`Element ${currentCard.name || card.name || ''} eligibility still ${effectiveStatus}; waiting for final hover status (${elapsedSeconds}s)`);
         lastProgressLogAt = Date.now();
       }
-      if (effectiveStatus === 'eligible' || effectiveStatus === 'not-eligible' || (returnOnCheck && effectiveStatus === 'check')) return effectiveStatus;
+      if (effectiveStatus === 'eligible' || effectiveStatus === 'eligible-visual' || effectiveStatus === 'not-eligible' || (returnOnCheck && effectiveStatus === 'check')) return effectiveStatus;
       await page.waitForTimeout(waitMs);
       attempt++;
     }
@@ -2772,13 +3055,13 @@ class CinemaVideoAutomation extends KlingAutomation {
             r.width >= 80 && r.width <= 260
             && r.height >= 50 && r.height <= 280
             && matchesTarget
-            && /eligible|eligibility|checking/i.test(text)
+            && /face\/ip checking|eligible|eligibility|checking|check eligibility|\bUse\b/i.test(text)
           ) {
             cardEl = node;
             break;
           }
         }
-        if (cardEl && /eligible|eligibility|checking/i.test(textOf(cardEl))) break;
+        if (cardEl && /face\/ip checking|eligible|eligibility|checking|check eligibility|\bUse\b/i.test(textOf(cardEl))) break;
       }
       if (!cardEl && fullTarget) {
         const matches = [...document.querySelectorAll('figure, [role="button"], button, div')].filter(node => {
@@ -2788,15 +3071,16 @@ class CinemaVideoAutomation extends KlingAutomation {
             && r.height >= 50 && r.height <= 280
             && r.top < innerHeight && r.bottom > 0
             && exactNameIn(text)
-            && /eligible|eligibility|checking/i.test(text);
+            && /face\/ip checking|eligible|eligibility|checking|check eligibility|\bUse\b/i.test(text);
         });
         cardEl = matches[0] || pointEls[0];
       }
       const text = textOf(cardEl);
       if (/not eligible/i.test(text)) return 'not-eligible';
-      if (/checking content|checking/i.test(text)) return 'checking';
+      if (/face\/ip checking|checking content|checking/i.test(text)) return 'checking';
       if (/check eligibility/i.test(text)) return 'check';
       if (/\beligible\b/i.test(text)) return 'eligible';
+      if (/\bUse\b/i.test(text)) return 'eligible-visual';
       return allowFallback && fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
     }, { ...card, allowFallback: useFallbackStatus }).catch(() => 'unknown');
   }
@@ -2832,9 +3116,10 @@ class CinemaVideoAutomation extends KlingAutomation {
           const text = clean(el.innerText || el.textContent || '');
           const matches = exactNameIn(text);
           const status = /not eligible/i.test(text) ? 'not-eligible'
-            : /checking content|checking/i.test(text) ? 'checking'
+            : /face\/ip checking|checking content|checking/i.test(text) ? 'checking'
               : /check eligibility/i.test(text) ? 'check'
                 : /\beligible\b/i.test(text) ? 'eligible'
+                  : /\bUse\b/i.test(text) ? 'eligible-visual'
                   : 'unknown';
           const score = (matches ? 10 : 0)
             + (status !== 'unknown' ? 8 : 0)
@@ -2856,7 +3141,7 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async isElementVisibleInPicker(name) {
     await this._closePickerAndReturnToComposer().catch(() => {});
-    await this._openElementsPickerViaAtButton();
+    await this._ensureElementsPickerOpen();
     const card = await this._waitForElementCard(name, 45000);
     const proof = card ? await this._snapshotElementCardProof(card).catch(() => ({})) : {};
     await this._closePickerAndReturnToComposer().catch(() => {});

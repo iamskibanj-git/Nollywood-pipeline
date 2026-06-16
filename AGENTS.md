@@ -3868,3 +3868,29 @@ clicking the new tile showed "Added to prompt box"
 _checkSceneReferenceAttached() -> { attached: true, method: "img-left-of-textbox" }
 ```
 If patching this path, prefer the visible trusted-click/filechooser path first when it works, then fall back to the hidden image file input only when it produces backend upload proof and a selectable new tile. Do not continue to Generate without both backend proof and `_checkSceneReferenceAttached()`.
+
+**Cinema Studio 3.5 video reference + eligibility drift (live 2026-06-16):**
+Video clip generation uses a different reference path from image generation. In Video mode, the start-frame/reference upload opens from the small `+` References button immediately left of the `@` button in the bottom Cinema Studio 3.5 composer. Inside the picker, click the inner `+` above `Upload media`; then keep the picker open and wait through the full upload/content-review lifecycle before selecting the settled uploaded tile. Do not treat first tile visibility as enough, because the tile can remain in `Checking content...` and multiple older tiles can share proxied image URLs.
+
+Current verified video reference flow:
+```text
+Video mode -> References + -> Uploads picker -> Upload media + -> filechooser
+wait for Uploading... / Checking content... to clear
+select the visible settled uploaded tile
+confirm composer thumbnail attached
+click prompt textbox
+type @image1 slowly and select the resolved menu item ("Image 1")
+```
+`@image1` resolution is now the hard proof that the attached start frame is usable by Cinema Studio video generation. If it does not resolve, stop before Generate.
+
+Cinema Studio video element eligibility no longer exposes stable `Eligible` / `Not eligible` text. The current live card lifecycle is:
+```text
+Check eligibility -> Face/IP checking -> small badge / Use state
+```
+The visual ready state is not sufficient by itself. After the element reaches badge/`Use`, close the picker, type the exact `@element_name` in the video prompt, and require the current autocomplete menu item to resolve into a prompt chip. Higgsfield currently exposes that autocomplete as `role="menu"` / `role="menuitem"` rather than only `role="option"`. Pressing Enter or clicking the exact item are both acceptable; the automation currently clicks the exact resolved item. Do not apply this video-only eligibility check to Cinema Studio image generation.
+
+Live no-Generate verification after the fix:
+```text
+start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached, @image1 resolved as "Image 1"
+element dry-run: opened project Elements panel, observed eligible-visual/Use, @codex_elem_test_0615 resolved and persisted eligible
+```
