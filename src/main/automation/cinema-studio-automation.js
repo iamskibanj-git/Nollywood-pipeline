@@ -43,7 +43,7 @@
  *     "Pin"
  *     "Delete"  ← red, destructive
  *
- *   PROJECT URL: /cinema-studio?cinematic-project-id=<UUID>
+ *   PROJECT URL: /generate?projectId=<UUID>
  *     This UUID is the authoritative project identifier. After creating a
  *     project, we capture the UUID from the URL and navigate back to it
  *     directly — no fragile sidebar name matching needed.
@@ -57,7 +57,7 @@ class CinemaStudioAutomation {
     this.log = logger || ((msg) => console.log(`[CINEMA-STUDIO] ${msg}`));
     this._projectCreated = !!projectId; // If we already have an ID, skip creation
     this._projectName = null;
-    this._projectId = projectId || null; // UUID from URL: cinematic-project-id=
+    this._projectId = projectId || null; // UUID from URL: projectId=
     this._abortRequested = false;  // Set when user closes browser — stops cascade
     this._lastSceneReferenceProof = null;
   }
@@ -126,7 +126,7 @@ class CinemaStudioAutomation {
 
     // Navigate to Cinema Studio on the fresh context
     this.log('[INTER-GEN RESET] Navigating fresh context to Cinema Studio...');
-    await page.goto('https://higgsfield.ai/cinema-studio', {
+    await page.goto(this._projectUrl(), {
       waitUntil: 'domcontentloaded',
       timeout: 20000,
     }).catch(() => {});
@@ -173,7 +173,7 @@ class CinemaStudioAutomation {
 
     // Navigate to Cinema Studio on the fresh context
     this.log('[TOOLBAR-NUKE] Navigating fresh context to Cinema Studio...');
-    await page.goto('https://higgsfield.ai/cinema-studio', {
+    await page.goto(this._projectUrl(), {
       waitUntil: 'domcontentloaded',
       timeout: 20000,
     }).catch(() => {});
@@ -298,10 +298,10 @@ class CinemaStudioAutomation {
     // ── STEP 0: Navigate ──
     if (this._projectId && !page.url().includes(this._projectId)) {
       this.log(`Navigating to project ${this._projectId}...`);
-      await page.goto(`https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`, { waitUntil: 'domcontentloaded' });
-    } else if (!page.url().includes('/cinema-studio')) {
+      await page.goto(`https://higgsfield.ai/generate?projectId=${this._projectId}`, { waitUntil: 'domcontentloaded' });
+    } else if (!page.url().includes('/generate')) {
       this.log('Navigating to Cinema Studio...');
-      await page.goto('https://higgsfield.ai/cinema-studio', { waitUntil: 'domcontentloaded' });
+      await page.goto('https://higgsfield.ai/generate', { waitUntil: 'domcontentloaded' });
     }
 
     // ── STEP 1: Wait for page to fully render ──
@@ -1199,9 +1199,12 @@ class CinemaStudioAutomation {
       }
       // The controlling set is the leftmost model button — use its Y to identify the set
       let controllingY = -1;
+      let controllingModelRight = -1;
       if (modelBtns.length > 0) {
         const leftmost = modelBtns.reduce((a, b) => a.x < b.x ? a : b);
         controllingY = leftmost.y;
+        const modelRect = leftmost.el.getBoundingClientRect();
+        controllingModelRight = modelRect.x + modelRect.width;
       }
 
       for (const b of btns) {
@@ -1227,17 +1230,23 @@ class CinemaStudioAutomation {
           }
 
           // Aspect ratio (read from controlling set only)
-          if (isControllingSet && /^(9:16|16:9|1:1|3:4|4:3|2:3|3:2|21:9)$/.test(text)) {
+          if (isControllingSet &&
+              (controllingModelRight < 0 || r.x >= controllingModelRight - 2) &&
+              /^(9:16|16:9|1:1|3:4|4:3|2:3|3:2|21:9)$/.test(text)) {
             result.aspect = text;
           }
 
           // Resolution (read from controlling set only)
-          if (isControllingSet && /^(1k|2k|4k)$/i.test(text)) {
+          if (isControllingSet &&
+              (controllingModelRight < 0 || r.x >= controllingModelRight - 2) &&
+              /^(1k|2k|4k)$/i.test(text)) {
             result.resolution = text.toUpperCase().replace('K', 'K'); // normalize to "2K"
           }
 
           // Grid (read from controlling set only)
-          if (isControllingSet && /^(1x1|2x2|1x2|2x1)$/.test(text)) {
+          if (isControllingSet &&
+              (controllingModelRight < 0 || r.x >= controllingModelRight - 2) &&
+              /^(1x1|2x2|1x2|2x1)$/.test(text)) {
             result.grid = text;
           }
 
@@ -1801,16 +1810,24 @@ class CinemaStudioAutomation {
   }
 
   /**
-   * Extract the cinematic-project-id from the current page URL.
+   * Extract the Cinema Studio project id from the current page URL.
    */
   _extractProjectIdFromUrl(page) {
     try {
       const url = page.url();
-      const match = url.match(/cinematic-project-id=([a-f0-9-]+)/i);
-      return match ? match[1] : null;
+      const parsed = new URL(url);
+      return parsed.searchParams.get('projectId') ||
+        parsed.searchParams.get('cinematic-project-id') ||
+        null;
     } catch (_) {
       return null;
     }
+  }
+
+  _projectUrl(projectId = this._projectId) {
+    return projectId
+      ? `https://higgsfield.ai/generate?projectId=${projectId}`
+      : 'https://higgsfield.ai/generate';
   }
 
   /**
@@ -1830,7 +1847,7 @@ class CinemaStudioAutomation {
       const page = this._ensurePageAlive();
       if (!page.url().includes(this._projectId)) {
         this.log(`Navigating to pipeline's project ${this._projectId}...`);
-        await page.goto(`https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`, { waitUntil: 'domcontentloaded' });
+        await page.goto(this._projectUrl(), { waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(2000);
       }
       this._projectCreated = true;
@@ -1893,19 +1910,91 @@ class CinemaStudioAutomation {
       throw new Error('[PROJECT GATE] Could not create Cinema Studio project — both "New project" button and "+" button failed. Cannot proceed without a project.');
     }
 
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(1000);
+
+    const createResult = await this._fillAndSubmitNewProjectDialog(projectName);
+    if (!createResult.ok) {
+      throw new Error(`[PROJECT GATE] New project dialog did not complete: ${createResult.reason}`);
+    }
 
     // Capture the project ID from the URL — this is the authoritative handle
     this._projectId = this._extractProjectIdFromUrl(page);
     this.log(`New project created — ID: ${this._projectId || 'unknown'}`);
 
     // Rename skipped — the project ID from the URL is the authoritative
-    // handle. We navigate via cinematic-project-id=<UUID> so the sidebar
+    // handle. We navigate via projectId=<UUID> so the sidebar
     // display name doesn't matter. Rename was fragile (context menu → Edit
     // dialog → Save) and caused more issues than it solved.
 
     this._projectCreated = true;
     this._projectName = projectName;
+  }
+
+  async _fillAndSubmitNewProjectDialog(projectName) {
+    const page = this._ensurePageAlive();
+    const name = String(projectName || 'Untitled Project').trim() || 'Untitled Project';
+
+    const dialogReady = await page.waitForFunction(() => {
+      const body = document.body.innerText || '';
+      return body.includes('New project') && body.includes('Create');
+    }, { timeout: 10000 }).then(() => true).catch(() => false);
+    if (!dialogReady) return { ok: false, reason: 'New project dialog did not appear' };
+
+    const typed = await page.evaluate((projectNameArg) => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      const candidates = [...document.querySelectorAll('input, textarea, [contenteditable="true"]')]
+        .filter(visible)
+        .sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+      const target = candidates[0];
+      if (!target) return false;
+      target.focus();
+      if (target.isContentEditable) {
+        document.execCommand('selectAll', false, null);
+        document.execCommand('insertText', false, projectNameArg);
+        target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: projectNameArg }));
+      } else {
+        target.value = projectNameArg;
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return true;
+    }, name).catch(() => false);
+    if (!typed) return { ok: false, reason: 'Could not find writable project name field' };
+
+    await page.waitForTimeout(500);
+    const createButton = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      const buttons = [...document.querySelectorAll('button')].filter(visible);
+      const create = buttons
+        .filter((b) => (b.textContent || '').trim() === 'Create')
+        .sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y)[0];
+      if (!create) return null;
+      const r = create.getBoundingClientRect();
+      return {
+        cx: r.x + r.width / 2,
+        cy: r.y + r.height / 2,
+        disabled: create.disabled ||
+          create.getAttribute('aria-disabled') === 'true' ||
+          getComputedStyle(create).pointerEvents === 'none' ||
+          getComputedStyle(create).opacity < 0.6,
+      };
+    }).catch(() => null);
+    if (!createButton) return { ok: false, reason: 'Create button not found' };
+    if (createButton.disabled) return { ok: false, reason: 'Create button stayed disabled after naming project' };
+
+    await page.mouse.click(createButton.cx, createButton.cy);
+    await page.waitForTimeout(3000);
+    const projectId = this._extractProjectIdFromUrl(page);
+    if (!projectId) return { ok: false, reason: `Create did not navigate to project URL; url=${page.url()}` };
+    return { ok: true, projectId };
   }
 
   /**
@@ -3254,7 +3343,7 @@ class CinemaStudioAutomation {
       this.log('Warn: not in project view — Generations/Elements tabs not found. Attempting to select project...');
       // Try navigating to saved project ID
       if (this._projectId) {
-        await page.goto(`https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`, { waitUntil: 'domcontentloaded' });
+        await page.goto(this._projectUrl(), { waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(2500);
       }
     }

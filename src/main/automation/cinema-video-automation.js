@@ -595,20 +595,21 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   _cinemaProjectUrl() {
     return this._projectId
-      ? `https://higgsfield.ai/cinema-studio?cinematic-project-id=${this._projectId}`
-      : 'https://higgsfield.ai/cinema-studio';
+      ? `https://higgsfield.ai/generate?projectId=${this._projectId}`
+      : 'https://higgsfield.ai/generate';
   }
 
   _isCurrentCinemaProjectUrl(url) {
     const value = String(url || '');
-    if (!value.includes('/cinema-studio')) return false;
+    if (!value.includes('/generate') && !value.includes('/cinema-studio')) return false;
     if (!this._projectId) return true;
     try {
       const parsed = new URL(value);
-      return parsed.pathname.includes('/cinema-studio')
-        && parsed.searchParams.get('cinematic-project-id') === this._projectId;
+      return (parsed.pathname.includes('/generate') || parsed.pathname.includes('/cinema-studio'))
+        && (parsed.searchParams.get('projectId') === this._projectId ||
+          parsed.searchParams.get('cinematic-project-id') === this._projectId);
     } catch (_) {
-      return value.includes('/cinema-studio') && value.includes(`cinematic-project-id=${this._projectId}`);
+      return value.includes(this._projectId);
     }
   }
 
@@ -963,9 +964,9 @@ class CinemaVideoAutomation extends KlingAutomation {
     if (this._projectId && !this._isCurrentCinemaProjectUrl(page.url())) {
       this.log(`Navigating to Cinema Studio project ${this._projectId}...`);
       await this._navigateToCinemaProject();
-    } else if (!page.url().includes('/cinema-studio')) {
+    } else if (!page.url().includes('/generate') && !page.url().includes('/cinema-studio')) {
       this.log('Navigating to Cinema Studio...');
-      await page.goto('https://higgsfield.ai/cinema-studio', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto('https://higgsfield.ai/generate', { waitUntil: 'domcontentloaded', timeout: 30000 });
       await this.automation.assertNoVerificationRequired?.('Cinema Studio navigation');
     }
     await this._dismissAdsWithPatience('[CINEMA-VIDEO]');

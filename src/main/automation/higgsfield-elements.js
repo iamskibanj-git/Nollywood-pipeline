@@ -70,15 +70,23 @@ class HiggsfieldElements {
   //  Name normalization + caching
   // ───────────────────────────────────────────────────────────────────
 
-  /** Normalize an element name for comparison: lowercase, trim, strip leading @. */
+  /** Normalize an element name for comparison: lowercase, trim, strip leading @ and UI type suffix. */
   _normalizeName(name) {
-    return (name || '').toLowerCase().trim().replace(/^@+/, '');
+    return (name || '')
+      .toLowerCase()
+      .trim()
+      .replace(/^@+/, '')
+      .replace(/\s+/g, ' ')
+      .replace(/(character|location|prop)$/i, '')
+      .trim();
   }
 
   /** Normalize scraped modal labels, which often include a leading "Use" button label. */
   _normalizeScrapedElementName(name) {
     const raw = (name || '').trim();
     const withoutUse = raw.replace(/^Use(?=[@A-Za-z0-9_-])/, '');
+    const atMatch = withoutUse.match(/@([A-Za-z0-9_-]+?)(?:Character|Location|Prop|Use|\s|$)/);
+    if (atMatch) return this._normalizeName(atMatch[1]);
     return this._normalizeName(withoutUse);
   }
 
@@ -119,6 +127,14 @@ class HiggsfieldElements {
    */
   async _openElementsModal() {
     const page = this.automation.page;
+    if (await this._isElementsModalOpen(page)) {
+      this.log('Elements modal already open');
+      return;
+    }
+
+    const openedViaProjectButton = await this._openElementsModalViaProjectButton(page);
+    if (openedViaProjectButton) return;
+
     this.log('Opening elements modal via @ toolbar button...');
 
     // Find the @ button using dual-toolbar-aware selection.
@@ -314,6 +330,55 @@ class HiggsfieldElements {
     this.log('Elements modal opened');
   }
 
+  async _openElementsModalViaProjectButton(page) {
+    this.log('Trying project Elements button...');
+    const candidates = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      return [...document.querySelectorAll('button, [role="button"], div, a')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return {
+            tag: el.tagName,
+            role: el.getAttribute('role'),
+            text,
+            cx: r.x + r.width / 2,
+            cy: r.y + r.height / 2,
+            w: r.width,
+            h: r.height,
+            y: r.y,
+            x: r.x,
+            visible: visible(el),
+          };
+        })
+        .filter((c) =>
+          c.visible &&
+          c.text === 'Elements' &&
+          c.w >= 40 &&
+          c.w <= 160 &&
+          c.x > window.innerWidth * 0.35 &&
+          c.x < window.innerWidth * 0.85 &&
+          c.y < window.innerHeight * 0.45
+        )
+        .sort((a, b) => a.y - b.y || a.x - b.x)
+        .slice(0, 4);
+    }).catch(() => []);
+
+    for (const candidate of candidates) {
+      await page.mouse.click(candidate.cx, candidate.cy);
+      await page.waitForTimeout(1500);
+      if (await this._isElementsModalOpen(page)) {
+        this.log(`Elements modal opened via project Elements button at (${Math.round(candidate.cx)}, ${Math.round(candidate.cy)})`);
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Check if the elements modal overlay is currently open.
    * Uses broad detection: text signals, overlay containers, Radix popovers.
@@ -321,6 +386,34 @@ class HiggsfieldElements {
    */
   async _isElementsModalOpen(page) {
     return page.evaluate(() => {
+      const strictCandidates = [...document.querySelectorAll('[role="dialog"], [data-state="open"]')];
+      for (const el of strictCandidates) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 350 || rect.height < 250) continue;
+
+        const text = (el.innerText || el.textContent || '').toLowerCase();
+        const hasModalListSignals =
+          text.includes('my elements') &&
+          (
+            text.includes('show subfolders elements') ||
+            text.includes('all pinned') ||
+            text.includes('create element') ||
+            text.includes('new element')
+          );
+        const hasNewElementForm =
+          text.includes('new element') &&
+          text.includes('category') &&
+          (
+            text.includes('upload media') ||
+            text.includes('upload images') ||
+            text.includes('enter name')
+          );
+
+        if (hasModalListSignals || hasNewElementForm) return true;
+      }
+
+      return false;
+
       const allText = (document.body.innerText || '').toLowerCase();
 
       // Text signals (case-insensitive)
@@ -567,7 +660,10 @@ class HiggsfieldElements {
           if (rect.width < 30 || rect.height < 30) continue;
 
           // Skip the "Create new" card
-          if (text.includes('Create new') || text === '+') continue;
+          if (text.includes('Create new') || text.includes('New Element') || text === '+') continue;
+          if (['Create Element', 'Browse all elements', 'Add to Element',
+               'Uploads', 'Image Generations', 'Liked', 'Auto', 'Character',
+               'Location', 'Prop'].includes(text)) continue;
           // Skip navigation/utility buttons
           if (['Save', 'Cancel', 'All', 'Pinned', 'Characters', 'Locations', 'Props',
                'Elements', '×', '✕', 'X'].includes(text)) continue;
@@ -602,15 +698,17 @@ class HiggsfieldElements {
           let parent = img.parentElement;
           for (let i = 0; i < 4 && parent; i++) {
             const text = parent.textContent?.trim() || '';
-            if (text.includes('Create new') || text === '+') break;
+            if (text.includes('Create new') || text.includes('New Element') || text === '+') break;
 
             const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
             // Find a line that looks like an element name (short, no common UI words)
             for (const line of lines) {
               if (line.length > 2 && line.length < 60 &&
-                  !['Upload images', 'Save', 'Cancel', 'Elements', 'Create new',
+                  !['Upload images', 'Upload media', 'Save', 'Cancel', 'Elements', 'Create new', 'New Element',
+                    'Create Element', 'Browse all elements', 'Add to Element',
                     'All', 'Pinned', 'Characters', 'Locations', 'Props',
-                    'Advanced settings', 'Search'].some(skip => line.includes(skip))) {
+                    'Uploads', 'Image Generations', 'Liked', 'Auto', 'Character',
+                    'Location', 'Prop', 'Advanced settings', 'Search'].some(skip => line.includes(skip))) {
                 const key = line.toLowerCase().trim();
                 if (!seen.has(key)) {
                   seen.add(key);
@@ -619,6 +717,20 @@ class HiggsfieldElements {
               }
             }
             parent = parent.parentElement;
+          }
+        }
+      }
+
+      for (const container of searchContexts) {
+        const text = container.textContent || '';
+        const matches = text.matchAll(/@([A-Za-z0-9_-]+?)(?:Character|Location|Prop|Use|\s|$)/g);
+        for (const match of matches) {
+          const name = (match[1] || '').trim();
+          if (!name || name.length < 2) continue;
+          const key = name.toLowerCase();
+          if (!seen.has(key)) {
+            seen.add(key);
+            results.push({ name, category: 'unknown' });
           }
         }
       }
@@ -633,12 +745,24 @@ class HiggsfieldElements {
     // Click "Characters" filter to tag character elements, etc.
     // For now, leave as 'unknown' — category is not critical for the pipeline.
 
+    const normalizedSeen = new Set();
     const normalizedElements = elements
       .map(e => {
         const normalizedName = this._normalizeScrapedElementName(e.name);
         return normalizedName ? { ...e, name: normalizedName, rawName: e.name } : null;
       })
-      .filter(Boolean);
+      .filter((e) => {
+        if (!e || [
+          'check eligibility',
+          'create element',
+          'browse all elements',
+          'add to element',
+          'new element',
+        ].includes(e.name)) return false;
+        if (normalizedSeen.has(e.name)) return false;
+        normalizedSeen.add(e.name);
+        return true;
+      });
 
     this.log(`Found ${normalizedElements.length} existing elements: ${normalizedElements.map(e => e.name).join(', ') || '(none)'}`);
 
@@ -674,6 +798,335 @@ class HiggsfieldElements {
    * @param {{ name: string, imagePaths: string[], description?: string, category?: string }} opts
    * @returns {Promise<{created: boolean, name: string}>}
    */
+  async _createElementCurrentUi({ normalized, uploadImagePaths, description, uiCategory }) {
+    const page = this.automation.page;
+
+    const alreadyExists = await this.elementExists(normalized);
+    if (alreadyExists) {
+      this.log(`Element @${normalized} already exists - skipping creation`);
+      return { created: false, name: normalized };
+    }
+
+    await this._dismissOverlays();
+    await this._openElementsModal();
+    await page.waitForTimeout(1000);
+
+    await this._clickNewElementEntry(page);
+    await this._waitForCurrentElementForm(page);
+    await this._fillCurrentElementFields(page, { normalized, description, uiCategory });
+
+    for (let i = 0; i < uploadImagePaths.length; i++) {
+      await this._attachCurrentElementImage(page, uploadImagePaths[i], i, uploadImagePaths.length);
+      const waitMs = i < uploadImagePaths.length - 1 ? 8000 : 4000;
+      this.log(`Waiting ${Math.round(waitMs / 1000)}s after image ${i + 1}/${uploadImagePaths.length} attach...`);
+      await page.waitForTimeout(waitMs);
+    }
+
+    const previewCount = await this._countCurrentElementPreviews(page);
+    if (previewCount < 2) {
+      await this._closeCreationForm(page);
+      throw new Error(`Element form has only ${previewCount} image preview(s); expected at least 2`);
+    }
+
+    await this._clickCurrentElementCreate(page);
+    const created = await this._waitForCurrentElementCreated(page, normalized);
+    this.invalidateCache();
+    if (!created && !(await this.elementExists(normalized))) {
+      this.log(`Warn: @${normalized} not found by scraper - but Create completed, trusting creation`, 'warn');
+    }
+    this.log(`Created ${uiCategory.toLowerCase()} element @${normalized}`);
+    return { created: true, name: normalized };
+  }
+
+  async _clickNewElementEntry(page) {
+    const entry = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      const button = [...document.querySelectorAll('button')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + r.height / 2, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el), kind: 'button' };
+        })
+        .find((c) => c.visible && c.text === 'Create Element' && c.w > 80);
+      if (button) return button;
+
+      return [...document.querySelectorAll('button, [role="button"], div')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + Math.min(60, r.height * 0.42), x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el), kind: 'plus-tile' };
+        })
+        .filter((c) => c.visible && c.text === 'New Element' && c.w >= 90 && c.h >= 90 && c.x > 250)
+        .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0] || null;
+    });
+    if (!entry) throw new Error('Could not find Create Element button or New Element plus tile');
+    await page.mouse.click(entry.cx, entry.cy);
+    this.log(`Clicked ${entry.kind} element entry at (${Math.round(entry.cx)}, ${Math.round(entry.cy)})`);
+    await page.waitForTimeout(1500);
+  }
+
+  async _waitForCurrentElementForm(page) {
+    const ok = await page.waitForFunction(() => {
+      const body = document.body.innerText || '';
+      return body.includes('New Element') &&
+        body.includes('Category') &&
+        body.includes('Upload media') &&
+        !!document.querySelector('input[placeholder="Enter name"], input[aria-label="Element name"]');
+    }, { timeout: 15000 }).then(() => true).catch(() => false);
+    if (!ok) throw new Error('New Element form did not appear');
+  }
+
+  async _fillCurrentElementFields(page, { normalized, description, uiCategory }) {
+    const state = await page.evaluate(() => {
+      const input = document.querySelector('input[placeholder="Enter name"], input[aria-label="Element name"]');
+      return { value: input?.value || '' };
+    }).catch(() => ({ value: '' }));
+    if (state.value && state.value !== normalized) {
+      await this._closeCreationForm(page);
+      throw new Error(`Create-new safety check failed: opened prefilled form "${state.value}"`);
+    }
+
+    const nameInput = page.locator('input[placeholder="Enter name"], input[aria-label="Element name"]').first();
+    await nameInput.click({ timeout: 5000 });
+    await nameInput.fill(normalized, { timeout: 5000 });
+
+    if (description) {
+      await page.locator('textarea[placeholder="Add description"], textarea[aria-label="Element description"]')
+        .first()
+        .fill(String(description).slice(0, 500), { timeout: 5000 })
+        .catch((e) => this.log(`Warn: couldn't fill description - ${e.message.split('\n')[0]}`, 'warn'));
+    }
+
+    await this._setCurrentElementCategory(page, uiCategory);
+  }
+
+  async _setCurrentElementCategory(page, uiCategory) {
+    if (uiCategory === 'Auto') return;
+    const category = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      return [...document.querySelectorAll('button')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + r.height / 2, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
+        })
+        .filter((c) => c.visible && ['Auto', 'Character', 'Location', 'Prop'].includes(c.text) && c.x > 250 && c.x < 760 && c.y > 150 && c.y < 430)
+        .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0] || null;
+    });
+    if (!category) throw new Error('Category dropdown button not found');
+    await page.mouse.click(category.cx, category.cy);
+    await page.waitForTimeout(800);
+
+    const option = await page.evaluate((wanted) => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      return [...document.querySelectorAll('button, [role="option"], [role="menuitem"], div')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + r.height / 2, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
+        })
+        .filter((c) => c.visible && c.text === wanted && c.x > 250 && c.x < 760 && c.y > 80 && c.y < 500)
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0] || null;
+    }, uiCategory);
+    if (!option) throw new Error(`Category option "${uiCategory}" not found`);
+    await page.mouse.click(option.cx, option.cy);
+    await page.waitForTimeout(800);
+
+    const stuck = await page.evaluate((wanted) => {
+      const body = document.body.innerText || '';
+      return body.includes(`Category\n${wanted}`) || body.includes(`Category ${wanted}`);
+    }, uiCategory).catch(() => false);
+    if (!stuck) throw new Error(`Category "${uiCategory}" did not visually stick`);
+    this.log(`Category set to "${uiCategory}"`);
+  }
+
+  async _attachCurrentElementImage(page, filePath, index, total) {
+    const before = await this._countCurrentElementPreviews(page);
+    this.log(`Uploading element image ${index + 1}/${total}: ${filePath} (previews before=${before})`);
+    await this._openCurrentElementUploadPicker(page);
+    await this._uploadIntoCurrentElementPicker(page, filePath);
+    if (!(await this._waitForAddToElementEnabled(page, 45000))) {
+      await this._selectFirstCurrentUploadTile(page);
+      if (!(await this._waitForAddToElementEnabled(page, 15000))) {
+        throw new Error('Add to Element did not become enabled after upload/selection');
+      }
+    }
+    await this._clickCurrentAddToElement(page);
+    if (!(await this._waitForElementPreviewCount(page, before + 1, 30000))) {
+      throw new Error(`Image ${index + 1}/${total} was not attached to element form`);
+    }
+  }
+
+  async _openCurrentElementUploadPicker(page) {
+    const target = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      return [...document.querySelectorAll('div, button')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + Math.min(58, r.height * 0.38), x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
+        })
+        .filter((c) => c.visible && /^Upload media\b/i.test(c.text) && c.x > 500 && c.y > 50 && c.y < 520 && c.w >= 80 && c.h >= 70)
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0] || null;
+    });
+    if (!target) throw new Error('Upload media tile not found in element form');
+    await page.mouse.click(target.cx, target.cy);
+    const opened = await page.waitForFunction(() => {
+      const body = document.body.innerText || '';
+      return body.includes('Uploads') && body.includes('Add to Element');
+    }, { timeout: 10000 }).then(() => true).catch(() => false);
+    if (!opened) throw new Error('Upload media picker did not open');
+  }
+
+  async _uploadIntoCurrentElementPicker(page, filePath) {
+    const target = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      return [...document.querySelectorAll('div, button, label')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + Math.min(58, r.height * 0.38), x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
+        })
+        .filter((c) => c.visible && /^Upload media\b/i.test(c.text) && c.x > 250 && c.x < 950 && c.y > 80 && c.y < 520 && c.w >= 90 && c.h >= 70)
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0] || null;
+    });
+    if (!target) throw new Error('Upload media tile not found in picker');
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 15000 });
+    await page.mouse.click(target.cx, target.cy);
+    const chooser = await chooserPromise;
+    await chooser.setFiles(filePath);
+    this.log(`Filechooser accepted ${filePath}`);
+    await page.waitForFunction(() => !(document.body.innerText || '').includes('Uploading...'), { timeout: 60000 }).catch(() => {
+      this.log('Upload picker still showed Uploading... after 60s; continuing to selection check', 'warn');
+    });
+    await page.waitForTimeout(2000);
+  }
+
+  async _waitForAddToElementEnabled(page, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const enabled = await page.evaluate(() => {
+        const add = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').replace(/\s+/g, ' ').trim() === 'Add to Element');
+        if (!add) return false;
+        return !(add.disabled || add.getAttribute('aria-disabled') === 'true' || getComputedStyle(add).pointerEvents === 'none' || Number(getComputedStyle(add).opacity) < 0.6);
+      }).catch(() => false);
+      if (enabled) return true;
+      await page.waitForTimeout(1000);
+    }
+    return false;
+  }
+
+  async _selectFirstCurrentUploadTile(page) {
+    const tile = await page.evaluate(() => {
+      return [...document.querySelectorAll('img')]
+        .map((img) => {
+          const r = img.getBoundingClientRect();
+          return { cx: r.x + r.width / 2, cy: r.y + r.height / 2, x: r.x, y: r.y, w: r.width, h: r.height };
+        })
+        .filter((img) => img.w >= 60 && img.h >= 60 && img.x > 250 && img.x < 1200 && img.y > 100 && img.y < 650)
+        .sort((a, b) => a.y - b.y || a.x - b.x)[0] || null;
+    });
+    if (!tile) throw new Error('No selectable upload tile found');
+    await page.mouse.click(tile.cx, tile.cy);
+    await page.waitForTimeout(1000);
+  }
+
+  async _clickCurrentAddToElement(page) {
+    const add = await page.evaluate(() => {
+      return [...document.querySelectorAll('button')]
+        .map((b) => {
+          const r = b.getBoundingClientRect();
+          const text = (b.textContent || '').replace(/\s+/g, ' ').trim();
+          return { text, cx: r.x + r.width / 2, cy: r.y + r.height / 2, w: r.width, h: r.height, disabled: b.disabled || b.getAttribute('aria-disabled') === 'true' };
+        })
+        .find((b) => b.text === 'Add to Element' && b.w > 0 && b.h > 0 && !b.disabled) || null;
+    });
+    if (!add) throw new Error('Enabled Add to Element button not found');
+    await page.mouse.click(add.cx, add.cy);
+    await page.waitForTimeout(2000);
+  }
+
+  async _countCurrentElementPreviews(page) {
+    return page.evaluate(() => {
+      const dialog = [...document.querySelectorAll('[role="dialog"], div')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { el, text, w: r.width, h: r.height };
+        })
+        .filter((d) => d.w > 400 && d.h > 300 && d.text.includes('New Element') && d.text.includes('Category'))
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0]?.el || document.body;
+      return [...dialog.querySelectorAll('img, video')]
+        .filter((m) => {
+          const r = m.getBoundingClientRect();
+          return r.width >= 80 && r.height >= 80 && r.x > 500 && r.y > 50 && r.y < window.innerHeight - 40;
+        }).length;
+    }).catch(() => 0);
+  }
+
+  async _waitForElementPreviewCount(page, expected, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (await this._countCurrentElementPreviews(page) >= expected) return true;
+      await page.waitForTimeout(1000);
+    }
+    return false;
+  }
+
+  async _clickCurrentElementCreate(page) {
+    const create = await page.evaluate(() => {
+      return [...document.querySelectorAll('button')]
+        .map((b) => {
+          const r = b.getBoundingClientRect();
+          const text = (b.textContent || '').replace(/\s+/g, ' ').trim();
+          const disabled = b.disabled || b.getAttribute('aria-disabled') === 'true' || getComputedStyle(b).pointerEvents === 'none' || Number(getComputedStyle(b).opacity) < 0.6;
+          return { text, cx: r.x + r.width / 2, cy: r.y + r.height / 2, y: r.y, w: r.width, h: r.height, disabled };
+        })
+        .filter((b) => b.text === 'Create' && b.w > 0 && b.h > 0)
+        .sort((a, b) => b.y - a.y)[0] || null;
+    });
+    if (!create) throw new Error('Create button not found');
+    if (create.disabled) throw new Error('Create button is disabled');
+    await page.mouse.click(create.cx, create.cy);
+  }
+
+  async _waitForCurrentElementCreated(page, normalized) {
+    const wanted = `@${normalized}`;
+    const start = Date.now();
+    while (Date.now() - start < 90000) {
+      await page.waitForTimeout(3000);
+      const state = await page.evaluate((name) => {
+        const body = document.body.innerText || '';
+        return {
+          creating: body.includes('Creating...'),
+          hasName: body.toLowerCase().includes(name.toLowerCase()),
+        };
+      }, wanted).catch(() => ({ creating: false, hasName: false }));
+      if (!state.creating && state.hasName) return true;
+    }
+    return false;
+  }
+
   async _createElement({ name, imagePaths, description, category = 'Auto' }) {
     const page = this.automation.page;
     const fs = require('fs');
@@ -692,6 +1145,12 @@ class HiggsfieldElements {
     });
 
     this.log(`Creating element @${normalized} (${uiCategory}) with ${uploadImagePaths.length} image(s)...`);
+    return this._createElementCurrentUi({
+      normalized,
+      uploadImagePaths,
+      description,
+      uiCategory,
+    });
 
     // ── Idempotency: check if element already exists ──
     const alreadyExists = await this.elementExists(normalized);
@@ -1481,6 +1940,7 @@ class HiggsfieldElements {
     if (!portraitPath) throw new Error('createCharacterElement: portraitPath required');
     const imagePaths = [portraitPath];
     if (gridPath) imagePaths.push(gridPath);
+    if (imagePaths.length < 2) imagePaths.push(portraitPath);
     return this._createElement({ name, imagePaths, description, category: 'Character' });
   }
 
@@ -1493,7 +1953,7 @@ class HiggsfieldElements {
     if (!locationImagePath) throw new Error('createLocationElement: locationImagePath required');
     return this._createElement({
       name,
-      imagePaths: [locationImagePath],
+      imagePaths: [locationImagePath, locationImagePath],
       description,
       category: 'Location',
     });
@@ -1508,7 +1968,7 @@ class HiggsfieldElements {
     }
     return this._createElement({
       name,
-      imagePaths: propImagePaths,
+      imagePaths: propImagePaths.length >= 2 ? propImagePaths : [propImagePaths[0], propImagePaths[0]],
       description,
       category: 'Prop',
     });

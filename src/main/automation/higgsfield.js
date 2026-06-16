@@ -521,8 +521,8 @@ class HiggsFieldAutomation {
     const videoUrl = this.selectors.videoGeneration.url;
     const assetUrl = this.selectors.assetHistory?.url || 'https://higgsfield.ai/asset/all';
     const cinemaUrl = cinemaProjectId
-      ? `https://higgsfield.ai/cinema-studio?cinematic-project-id=${cinemaProjectId}`
-      : 'https://higgsfield.ai/cinema-studio';
+      ? `https://higgsfield.ai/generate?projectId=${cinemaProjectId}`
+      : 'https://higgsfield.ai/generate';
 
     const context = this.page.context();
     const tabs = [

@@ -3811,3 +3811,41 @@ Keep Shorts/Reels on their separate wizard path; this drift note applies to imag
 **Social image composer off-screen action bar (live 2026-06-04):**
 Facebook can keep the bottom `Schedule` / `Post` action bar below the visible area in the left full-page composer pane even when the preview is visible on the right. For Engagement image posts, scroll the real left composer scroll container to the bottom before clicking `Schedule`; do not rely on document scroll alone. After clicking `Schedule`, verify the `Scheduling options` modal is visible before setting date/time.
 Do not fork custom Date/Time picker logic in the Engagement uploader. Engagement image posts should reuse the inherited Shorts scheduling helpers (`_setScopedScheduleDate()` / `_setScopedScheduleTime()` from `src/main/shorts/facebook-uploader.js`), which already handle Facebook's current Date/Time controls by input scan plus `getByText('Date'/'Time')` keyboard entry.
+
+## Higgsfield `/generate` UI Drift — Live 2026-06-16
+
+Live inspection confirmed Higgsfield moved Cinema Studio project URLs from:
+```text
+/cinema-studio?cinematic-project-id=<uuid>
+```
+to:
+```text
+/generate?projectId=<uuid>
+```
+Automation should navigate with `projectId` while still accepting the old `cinematic-project-id` query param for backward compatibility. New project creation now opens a `New project` modal; fill the name field, click `Create`, then persist the `projectId` from the resulting URL.
+
+Element management on project pages is now reached from the top-center project `Elements` control, which may render as a non-button element. Do not rely only on `button` / `[role=button]`. The real Elements modal is a large open dialog containing modal-only signals such as `My Elements`, `Show subfolders elements`, `All Pinned`, `Create Element`, or `New Element`. The project page body itself also contains `Elements` / `My Elements`; body-text checks alone false-positive and prevent the modal from being opened.
+
+Element card text can render as combined labels such as:
+```text
+Check eligibility@codex_elem_test_0615Character
+@codex_elem_test_0615 Character
+```
+Normalize scraped names by extracting the `@name`, stripping leading `@`, and removing trailing type suffixes (`Character`, `Location`, `Prop`) before comparing. Deduplicate normalized names and ignore utility labels such as `Check eligibility`.
+
+The composer `@name` autocomplete path is currently not reliable as an existence gate. In live testing, Image mode + Cinematic Cameras accepted typed text into the Lexical prompt and opened a tiny `[role=listbox]`, but the listbox stayed empty even though the element existed. Use the Elements modal/list scrape as the source of truth for "element exists"; keep composer mention checks diagnostic only.
+
+Higgsfield can render duplicate overlapping image composers/toolbars at the same Y coordinate. One row may be the active Cinematic Cameras row while a stale row still shows controls such as `Soul 2.0`, `3:4`, `2k`, `Color transfer`. Toolbar state reads must not mix the active model from one row with aspect/resolution/grid from the stale row. Read aspect/resolution/grid only from controls to the right of the selected active model button. Live verification after the fix:
+```text
+_readToolbarState() -> image, cinematic-cameras, 16:9, 2K, 1x1, cost 2
+_setupToolbarSequence('9:16') -> image, cinematic-cameras, 9:16, 4K, 1x1, cost 4
+```
+
+Live verification for element existence after the fix:
+```text
+project page modal open before: false
+listExistingElements() opened the real project Elements modal
+scraped exactly: codex_elem_test_0615
+elementExists('codex_elem_test_0615') === true
+modal closed afterward
+```
