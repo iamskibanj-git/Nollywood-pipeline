@@ -3824,6 +3824,8 @@ to:
 ```
 Automation should navigate with `projectId` while still accepting the old `cinematic-project-id` query param for backward compatibility. New project creation now opens a `New project` modal; fill the name field, click `Create`, then persist the `projectId` from the resulting URL.
 
+Project creation is a hard gate before element setup. The New Project name field must be filled with trusted keyboard input when possible, then automation must wait for the `Create` button to become enabled, click it, wait for `/generate?projectId=<uuid>`, persist `settings.higgsfield_cinema_project_id`, explicitly navigate to that project URL, and let it settle before any element existence/list checks. Do not continue into element checks after a project setup warning; if project creation, persistence, or project URL verification fails, stop with a `[PROJECT GATE]` error. This prevents element checks from running on `/generate`, stale pages, or half-created modal state.
+
 Element management on project pages is now reached from the top-center project `Elements` control, which may render as a non-button element. Do not rely only on `button` / `[role=button]`. The real Elements modal is a large open dialog containing modal-only signals such as `My Elements`, `Show subfolders elements`, `All Pinned`, `Create Element`, or `New Element`. The project page body itself also contains `Elements` / `My Elements`; body-text checks alone false-positive and prevent the modal from being opened.
 
 Element card text can render as combined labels such as:

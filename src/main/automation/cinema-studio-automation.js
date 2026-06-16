@@ -1910,7 +1910,7 @@ class CinemaStudioAutomation {
       throw new Error('[PROJECT GATE] Could not create Cinema Studio project — both "New project" button and "+" button failed. Cannot proceed without a project.');
     }
 
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
 
     const createResult = await this._fillAndSubmitNewProjectDialog(projectName);
     if (!createResult.ok) {
@@ -1918,8 +1918,16 @@ class CinemaStudioAutomation {
     }
 
     // Capture the project ID from the URL — this is the authoritative handle
-    this._projectId = this._extractProjectIdFromUrl(page);
-    this.log(`New project created — ID: ${this._projectId || 'unknown'}`);
+    this._projectId = createResult.projectId || this._extractProjectIdFromUrl(page);
+    if (!this._projectId) {
+      throw new Error('[PROJECT GATE] New project dialog completed but no projectId was available');
+    }
+    this.log(`New project created — ID: ${this._projectId}`);
+
+    this.log(`Navigating to new project URL: ${this._projectUrl()}`);
+    await page.goto(this._projectUrl(), { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await this._waitForCurrentProjectUrl(this._projectId, 20000);
+    await page.waitForTimeout(2500);
 
     // Rename skipped — the project ID from the URL is the authoritative
     // handle. We navigate via projectId=<UUID> so the sidebar
@@ -1940,7 +1948,44 @@ class CinemaStudioAutomation {
     }, { timeout: 10000 }).then(() => true).catch(() => false);
     if (!dialogReady) return { ok: false, reason: 'New project dialog did not appear' };
 
-    const typed = await page.evaluate((projectNameArg) => {
+    const nameField = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      const candidates = [...document.querySelectorAll('input, textarea, [contenteditable="true"]')]
+        .filter(visible)
+        .sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+      const target = candidates[0];
+      if (!target) return null;
+      const r = target.getBoundingClientRect();
+      return { cx: r.x + r.width / 2, cy: r.y + r.height / 2 };
+    }).catch(() => null);
+    if (!nameField) return { ok: false, reason: 'Could not find writable project name field' };
+
+    this.log('Typing Cinema Studio project name into New project dialog...');
+    await page.mouse.click(nameField.cx, nameField.cy);
+    await page.keyboard.press('Control+A').catch(() => {});
+    await page.keyboard.type(name, { delay: 15 });
+    await page.waitForTimeout(500);
+
+    let typed = await page.evaluate((projectNameArg) => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      };
+      const candidates = [...document.querySelectorAll('input, textarea, [contenteditable="true"]')]
+        .filter(visible);
+      return candidates.some((el) => {
+        const value = el.isContentEditable ? (el.textContent || '') : (el.value || '');
+        return value.trim() === projectNameArg;
+      });
+    }, name).catch(() => false);
+
+    if (!typed) {
+      typed = await page.evaluate((projectNameArg) => {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1962,11 +2007,13 @@ class CinemaStudioAutomation {
         target.dispatchEvent(new Event('change', { bubbles: true }));
       }
       return true;
-    }, name).catch(() => false);
+      }, name).catch(() => false);
+      await page.waitForTimeout(500);
+    }
     if (!typed) return { ok: false, reason: 'Could not find writable project name field' };
 
-    await page.waitForTimeout(500);
-    const createButton = await page.evaluate(() => {
+    this.log('Waiting for New project Create button to enable...');
+    const createButton = await page.waitForFunction(() => {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1978,23 +2025,56 @@ class CinemaStudioAutomation {
         .sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y)[0];
       if (!create) return null;
       const r = create.getBoundingClientRect();
-      return {
-        cx: r.x + r.width / 2,
-        cy: r.y + r.height / 2,
-        disabled: create.disabled ||
-          create.getAttribute('aria-disabled') === 'true' ||
-          getComputedStyle(create).pointerEvents === 'none' ||
-          getComputedStyle(create).opacity < 0.6,
-      };
-    }).catch(() => null);
-    if (!createButton) return { ok: false, reason: 'Create button not found' };
+      const disabled = create.disabled ||
+        create.getAttribute('aria-disabled') === 'true' ||
+        getComputedStyle(create).pointerEvents === 'none' ||
+        getComputedStyle(create).opacity < 0.6;
+      if (disabled) return false;
+      return { cx: r.x + r.width / 2, cy: r.y + r.height / 2, disabled: false };
+    }, { timeout: 20000, polling: 250 }).then(handle => handle.jsonValue()).catch(() => null);
+    if (!createButton) return { ok: false, reason: 'Create button not found or did not enable after naming project' };
     if (createButton.disabled) return { ok: false, reason: 'Create button stayed disabled after naming project' };
 
+    this.log('Create button enabled; submitting new project...');
     await page.mouse.click(createButton.cx, createButton.cy);
-    await page.waitForTimeout(3000);
-    const projectId = this._extractProjectIdFromUrl(page);
+    const projectId = await this._waitForProjectIdInUrl(30000);
     if (!projectId) return { ok: false, reason: `Create did not navigate to project URL; url=${page.url()}` };
     return { ok: true, projectId };
+  }
+
+  async _waitForProjectIdInUrl(timeoutMs = 30000) {
+    const page = this._ensurePageAlive();
+    const deadline = Date.now() + timeoutMs;
+    let lastUrl = page.url();
+    this.log('Waiting for new projectId in URL...');
+
+    while (Date.now() < deadline) {
+      lastUrl = page.url();
+      const projectId = this._extractProjectIdFromUrl(page);
+      if (projectId) {
+        this.log(`Project URL ready with projectId=${projectId}`);
+        return projectId;
+      }
+      await page.waitForTimeout(500);
+    }
+
+    this.log(`Timed out waiting for projectId in URL; last URL: ${lastUrl}`, 'warn');
+    return null;
+  }
+
+  async _waitForCurrentProjectUrl(projectId, timeoutMs = 20000) {
+    const page = this._ensurePageAlive();
+    const deadline = Date.now() + timeoutMs;
+    const expected = String(projectId || '');
+    let lastUrl = page.url();
+
+    while (Date.now() < deadline) {
+      lastUrl = page.url();
+      if (expected && lastUrl.includes(expected)) return true;
+      await page.waitForTimeout(500);
+    }
+
+    throw new Error(`[PROJECT GATE] Did not settle on project URL for ${projectId}; last URL=${lastUrl}`);
   }
 
   /**

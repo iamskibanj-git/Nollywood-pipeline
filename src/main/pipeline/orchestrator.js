@@ -4445,24 +4445,43 @@ class PipelineOrchestrator {
     this.log('[CINEMATIC] Setting up Cinema Studio: project → Image → Cinematic Cameras...');
     try {
       await cinemaStudio.ensureProject(titleInitials.toUpperCase());
-      // Capture project ID if it was just created (fallback path)
-      if (!this.state.higgsfield_project_id && cinemaStudio._projectId) {
+      if (!cinemaStudio._projectId) {
+        throw new Error('[PROJECT GATE] Cinema Studio setup returned without a projectId');
+      }
+
+      // Capture/persist project ID if it was just created (fallback path).
+      // Element existence checks are project-scoped, so this must happen before
+      // checking or creating any element.
+      if (this.state.higgsfield_project_id !== cinemaStudio._projectId) {
         this.state.higgsfield_project_id = cinemaStudio._projectId;
-        this.log(`[CINEMATIC] Project created in element stage (fallback): ${cinemaStudio._projectId}`);
+        this.log(`[CINEMATIC] Persisting Higgsfield project ID before element checks: ${cinemaStudio._projectId}`);
         try {
           const proj = db.getProject(projectId);
           const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
           settings.higgsfield_cinema_project_id = cinemaStudio._projectId;
           db.updateProject(projectId, { settings });
-        } catch (_) {}
+          this.log(`[CINEMATIC] Higgsfield project ID saved to DB: ${cinemaStudio._projectId}`);
+        } catch (persistErr) {
+          throw new Error(`[PROJECT GATE] Could not persist Higgsfield project ID: ${persistErr.message}`);
+        }
       }
+
+      const projectUrl = `https://higgsfield.ai/generate?projectId=${cinemaStudio._projectId}`;
+      this.log(`[CINEMATIC] Navigating to persisted project URL before element checks: ${projectUrl}`);
+      await this.automation.page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.automation.page.waitForTimeout(2500);
+      const currentUrl = this.automation.page.url();
+      if (!currentUrl.includes(cinemaStudio._projectId)) {
+        throw new Error(`[PROJECT GATE] Wrong Cinema Studio project URL before element checks: ${currentUrl}`);
+      }
+
       await cinemaStudio._ensureCinemaStudioActive();
       const setupOk = await cinemaStudio._setupToolbarSequence('16:9');
       if (!setupOk) {
-        this.log('[CINEMATIC] WARN: Toolbar setup failed — will attempt element creation without pre-check', 'warn');
+        throw new Error('[PROJECT GATE] Toolbar setup failed before element checks');
       }
     } catch (setupErr) {
-      this.log(`[CINEMATIC] WARN: Cinema Studio setup failed: ${setupErr.message.split('\n')[0]} — continuing`, 'warn');
+      throw new Error(`[PROJECT GATE] Cinema Studio project setup failed before element checks: ${setupErr.message.split('\n')[0]}`);
     }
 
     // ══════════════════════════════════════════════════════════
