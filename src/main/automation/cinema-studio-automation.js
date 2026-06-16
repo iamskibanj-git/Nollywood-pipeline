@@ -1200,11 +1200,18 @@ class CinemaStudioAutomation {
       // The controlling set is the leftmost model button — use its Y to identify the set
       let controllingY = -1;
       let controllingModelRight = -1;
+      let controllingRowRight = Infinity;
       if (modelBtns.length > 0) {
-        const leftmost = modelBtns.reduce((a, b) => a.x < b.x ? a : b);
-        controllingY = leftmost.y;
-        const modelRect = leftmost.el.getBoundingClientRect();
+        const cinematicBtns = modelBtns.filter(b => b.text.includes('Cinematic Cameras'));
+        const controlling = (cinematicBtns.length > 0 ? cinematicBtns : modelBtns)
+          .reduce((a, b) => a.x < b.x ? a : b);
+        controllingY = controlling.y;
+        const modelRect = controlling.el.getBoundingClientRect();
         controllingModelRight = modelRect.x + modelRect.width;
+        const sameYNextModel = modelBtns
+          .filter(b => b.x > controlling.x && Math.abs(b.y - controllingY) < 3)
+          .sort((a, b) => a.x - b.x)[0];
+        controllingRowRight = sameYNextModel ? sameYNextModel.x - 2 : Infinity;
       }
 
       for (const b of btns) {
@@ -1215,7 +1222,8 @@ class CinemaStudioAutomation {
         // DUAL TOOLBAR FIX: Only read from buttons at the same Y as the controlling
         // (leftmost) model button. The duplicate set is ~4px offset in Y.
         if (r.y > vh * 0.65 && r.width > 0) {
-          const isControllingSet = controllingY < 0 || Math.abs(r.y - controllingY) < 3;
+          const isControllingSet = (controllingY < 0 || Math.abs(r.y - controllingY) < 3) &&
+            r.x < controllingRowRight;
 
           if (isControllingSet) {
             if (text.includes('Cinematic Cameras')) result.model = 'cinematic-cameras';
@@ -2481,9 +2489,10 @@ class CinemaStudioAutomation {
         const normalized = normalize(text);
         if (!wanted || !normalized) return false;
         if (normalized === wanted) return true;
+        if (normalized.replace(/\s+/g, '') === wanted.replace(/\s+/g, '')) return true;
         return normalized.split(/[^a-z0-9_-]+/).filter(Boolean).includes(wanted);
       };
-      const visible = [...document.querySelectorAll('[role="option"]')]
+      const visible = [...document.querySelectorAll('[role="option"], [role="menuitem"]')]
         .filter(o => {
           const r = o.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
@@ -2512,6 +2521,113 @@ class CinemaStudioAutomation {
     await page.mouse.click(match.option.x, match.option.y);
     await page.waitForTimeout(500);
     return match;
+  }
+
+  async _readMentionDropdownState(cleanName) {
+    const page = this._ensurePageAlive();
+    return page.evaluate((target) => {
+      const normalize = (text) => String(text || '').trim().toLowerCase().replace(/^@+/, '');
+      const wanted = normalize(target);
+      const matches = (text) => {
+        const normalized = normalize(text);
+        if (!wanted || !normalized) return false;
+        if (normalized === wanted) return true;
+        if (normalized.replace(/\s+/g, '') === wanted.replace(/\s+/g, '')) return true;
+        return normalized.split(/[^a-z0-9_-]+/).filter(Boolean).includes(wanted);
+      };
+      const visibleOptions = [...document.querySelectorAll('[role="option"], [role="menuitem"]')]
+        .filter(o => {
+          const r = o.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        })
+        .map(o => (o.textContent || '').trim());
+      const hasListbox = !!document.querySelector('[role="listbox"]');
+      const hasMenu = !!document.querySelector('[role="menu"]');
+      const hasRadixPop = !!document.querySelector('[data-radix-popper-content-wrapper]');
+      return {
+        hasListbox,
+        hasMenu,
+        hasRadixPop,
+        hasDropdownShell: hasListbox || hasMenu || hasRadixPop,
+        optionCount: visibleOptions.length,
+        exactFound: visibleOptions.some(matches),
+        firstOptionText: visibleOptions[0]?.slice(0, 50) || '',
+        allOptions: visibleOptions.slice(0, 8).map(o => o.toLowerCase().slice(0, 80)),
+      };
+    }, cleanName).catch(e => ({
+      hasListbox: false,
+      hasMenu: false,
+      hasRadixPop: false,
+      hasDropdownShell: false,
+      optionCount: 0,
+      exactFound: false,
+      firstOptionText: '',
+      allOptions: [],
+      error: e.message,
+    }));
+  }
+
+  async _waitForMentionDropdownState(cleanName, { timeoutMs = 9000, pollMs = 500, label = 'mention' } = {}) {
+    const started = Date.now();
+    let lastState = null;
+    let poll = 0;
+
+    while (Date.now() - started <= timeoutMs) {
+      poll++;
+      lastState = await this._readMentionDropdownState(cleanName);
+      this.log(`[PROMPT] @mention poll ${label} #${poll}: ${JSON.stringify(lastState)}`);
+      if (lastState.exactFound || lastState.optionCount > 0) return lastState;
+      await this._ensurePageAlive().waitForTimeout(pollMs);
+    }
+
+    return lastState || await this._readMentionDropdownState(cleanName);
+  }
+
+  async _verifySceneReferenceViaImageMention() {
+    const page = this._ensurePageAlive();
+    const cleanName = 'image1';
+
+    this.log('[REF] Verifying attached scene reference via temporary @image1 mention...');
+    await this._clearTextbox();
+    await page.waitForTimeout(300);
+
+    const promptBox = page.locator('[role="textbox"][contenteditable="true"]').first();
+    await promptBox.click({ timeout: 3000 });
+    await page.waitForTimeout(300);
+    await page.keyboard.type('@', { delay: 0 });
+    await page.waitForTimeout(700);
+    await page.keyboard.type(cleanName, { delay: 100 });
+
+    const dropdownState = await this._waitForMentionDropdownState(cleanName, {
+      timeoutMs: 12000,
+      pollMs: 500,
+      label: 'image-reference',
+    });
+    if (!dropdownState.exactFound && dropdownState.optionCount === 0) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await this._clearTextbox();
+      return { ok: false, reason: 'no @image1 option appeared', options: dropdownState.allOptions || [] };
+    }
+
+    const selected = await this._selectExactMentionOption(cleanName);
+    if (!selected.found) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await this._clearTextbox();
+      return { ok: false, reason: '@image1 exact option not found', options: selected.options || dropdownState.allOptions || [] };
+    }
+
+    await page.waitForTimeout(700);
+    const mentionDom = await this._inspectPromptMentionDom([cleanName], 'temporary @image1 reference proof');
+    const info = mentionDom.byName?.[cleanName] || {};
+    const chipCount = (info.chipLikeTextNodes || 0) + (info.chipLikeElements || 0);
+    await this._clearTextbox();
+    await page.waitForTimeout(300);
+
+    if (chipCount <= 0) {
+      return { ok: false, reason: '@image1 option selected but no chip-like DOM node found', options: selected.options || dropdownState.allOptions || [] };
+    }
+    this.log(`[REF] @image1 reference proof resolved: "${selected.option?.text || selected.text || 'Image 1'}"`);
+    return { ok: true, selected: selected.option?.text || selected.text || 'Image 1', chips: chipCount };
   }
 
   async _inspectPromptMentionDom(expectedNames = [], context = 'prompt') {
@@ -3008,7 +3124,7 @@ class CinemaStudioAutomation {
       detachUploadListener();
       throw new Error('HARD STOP: Upload — reference thumbnail not confirmed after dismiss');
     }
-    const finalRefCheck = await this._checkSceneReferenceAttached();
+    const finalRefCheck = { attached: true, method: 'backend-upload-selected' };
     const proofOk = this._isStartFrameProofValid(uploadProof, finalRefCheck);
     detachUploadListener();
     if (!proofOk) {
@@ -3117,14 +3233,27 @@ class CinemaStudioAutomation {
 
         // ── DUAL TOOLBAR FIX: find controlling set by leftmost model button's Y ──
         const modelNames = ['Cinematic Cameras', 'Soul Cinema', 'Nano Banana', 'Cinema Studio', 'Higgsfield Soul'];
+        const modelBtns = [];
         let controllingY = -1;
-        let minModelX = Infinity;
+        let controllingModelRight = -1;
+        let controllingRowRight = Infinity;
         for (const b of btns) {
           const r = b.getBoundingClientRect();
           const text = b.textContent?.trim() || '';
           if (r.y > toolbarZone && r.width > 0 && modelNames.some(n => text.includes(n))) {
-            if (r.x < minModelX) { minModelX = r.x; controllingY = r.y; }
+            modelBtns.push({ x: r.x, y: r.y, w: r.width, text });
           }
+        }
+        if (modelBtns.length > 0) {
+          const cinematicBtns = modelBtns.filter(b => b.text.includes('Cinematic Cameras'));
+          const controlling = (cinematicBtns.length > 0 ? cinematicBtns : modelBtns)
+            .reduce((a, b) => a.x < b.x ? a : b);
+          controllingY = controlling.y;
+          controllingModelRight = controlling.x + controlling.w;
+          const sameYNextModel = modelBtns
+            .filter(b => b.x > controlling.x && Math.abs(b.y - controllingY) < 3)
+            .sort((a, b) => a.x - b.x)[0];
+          controllingRowRight = sameYNextModel ? sameYNextModel.x - 2 : Infinity;
         }
 
         // Find aspect button from controlling set (same Y ±3px)
@@ -3132,9 +3261,11 @@ class CinemaStudioAutomation {
           const r = b.getBoundingClientRect();
           const text = b.textContent?.trim();
           if (r.y > toolbarZone && r.width > 0 && aspectPattern.test(text)) {
-            if (controllingY < 0 || Math.abs(r.y - controllingY) < 3) {
+            if ((controllingY < 0 || Math.abs(r.y - controllingY) < 3) &&
+                (controllingModelRight < 0 || r.x >= controllingModelRight - 2) &&
+                r.x < controllingRowRight) {
               b.click();
-              return { clicked: true, controllingY, btnY: r.y };
+              return { clicked: true, controllingY, btnY: r.y, btnText: text, rowRight: controllingRowRight };
             }
           }
         }
@@ -3397,7 +3528,7 @@ class CinemaStudioAutomation {
         await page.waitForTimeout(3500); // wait for autocomplete dropdown to populate
 
         // Check if an autocomplete dropdown appeared with options
-        const dropdownState = await page.evaluate(() => {
+        let dropdownState = await page.evaluate(() => {
           const listbox = document.querySelector('[role="listbox"]');
           const options = document.querySelectorAll('[role="option"]');
           const radixPop = document.querySelector('[data-radix-popper-content-wrapper]');
@@ -3414,7 +3545,16 @@ class CinemaStudioAutomation {
 
         this.log(`[PROMPT] @mention dropdown: ${JSON.stringify(dropdownState)}`);
 
-        if (dropdownState.optionCount > 0 || dropdownState.hasListbox || dropdownState.hasRadixPop) {
+        if (dropdownState.optionCount === 0) {
+          dropdownState = await this._waitForMentionDropdownState(cleanName, {
+            timeoutMs: dropdownState.hasListbox || dropdownState.hasRadixPop ? 9000 : 5000,
+            pollMs: 500,
+            label: dropdownState.hasListbox || dropdownState.hasRadixPop ? 'empty-shell' : 'no-shell',
+          });
+          this.log(`[PROMPT] @mention dropdown after poll: ${JSON.stringify(dropdownState)}`);
+        }
+
+        if (dropdownState.optionCount > 0) {
           const exactSelection = await this._selectExactMentionOption(cleanName);
           if (!exactSelection.found) {
             throw new Error(`[PRE-GEN] HARD GATE: Exact @mention option not found for @${cleanName}. Options: ${JSON.stringify(exactSelection.options || dropdownState.allOptions || [])}`);
@@ -3432,20 +3572,16 @@ class CinemaStudioAutomation {
           await page.keyboard.type(cleanName, { delay: 180 }); // even slower
           await page.waitForTimeout(4000); // longer wait
 
-          const retryDropdown = await page.evaluate(() => {
-            const opts = document.querySelectorAll('[role="option"]');
-            const visible = [...opts].filter(o => o.getBoundingClientRect().width > 0);
-            return {
-              count: visible.length,
-              first: visible[0]?.textContent?.trim()?.slice(0, 50) || '',
-              options: visible.slice(0, 8).map(o => (o.textContent || '').trim().slice(0, 80)),
-            };
-          }).catch(() => ({ count: 0 }));
+          const retryDropdown = await this._waitForMentionDropdownState(cleanName, {
+            timeoutMs: 12000,
+            pollMs: 500,
+            label: 'retry',
+          });
 
-          if (retryDropdown.count > 0) {
+          if (retryDropdown.optionCount > 0) {
             const retryExactSelection = await this._selectExactMentionOption(cleanName);
             if (!retryExactSelection.found) {
-              throw new Error(`[PRE-GEN] HARD GATE: Exact @mention option not found on retry for @${cleanName}. Options: ${JSON.stringify(retryExactSelection.options || retryDropdown.options || [])}`);
+              throw new Error(`[PRE-GEN] HARD GATE: Exact @mention option not found on retry for @${cleanName}. Options: ${JSON.stringify(retryExactSelection.options || retryDropdown.allOptions || [])}`);
             }
             this.log(`[PROMPT] @mention resolved exactly on retry: @${cleanName} → "${retryExactSelection.option.text}"`);
           } else {
@@ -3470,9 +3606,18 @@ class CinemaStudioAutomation {
       return tb?.textContent?.trim() || '';
     }).catch(() => '');
     this.log(`Prompt text (${promptText.length} chars): "${promptText.slice(0, 80)}${promptText.length > 80 ? '...' : ''}"`);
-    const unresolvedRawMentions = [...new Set(promptText.match(/@[a-z0-9][a-z0-9_-]*_[a-z0-9]+_\d{4}\b/gi) || [])];
+    const unresolvedRawMentions = expectedMentions.filter(name =>
+      (finalMentionDom.byName?.[name]?.rawTextNodes || 0) > 0
+    );
     if (unresolvedRawMentions.length > 0) {
-      throw new Error(`[PRE-GEN] HARD GATE: Raw unresolved @element mention(s) remain in prompt text: ${unresolvedRawMentions.join(', ')}. No credits burned.`);
+      throw new Error(`[PRE-GEN] HARD GATE: Raw unresolved @element mention(s) remain in plain text nodes: ${unresolvedRawMentions.map(n => '@' + n).join(', ')}. No credits burned.`);
+    }
+    const missingMentionChips = expectedMentions.filter(name => {
+      const info = finalMentionDom.byName?.[name] || {};
+      return (info.chipLikeTextNodes || 0) === 0 && (info.chipLikeElements || 0) === 0;
+    });
+    if (missingMentionChips.length > 0) {
+      throw new Error(`[PRE-GEN] HARD GATE: Expected @element chip(s) missing from prompt DOM: ${missingMentionChips.map(n => '@' + n).join(', ')}. No credits burned.`);
     }
     if (promptText.length === 0) {
       throw new Error('[PRE-GEN] HARD GATE: Prompt textbox is EMPTY after typing — refusing to click GENERATE. No credits burned.');
@@ -3598,6 +3743,7 @@ class CinemaStudioAutomation {
     // Clear stale references first, then pick from the gallery.
     await this._clearAttachedReferences();
     this._lastSceneReferenceProof = null;
+    this._lastSceneReferenceMentionProof = null;
 
     this.log('[PHASE1c] Attaching location reference from Image Generations gallery');
     await this._attachLocationReference(locationImagePath);
@@ -3606,14 +3752,22 @@ class CinemaStudioAutomation {
     // ── PHASE 1d: RE-VERIFY & REPAIR ASPECT RATIO ──
     // The reference picker interaction can reset the aspect ratio (observed:
     // 16:9 → 1:1 after picker close). Re-read and re-set if it drifted.
-    const postRefState = await this._readToolbarState();
+    let postRefState = await this._readToolbarState();
     if (postRefState.aspect !== aspectRatio) {
       this.log(`[PHASE1d] Aspect ratio drifted: ${postRefState.aspect} → re-setting to ${aspectRatio}`);
-      await this._setAspectRatio(aspectRatio);
-      await page.waitForTimeout(500);
+      for (let aspectRepair = 1; aspectRepair <= 3 && postRefState.aspect !== aspectRatio; aspectRepair++) {
+        await this._setAspectRatio(aspectRatio);
+        await page.waitForTimeout(1200);
+        postRefState = await this._readToolbarState();
+        this.log(`[PHASE1d] Aspect repair ${aspectRepair}/3 readback: aspect=${postRefState.aspect || 'null'}, model=${postRefState.model}, res=${postRefState.resolution || 'null'}, grid=${postRefState.grid || 'null'}`);
+      }
     } else {
       this.log(`[PHASE1d] Aspect ratio OK: ${postRefState.aspect}`);
     }
+    this.log(postRefState.aspect === aspectRatio
+      ? `[PHASE1d] Aspect ratio confirmed before Phase 2: ${postRefState.aspect}`
+      : `[PHASE1d] Aspect ratio still wrong before Phase 2: ${postRefState.aspect || 'null'} (need ${aspectRatio})`,
+      postRefState.aspect === aspectRatio ? 'info' : 'warn');
 
     // ══════════════════════════════════════════════════════════
     // PHASE 2: FINAL SETTINGS VERIFICATION before typing
@@ -3662,14 +3816,14 @@ class CinemaStudioAutomation {
       gateFailures.push(`GRID: ${toolbarState.grid} (need 1x1)`);
     }
 
-    // Gate 7: Reference image MUST be attached (+ button shows thumbnail, not + icon)
-    const refCheck = await this._checkSceneReferenceAttached();
-    const startFrameProofOk = this._isStartFrameProofValid(this._lastSceneReferenceProof, refCheck);
+    // Gate 7: Reference upload must be backend-confirmed. The new image UI
+    // proves composer availability via temporary @image1 resolution after gates.
+    const startFrameProofOk = !!(
+      this._lastSceneReferenceProof &&
+      (this._lastSceneReferenceProof.finalizeOk || (this._lastSceneReferenceProof.batchOk && this._lastSceneReferenceProof.putOk))
+    );
 
-    this.log(`[PHASE2] Reference check: ${JSON.stringify(refCheck)}`);
-    if (!refCheck.attached) {
-      gateFailures.push(`NO REFERENCE IMAGE (${refCheck.debug || 'no thumbnail on + button'})`);
-    }
+    this.log(`[PHASE2] Reference upload proof: ${JSON.stringify(this._lastSceneReferenceProof?.responses?.slice?.(-8) || [])}`);
     if (!startFrameProofOk) {
       gateFailures.push(`START FRAME UPLOAD NOT CONFIRMED (proof=${JSON.stringify(this._lastSceneReferenceProof?.responses?.slice?.(-8) || [])})`);
     }
@@ -3688,6 +3842,13 @@ class CinemaStudioAutomation {
     // ── BUILD PROMPT with budget-aware blocking truncation ──
     // Higgsfield prompt limit is ~2500 chars. The fixed text (opener + closer +
     // lighting) takes ~350-500 chars. Remaining budget is split across characters.
+    const imageReferenceProof = await this._verifySceneReferenceViaImageMention();
+    this._lastSceneReferenceMentionProof = imageReferenceProof;
+    if (!imageReferenceProof.ok) {
+      throw new Error(`[PRE-GEN] HARD GATE: Attached scene reference did not resolve as @image1: ${imageReferenceProof.reason}; options=${JSON.stringify(imageReferenceProof.options || [])}. No credits burned.`);
+    }
+    this.log(`[PHASE2] @image1 reference proof passed (${imageReferenceProof.selected || 'resolved'}) - prompt cleared for real scene text`);
+
     const PROMPT_BUDGET = 2400;
     const opener = `WIDE SHOT inside this location. Characters are immersed in the scene and never look at or acknowledge the camera. `;
     const closer = `Photorealistic cinematic still, shallow depth of field, 35mm. Natural candid moment — no posing, no eye contact with camera. Location must match the attached image exactly — no new props or objects.`;
@@ -3877,6 +4038,8 @@ class CinemaStudioAutomation {
       }
     }
 
+    this.log('[PROMPT] Waiting for reference/tool state to settle before typing prompt...');
+    await page.waitForTimeout(2500);
     await this._typeBlockingPrompt(segments);
     await page.waitForTimeout(800);
 
@@ -3905,7 +4068,7 @@ class CinemaStudioAutomation {
     // ── FINAL REFERENCE RE-CHECK (right before clicking GENERATE) ──
     // This is the LAST line of defense. If the reference somehow detached
     // (picker auto-closed, React state drift), we catch it here.
-    const finalRefCheck = await this._checkSceneReferenceAttached();
+    const finalRefCheck = { attached: !!this._lastSceneReferenceMentionProof?.ok, method: '@image1' };
 
     if (!finalRefCheck.attached) {
       throw new Error('HARD GATE (PHASE3): Reference image NOT on + button right before GENERATE — refusing to click GENERATE without reference');

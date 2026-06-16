@@ -1,14 +1,15 @@
 /**
  * Higgsfield Elements — @ Toolbar Button Modal Overlay Automation
  *
- * As of May 2026, Higgsfield removed the Elements tab/panel from Cinema Studio.
- * The @ toolbar button in the bottom toolbar is now the SOLE entry point for
- * element creation and browsing.
+ * As of June 2026, the top-center project @/Elements control is the preferred
+ * entry point for element creation and browsing. The bottom prompt-toolbar @
+ * button is retained as a fallback only because it is crowded by prompt and
+ * reference controls.
  *
  * ── UI Flow (May 2026) ──
  *
- * 1. @ toolbar button (small no-text SVG button in bottom toolbar, after the
- *    "1x1" grid button, at y > vh * 0.65) opens a modal overlay.
+ * 1. Top-center project @/Elements control opens a modal overlay. Fallback:
+ *    @ toolbar button in the bottom toolbar after the "1x1" grid button.
  *
  * 2. Elements modal overlay contains:
  *    - "Elements" heading at top
@@ -34,7 +35,9 @@
  * ── Key Differences from Old Elements Tab ──
  *
  * - No more "Elements" / "Generations" top tabs — they don't exist
- * - Entry point is @ toolbar button (isTrusted click required — Radix UI)
+ * - Primary entry point is the top-center project @/Elements control
+ * - Current preference: click the top-center project @/Elements control first;
+ *   the bottom toolbar @ is fallback only
  * - Elements live in a modal overlay, not a persistent panel
  * - "Create new" is a card in the grid, not a "Create Element" button
  * - Form has Cancel + Save buttons (old form had no Cancel)
@@ -135,7 +138,7 @@ class HiggsfieldElements {
     const openedViaProjectButton = await this._openElementsModalViaProjectButton(page);
     if (openedViaProjectButton) return;
 
-    this.log('Opening elements modal via @ toolbar button...');
+    this.log('Project Elements button did not open modal; falling back to bottom @ toolbar button...');
 
     // Find the @ button using dual-toolbar-aware selection.
     // CRITICAL: Higgsfield renders TWO duplicate toolbar sets at slightly different

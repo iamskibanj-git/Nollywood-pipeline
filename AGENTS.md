@@ -345,7 +345,7 @@ Files changed:
 
 Element creation was reworked for the May 2026 Higgsfield `@` Elements modal UI.
 
-- **Entry point:** The Elements modal opens from the small `@`/Elements control in the bottom toolbar, immediately after the `1x1` grid control. Higgsfield renders duplicate toolbar rows; automation must choose the controlling toolbar set, then try candidate no-text SVG buttons until the Elements modal opens.
+- **Entry point:** Prefer the top-center project `@`/`Elements` control near the project title. The bottom prompt-toolbar `@` control remains fallback only; it is crowded by `+`/reference controls and duplicate toolbar rows, so it is easier to mis-click.
 - **Create new:** The actionable control is the circular `+` inside the first `Create new` tile. Clicking only the `Create new` text can select or edit an existing element. If the new-element form opens with a pre-filled `reference-name`, treat it as editing an existing element: close the form and hard-fail before uploading.
 - **Upload source mapping:** `@{baseName}_o1_{suffix}` uses the master portrait (`portrait_character_N.png`) plus the `o1` grid (`character_N_o1_grid.png`). Non-default outfits use outfit portraits (`portrait_character_N_o2.png`, etc.) plus matching outfit grids. All element upload paths must resolve inside the current project directory.
 - **Upload mechanics:** Direct `setInputFiles()` on hidden `input[type=file]` is unsafe for the Elements form. It can create local-looking DOM state without Higgsfield accepting the file. Use real mouse clicks that trigger a trusted native `filechooser`, then attach files through `chooser.setFiles()`.
@@ -1774,7 +1774,7 @@ Uses negative lookbehind `(?<!@)` + word boundaries to avoid double-prefixing.
 After restoring `cinematicElementNames` from DB portrait assets, compare `restoredCount` vs `characters.length`. If fewer elements are stored than characters exist in the bible, clear the map and fall through to full creation. This catches partial completion (e.g. 2 of 3 created).
 
 **Layer 2 — Higgsfield @ button verification (browser-based):**
-If the count matches (all elements stored in DB), open the browser, navigate to the Cinema Studio project, and call `_verifyElementsViaAtButton()` against the stored element names. If any are missing from the dropdown (deleted from Higgsfield), clear the map and fall through. Only runs on DB-restored resumes (`restoredFromDb=true`), not during the current run where elements were just created.
+If the count matches (all elements stored in DB), open the browser, navigate to the Cinema Studio project, and verify the stored element names through the project Elements modal. Do not use `_verifyElementsViaAtButton()` for setup existence checks; the composer autocomplete can false-negative. If any are missing from the modal, clear the map and fall through. Only runs on DB-restored resumes (`restoredFromDb=true`), not during the current run where elements were just created.
 
 **Layer 3 — Creation loop with @ button filtering (existing behavior):**
 When the gate falls through, the creation loop runs fresh. The existing `@ button pre-check` (line ~2726) filters out elements that still exist in Higgsfield, so only missing ones get created.
@@ -3853,11 +3853,22 @@ Police station / civic facility interiors need indoor civic/security grounding, 
 
 Important distinction: this limitation applies only to the pre-flight existence/listing gate. Actual scene-image and video prompt construction still must resolve character/location references through Higgsfield's `@` autocomplete so the prompt receives real element reference chips/UUIDs. The current prompt typing code intentionally types `@`, pauses, then types the full element name slowly and hard-fails if the exact autocomplete option cannot be selected. Do not replace generation prompt `@` references with plain text.
 
+Cinema Studio prompt autocomplete can render an empty dropdown/listbox shell before element options arrive. Treat `hasListbox=true` with `optionCount=0` as a wait/repair state, not as a selectable dropdown. Poll for visible `role=option` / `role=menuitem` entries, then select the exact element; if options never populate, remove only the unresolved raw `@name`, refocus the textbox, retype slower, and keep the pre-generation hard gate.
+
+Resolved Higgsfield `@` chips still expose their label in the prompt editor's `textContent`. Do not use a plain regex over textbox text to detect unresolved raw mentions. Use DOM context from `_inspectPromptMentionDom()` and fail only when the `@name` lives in a normal text node without a chip-like/contenteditable=false ancestor.
+
+After a scene reference upload, Higgsfield can drift aspect/resolution back to a stale duplicate toolbar row (observed `9:16` set, then Phase 2 read `3:4` / `1K`). Toolbar state and aspect clicking should prefer the row containing `Cinematic Cameras`, then read/repair aspect with readback before Phase 2. A scene that fails all generation attempts should stop the current pass so the bounded retry/fallback focuses on the missing scene instead of marching onward.
+
+Cinema Studio image references no longer prove attachment by showing a thumbnail on the `+` button. The current image UI shows the reference above the prompt textarea. For scene image generation, after backend upload proof and image settings are complete, temporarily type `@image1`, require it to resolve to `Image 1`, verify a chip-like DOM node, then clear the textbox and type the real scene prompt. Do not leave `@image1` in the final scene prompt, and do not use the old `+` thumbnail heuristic as a hard gate.
+
+Element existence authority order: project Elements modal proof is source of truth. Open that modal from the top-center project `@`/`Elements` control first, and use the bottom prompt-toolbar `@` only as fallback. Valid persisted modal proof can skip setup verification on resume. Do not type `@character_name` as a setup/existence diagnostic; that path is obsolete and can false-negative even when the modal lists every element. Real scene prompt chip resolution remains a pre-Generate hard gate. When modal proof reports all expected names present, persist `_cinematicElementsModalProof` in project settings with project id, count, names, timestamp, and source. If anything claims setup elements are missing, re-run the project Elements modal proof before recreating anything.
+
 Higgsfield can render duplicate overlapping image composers/toolbars at the same Y coordinate. One row may be the active Cinematic Cameras row while a stale row still shows controls such as `Soul 2.0`, `3:4`, `2k`, `Color transfer`. Toolbar state reads must not mix the active model from one row with aspect/resolution/grid from the stale row. Read aspect/resolution/grid only from controls to the right of the selected active model button. Live verification after the fix:
 ```text
 _readToolbarState() -> image, cinematic-cameras, 16:9, 2K, 1x1, cost 2
 _setupToolbarSequence('9:16') -> image, cinematic-cameras, 9:16, 4K, 1x1, cost 4
 ```
+Update 2026-06-16: duplicate rows can share the exact same Y coordinate. Y-band grouping is not sufficient. When anchoring on `Cinematic Cameras`, use an x-window: controls to the right of that model button and before the next model button at the same Y. This prevents stale same-Y `Nano Banana Pro / 3:4 / 1K` controls from overwriting the Cinematic Cameras row or being clicked during aspect repair.
 
 Live verification for element existence after the fix:
 ```text

@@ -4107,24 +4107,45 @@ class PipelineOrchestrator {
               projectId: this.state.higgsfield_project_id,
             });
 
-            // Navigate to project and set up toolbar minimally for @ button
+            // Navigate to project; setup existence checks use the project Elements modal.
             const titleInitials = this._titleInitials(this.state.selectedTitle || this.state.script?.title);
             await verifyCinema.ensureProject(titleInitials.toUpperCase());
             await verifyCinema._ensureCinemaStudioActive();
-            await verifyCinema._setupToolbarSequence('16:9');
 
             // Get the unique suffixed element names (not base names, not char IDs)
             const storedNames = [...new Set(Object.values(this.state.cinematicElementNames))];
-            this.log(`[CINEMATIC] Checking @ button for ${storedNames.length} element(s): ${storedNames.map(n => '@' + n).join(', ')}`);
+            this.log(`[CINEMATIC] Checking project Elements modal for ${storedNames.length} element(s): ${storedNames.map(n => '@' + n).join(', ')}`);
 
-            const elementCheck = await verifyCinema._verifyElementsViaAtButton(storedNames);
-            if (elementCheck.missing.length === 0) {
-              this.log(`[CINEMATIC] ✓ All ${storedNames.length} elements verified in Higgsfield — skipping element setup`);
+            const persistedModalProof = this._getValidCinematicElementModalProof(projectId, storedNames);
+            if (persistedModalProof) {
+              this.log(`[CINEMATIC] Valid persisted Elements modal proof found (${persistedModalProof.count}/${storedNames.length}, ${persistedModalProof.verifiedAt}) - skipping setup verification`);
               verificationPassed = true;
             } else {
-              this.log(`[CINEMATIC] MISSING from Higgsfield: ${elementCheck.missing.map(n => '@' + n).join(', ')} — re-running element setup`);
-              this.state.cinematicElementNames = null;
-              // restoredSuffix preserved for consistent naming
+              const elementCheck = await (async () => {
+                const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+                const elements = new HiggsfieldElements({
+                  automation: this.automation,
+                  logger: (m) => this.log(`[CINEMATIC] ${m}`),
+                  projectId: this.state.higgsfield_project_id,
+                });
+                elements.invalidateCache();
+                const current = await elements.listExistingElements();
+                const normalize = (value) => String(value || '').trim().toLowerCase().replace(/^@+/, '').replace(/^use(?=[a-z0-9_-])/, '');
+                const currentSet = new Set(current.map(e => normalize(e.name)).filter(Boolean));
+                const missing = storedNames.filter(name => !currentSet.has(normalize(name)));
+                if (missing.length === 0) {
+                  this._persistCinematicElementModalProof(projectId, storedNames, 'project-elements-modal-resume');
+                }
+                return { missing };
+              })();
+              if (elementCheck.missing.length === 0) {
+                this.log(`[CINEMATIC] Project Elements modal confirmed all ${storedNames.length} elements - skipping element setup`);
+                verificationPassed = true;
+              } else {
+                this.log(`[CINEMATIC] Project Elements modal missing ${elementCheck.missing.length} element(s): ${elementCheck.missing.map(n => '@' + n).join(', ')} - re-running element setup`);
+                this.state.cinematicElementNames = null;
+                // restoredSuffix preserved for consistent naming
+              }
             }
           } catch (verifyErr) {
             this.log(`[CINEMATIC] Verification failed: ${verifyErr.message.split('\n')[0]} — re-running element setup to be safe`, 'warn');
@@ -4722,14 +4743,6 @@ class PipelineOrchestrator {
     const allElementNames = pending.map(p => p.name);
     const specByName = new Map(pending.map(p => [normalizeElementName(p.name), p]));
 
-    try {
-      this.log(`[CINEMATIC] Diagnostic @ button check for existing elements: ${allElementNames.map(n => '@' + n).join(', ')}`);
-      const elementCheck = await cinemaStudio._verifyElementsViaAtButton(allElementNames);
-      this.log(`[CINEMATIC] Diagnostic @ button found ${elementCheck.available.length} existing, ${elementCheck.missing.length} missing`);
-    } catch (checkErr) {
-      this.log(`[CINEMATIC] Diagnostic @ button pre-check failed: ${checkErr.message.split('\n')[0]} - continuing with Elements modal proof`, 'warn');
-    }
-
     let modalProof = await verifyElementsViaModal(allElementNames, 'Initial Elements modal proof');
     let missingSpecs = modalProof.missing.map(name => specByName.get(normalizeElementName(name))).filter(Boolean);
     let retryRound = 0;
@@ -4768,19 +4781,8 @@ class PipelineOrchestrator {
     }
 
     this.log(`[CINEMATIC] Element setup: all ${allElementNames.length} elements accounted for via project Elements modal`);
+    this._persistCinematicElementModalProof(projectId, allElementNames, 'project-elements-modal');
 
-    try {
-      this.log(`[CINEMATIC] Running final diagnostic @ button verification on ${allElementNames.length} element(s)...`);
-      const finalCheck = await cinemaStudio._verifyElementsViaAtButton(allElementNames);
-      if (finalCheck.missing.length > 0) {
-        this.log(`[CINEMATIC] Diagnostic @ button still misses ${finalCheck.missing.length} element(s): ${finalCheck.missing.map(n => '@' + n).join(', ')} - continuing because Elements modal proof passed`, 'warn');
-      } else {
-        this.log(`[CINEMATIC] Diagnostic @ button confirmed all ${allElementNames.length} character elements`);
-        this.state._cinematicElementsConfirmedViaAtButton = true;
-      }
-    } catch (finalErr) {
-      this.log(`[CINEMATIC] Final diagnostic @ button verification failed: ${finalErr.message} - continuing because Elements modal proof passed`, 'warn');
-    }
     this._lastMissingElements = [];
 
     // CRITICAL: Switch from Elements panel to Generations view
@@ -7819,7 +7821,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       if (sceneSuccess && sceneLocHint) {
         lastSceneImageByLocation[sceneLocHint] = outputPath;
       }
-      cSceneGenCount++;
+      if (sceneSuccess) {
+        cSceneGenCount++;
+      } else if (!browserDead) {
+        this.log(`[CINEMATIC] Stopping current scene pass after failed Ch${chapter} Sc${scene.scene_number}; retry/fallback will focus on missing scene(s)`, 'warn');
+        break;
+      }
 
       if (browserDead) {
         this.log(`[CINEMATIC] Browser dead — skipping remaining ${allScenes.length - 1 - idx} scene(s)`, 'warn');
@@ -10184,6 +10191,43 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       this.log(`[PERSIST] Cinematic maps saved to DB settings (elements: ${Object.keys(this.state.cinematicElementNames || {}).length}, outfits: ${Object.keys(this.state._outfitElements || {}).length}, locations: ${Object.keys(this.state.cinematicLocations || {}).length})`);
     } catch (e) {
       this.log(`[PERSIST] WARN: Could not persist cinematic maps: ${e.message}`, 'warn');
+    }
+  }
+
+  _getValidCinematicElementModalProof(projectId, expectedNames = []) {
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+      const proof = settings._cinematicElementsModalProof || null;
+      const normalize = (value) => String(value || '').trim().toLowerCase().replace(/^@+/, '');
+      const expected = [...new Set((expectedNames || []).map(normalize).filter(Boolean))].sort();
+      const proofNames = [...new Set((proof?.names || []).map(normalize).filter(Boolean))].sort();
+      const currentProjectId = this.state.higgsfield_project_id || settings.higgsfield_cinema_project_id || null;
+      const sameProject = proof?.projectId && currentProjectId && proof.projectId === currentProjectId;
+      const sameCount = expected.length > 0 && proof?.count === expected.length && proofNames.length === expected.length;
+      const sameNames = sameCount && expected.every((name, index) => proofNames[index] === name);
+      if (sameProject && sameNames) return proof;
+    } catch (_) {}
+    return null;
+  }
+
+  _persistCinematicElementModalProof(projectId, names = [], source = 'project-elements-modal') {
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+      const normalize = (value) => String(value || '').trim().toLowerCase().replace(/^@+/, '');
+      const cleanNames = [...new Set((names || []).map(normalize).filter(Boolean))].sort();
+      settings._cinematicElementsModalProof = {
+        source,
+        verifiedAt: new Date().toISOString(),
+        projectId: this.state.higgsfield_project_id || settings.higgsfield_cinema_project_id || null,
+        count: cleanNames.length,
+        names: cleanNames,
+      };
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+      this.log(`[PERSIST] Cinematic element modal proof saved (${cleanNames.length} names, source=${source})`);
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist cinematic element modal proof: ${e.message}`, 'warn');
     }
   }
 
