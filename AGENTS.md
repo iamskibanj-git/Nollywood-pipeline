@@ -319,17 +319,17 @@ Files changed:
 **Session 30Q — Element Gate Auto-Verification (M3):**
 
 M3 — Element gate auto-verification:
-- Before the 'elements-ready' gate, the orchestrator now auto-verifies element existence in Higgsfield.
+- The orchestrator auto-verifies element existence in Higgsfield without requiring a human gate.
 - Creates a temporary `HiggsfieldElements` instance, calls `invalidateCache()` + `listExistingElements()`.
 - Deduplicates expected element names from `cinematicElementNames` values (the map is many-to-one).
 - Compares against scraped list using case-insensitive matching.
-- **All present → auto-approve**, logs "✓ All N elements verified — auto-approving", skips manual gate entirely.
-- **Any missing → manual gate** with `missing` array in the gate event. UI renders specific missing-element checklist via existing `renderCinematicElementChecklist()`.
-- **Verification failure → falls through** to manual gate (non-blocking on error).
+- **All present → auto-approve**, logs "✓ All N elements verified — auto-approving".
+- **Any missing → automated retry**, wait 2 seconds, rerun element setup, and recreate only names still absent from the project Elements modal.
+- **Verification failure → automated retry**, not a human `elements-ready` gate.
 - Scope boundary: verifies existence only (name in list), not quality (correct image/settings). Quality verification is a separate project.
 
 UI:
-- `index.html` — elements-ready gate handler now passes `event.missing` to `renderCinematicElementChecklist()` so the operator sees exactly which elements need manual creation.
+- The renderer's legacy `elements-ready` checklist handler may remain for old routes, but cinematic element setup should not emit it as the completion path.
 
 Design decisions:
 - Case-insensitive comparison handles Higgsfield's occasional name normalization.
@@ -3840,6 +3840,8 @@ Check eligibility@codex_elem_test_0615Character
 Normalize scraped names by extracting the `@name`, stripping leading `@`, and removing trailing type suffixes (`Character`, `Location`, `Prop`) before comparing. Deduplicate normalized names and ignore utility labels such as `Check eligibility`.
 
 The composer `@name` autocomplete path is currently not reliable as an existence gate. In live testing, Image mode + Cinematic Cameras accepted typed text into the Lexical prompt and opened a tiny `[role=listbox]`, but the listbox stayed empty even though the element existed. Use the Elements modal/list scrape as the source of truth for "element exists"; keep composer mention checks diagnostic only.
+
+Element setup must not fall through to human creation. If the stage reaches the element-ready gate with missing names, wait 2 seconds, re-open/scrape the project Elements modal, and recreate only the names still absent from that modal. Repeat until every expected character element is accounted for. The old `Elements Ready` human click is not an acceptable completion path for this gate; a browser/page failure should restart/resume into the same automated retry loop rather than proceed on user authority.
 
 Important distinction: this limitation applies only to the pre-flight existence/listing gate. Actual scene-image and video prompt construction still must resolve character/location references through Higgsfield's `@` autocomplete so the prompt receives real element reference chips/UUIDs. The current prompt typing code intentionally types `@`, pauses, then types the full element name slowly and hard-fails if the exact autocomplete option cannot be selected. Do not replace generation prompt `@` references with plain text.
 

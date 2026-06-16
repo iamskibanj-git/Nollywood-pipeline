@@ -2354,10 +2354,9 @@ class PipelineOrchestrator {
       // creates Higgsfield Character elements that downstream Cinema Studio
       // 2.0 + Kling 3.0 stages reference via @charactername.
       //
-      // Best-effort automation with graceful fallback to manual creation:
-      // if the 7-click UI path fails, we print a detailed checklist and pause
-      // at an approval gate so the user can finish manually in Higgsfield's UI
-      // and then click "Elements Ready — Continue."
+      // Element creation must stay automated. If any element is missing, the
+      // setup path waits briefly, re-scrapes the project Elements modal, and
+      // retries only the missing names until all are accounted for.
       //
       // Staged mode is a no-op passthrough. Stage runs only once per project
       // (idempotent): if all elements already exist, the stage completes
@@ -2367,10 +2366,10 @@ class PipelineOrchestrator {
           this.log('[CINEMATIC] Element setup stage starting — character grids + character elements + location images');
           await this._runCinematicElementSetup(projectId, projectDir);
 
-          // ── ELEMENT APPROVAL GATE (with auto-verification) ──
-          // M3: Before asking the operator, check if all expected elements exist
-          // in Higgsfield. If they do, auto-approve and skip the manual gate.
-          // If any are missing, show the gate with a specific missing-element list.
+          // ── ELEMENT AUTO-VERIFICATION ──
+          // M3: Verify all expected elements exist in Higgsfield. If the
+          // verifier cannot auto-approve, retry automated setup instead of
+          // waiting for a human Elements Ready click.
           let elementsAutoApproved = false;
           try {
             const { HiggsfieldElements } = require('../automation/higgsfield-elements');
@@ -2411,14 +2410,13 @@ class PipelineOrchestrator {
             }
           } catch (verifyErr) {
             this.log(`[CINEMATIC] Element auto-verification failed (non-blocking): ${verifyErr.message}`, 'warn');
-            // Fall through to manual gate
+            // Fall through to the automated retry below.
           }
 
           if (!elementsAutoApproved) {
-            this.state.status = 'waiting_approval';
-            this.emit({ type: 'waiting', gate: 'elements-ready', missing: this._lastMissingElements || [] });
-            this.log('Waiting for element approval — confirm elements exist in Higgsfield before proceeding...');
-            await this.waitForApproval('elements-ready');
+            this.log('[CINEMATIC] Element verification did not auto-approve - waiting 2s and retrying automated element setup (no human gate)', 'warn');
+            await new Promise(r => setTimeout(r, 2000));
+            await this._runCinematicElementSetup(projectId, projectDir);
           }
           if (this.cancelled) return;
 
@@ -4695,52 +4693,56 @@ class PipelineOrchestrator {
       this.log(`[CINEMATIC] ✓ All blocking @mentions match element names: ${[...elementBaseNames].map(n => '@' + n).join(', ')}`);
     }
 
-    // ── @ BUTTON PRE-CHECK: which elements already exist? ──
-    // The toolbar is already in Image + Cinematic Cameras mode (set up above).
-    // Click the @ button to see all available elements. Skip creating any
-    // that are already in the dropdown — saves time and avoids duplicates.
-    let existingElements = new Set();
+    // ── ELEMENT MODAL PROOF: which elements already exist? ──
+    // Element existence gate: use the project Elements modal as source of
+    // truth. The composer @ autocomplete path is diagnostic only here because
+    // it can miss elements that the project modal already lists.
+    const normalizeElementName = (value) => String(value || '')
+      .toLowerCase()
+      .trim()
+      .replace(/^@+/, '')
+      .replace(/^use(?=[a-z0-9_-])/, '');
+
+    const verifyElementsViaModal = async (expectedNames, label = 'Elements modal proof') => {
+      await new Promise(r => setTimeout(r, 2000));
+      elements.invalidateCache();
+      const current = await elements.listExistingElements();
+      const currentSet = new Set(current.map(e => normalizeElementName(e.name)).filter(Boolean));
+      const missing = expectedNames.filter(name => !currentSet.has(normalizeElementName(name)));
+      const existing = expectedNames.filter(name => currentSet.has(normalizeElementName(name)));
+      this._lastMissingElements = missing;
+      this.log(`[CINEMATIC] ${label}: ${existing.length}/${expectedNames.length} present, ${missing.length} missing via project Elements modal${missing.length ? ` (${missing.slice(0, 5).map(n => '@' + n).join(', ')}${missing.length > 5 ? '...' : ''})` : ''}`);
+      return { existing, missing, current };
+    };
+
+    const allElementNames = pending.map(p => p.name);
+    const specByName = new Map(pending.map(p => [normalizeElementName(p.name), p]));
+
     try {
-      const allNames = pending.map(p => p.name);
-      this.log(`[CINEMATIC] Checking @ button for existing elements: ${allNames.map(n => '@' + n).join(', ')}`);
-      const elementCheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
-      for (const name of elementCheck.available) {
-        existingElements.add(name.toLowerCase().trim());
-      }
-      this.log(`[CINEMATIC] @ button found ${elementCheck.available.length} existing, ${elementCheck.missing.length} missing`);
+      this.log(`[CINEMATIC] Diagnostic @ button check for existing elements: ${allElementNames.map(n => '@' + n).join(', ')}`);
+      const elementCheck = await cinemaStudio._verifyElementsViaAtButton(allElementNames);
+      this.log(`[CINEMATIC] Diagnostic @ button found ${elementCheck.available.length} existing, ${elementCheck.missing.length} missing`);
     } catch (checkErr) {
-      this.log(`[CINEMATIC] @ button pre-check failed: ${checkErr.message.split('\n')[0]} — will try creating all`, 'warn');
+      this.log(`[CINEMATIC] Diagnostic @ button pre-check failed: ${checkErr.message.split('\n')[0]} - continuing with Elements modal proof`, 'warn');
     }
 
-    // Filter: only create elements that are NOT in the @ dropdown
-    const actuallyPending = [];
-    let preSkipped = 0;
-    for (const p of pending) {
-      if (existingElements.has(p.name.toLowerCase().trim())) {
-        this.log(`[CINEMATIC] @${p.name} already exists (@ button confirmed) — skipping creation`);
-        preSkipped++;
-      } else {
-        actuallyPending.push(p);
-      }
-    }
-    if (preSkipped > 0) {
-      this.log(`[CINEMATIC] ${preSkipped} element(s) already exist, ${actuallyPending.length} to create`);
-    }
+    let modalProof = await verifyElementsViaModal(allElementNames, 'Initial Elements modal proof');
+    let missingSpecs = modalProof.missing.map(name => specByName.get(normalizeElementName(name))).filter(Boolean);
+    let retryRound = 0;
 
-    let automationFailure = null;
-    let createdCount = 0;
-    let skippedCount = preSkipped;
+    while (missingSpecs.length > 0) {
+      retryRound++;
+      this.log(`[CINEMATIC] Element retry round ${retryRound}: recreating ${missingSpecs.length} missing element(s) until all are accounted for`);
 
-    try {
-      for (let idx = 0; idx < actuallyPending.length; idx++) {
-        const p = actuallyPending[idx];
-        this.emit({ type: 'progress', stage: 'elements-create', current: idx + 1, total: actuallyPending.length });
+      for (let idx = 0; idx < missingSpecs.length; idx++) {
+        if (this.cancelled) return;
+        await this.checkPause();
 
-        // ── Inter-element wait ──
-        // Give the UI time to settle between element creations.
-        // First element starts immediately; subsequent ones wait 5s.
+        const p = missingSpecs[idx];
+        this.emit({ type: 'progress', stage: 'elements-create', current: idx + 1, total: missingSpecs.length });
+
         if (idx > 0) {
-          this.log(`[CINEMATIC] Waiting 5s before creating next element (@${p.name})...`);
+          this.log(`[CINEMATIC] Waiting 5s before retrying next element (@${p.name})...`);
           await new Promise(r => setTimeout(r, 5000));
         }
 
@@ -4751,171 +4753,33 @@ class PipelineOrchestrator {
             gridPath: p.gridPath,
             description: p.description,
           });
-          if (result.created) {
-            // ── Post-creation confirmation via @ button ──
-            // Wait and verify the element actually exists using the authoritative
-            // @ button check (types @name in prompt, checks autocomplete dropdown)
-            this.log(`[CINEMATIC] Element @${p.name} created — waiting 3s then confirming via @ button...`);
-            await new Promise(r => setTimeout(r, 3000));
-            try {
-              const atCheck = await cinemaStudio._verifyElementsViaAtButton([p.name]);
-              if (atCheck.available.length > 0) {
-                this.log(`[CINEMATIC] ✓ Element @${p.name} confirmed via @ button`);
-                existingElements.add(p.name.toLowerCase().trim());
-                createdCount++;
-              } else {
-                this.log(`[CINEMATIC] Warn: @${p.name} not confirmed via @ button — manual verification required`, 'warn');
-                if (!automationFailure) automationFailure = new Error(`Element @${p.name} saved but was not confirmed by @ autocomplete`);
-              }
-            } catch (verifyErr) {
-              this.log(`[CINEMATIC] @ button verification failed for @${p.name}: ${verifyErr.message} — manual verification required`, 'warn');
-              if (!automationFailure) automationFailure = verifyErr;
-            }
-          } else {
-            skippedCount++;
-          }
+          this.log(`[CINEMATIC] Element @${p.name} ${result.created ? 'created' : 'already existed'}; modal proof will re-check after this pass`);
         } catch (e) {
-          // Per-element failure — but the element may have been created despite
-          // the automation error (e.g. setInputFiles didn't trigger React, but
-          // the element was saved anyway via a prior attempt or manual action).
-          this.log(`[CINEMATIC] Element creation failed for @${p.name}: ${e.message}`, 'warn');
-
-          // Wait before checking — give Higgsfield time to process
-          await new Promise(r => setTimeout(r, 3000));
-
-          // ── Authoritative @ button verification ──
-          // The Elements panel scraper is unreliable (shows elements from other
-          // projects, grid/list mismatch). The @ button check types the full
-          // @name in the Cinema Studio prompt box and checks the autocomplete
-          // dropdown — this is the ground truth the user trusts.
-          let existsAnyway = false;
-          try {
-            this.log(`[CINEMATIC] Running @ button verification for @${p.name} after creation failure...`);
-            const atCheck = await cinemaStudio._verifyElementsViaAtButton([p.name]);
-            existsAnyway = atCheck.available.length > 0;
-            if (existsAnyway) {
-              this.log(`[CINEMATIC] ✓ @ button confirms @${p.name} EXISTS despite creation error — counting as skipped`);
-              existingElements.add(p.name.toLowerCase().trim());
-            } else {
-              this.log(`[CINEMATIC] ✗ @ button confirms @${p.name} does NOT exist — creation truly failed`);
-            }
-          } catch (verifyErr) {
-            this.log(`[CINEMATIC] @ button verification failed for @${p.name}: ${verifyErr.message}`, 'warn');
-            // Fall back to panel scraper as last resort
-            try {
-              elements.invalidateCache();
-              existsAnyway = await elements.elementExists(p.name);
-              if (existsAnyway) {
-                this.log(`[CINEMATIC] Panel scraper fallback: @${p.name} found — counting as skipped`);
-                existingElements.add(p.name.toLowerCase().trim());
-              }
-            } catch (scraperErr) {
-              this.log(`[CINEMATIC] Panel scraper fallback also failed for @${p.name}: ${scraperErr.message}`, 'warn');
-              this.log(`[CINEMATIC] ↳ Element may exist but cannot verify — will count as failed (manual gate will fire)`, 'warn');
-            }
-          }
-
-          if (existsAnyway) {
-            skippedCount++;
-          } else {
-            if (!automationFailure) automationFailure = e;
-          }
+          this.log(`[CINEMATIC] Element retry failed for @${p.name}: ${e.message} - will re-check modal list and retry if still missing`, 'warn');
         }
       }
-    } catch (e) {
-      // Catastrophic automation failure (e.g. panel didn't open at all)
-      automationFailure = e;
+
+      modalProof = await verifyElementsViaModal(allElementNames, `Post-retry round ${retryRound} Elements modal proof`);
+      missingSpecs = modalProof.missing.map(name => specByName.get(normalizeElementName(name))).filter(Boolean);
     }
 
-    this.log(`[CINEMATIC] Element setup: ${createdCount} created, ${skippedCount} already existed, ${pending.length - createdCount - skippedCount} failed (of ${pending.length} total)`);
+    this.log(`[CINEMATIC] Element setup: all ${allElementNames.length} elements accounted for via project Elements modal`);
 
-    // Determine if we should proceed or gate.
-    // Primary signal: creation results (created + skipped = all handled).
-    // The scraper-based verification is unreliable (grid view vs list view
-    // mismatch) so we trust the per-element Save success as the source of truth.
-    const failedCount = pending.length - createdCount - skippedCount;
-
-    if (failedCount > 0 && automationFailure) {
-      // Some elements truly failed (Save threw, form stayed open, etc.)
-      const failedElements = actuallyPending.filter(p => !existingElements.has(p.name.toLowerCase().trim()));
-      const checklist = HiggsfieldElements.buildManualChecklist(failedElements);
-      this.log(checklist, 'warn');
-      this.emit({ type: 'cinematic-manual-element-checklist', pending: failedElements.map(p => ({ name: p.name, description: p.description })) });
-
-      this.state.status = 'waiting_approval';
-      this.emit({ type: 'waiting', gate: 'elements-ready' });
-      this.log(`[CINEMATIC] ${failedCount} element(s) failed — waiting for manual creation or "Elements Ready" click`);
-
-      await this.waitForApproval('elements-ready');
-
-      // ── Post-approval @ button re-verification ──
-      // User clicked "Elements Ready" — verify ALL elements actually exist
-      // before spending credits on locations/scenes.
-      this.log('[CINEMATIC] ✓ Element gate resolved — running @ button re-verification on ALL elements...');
-      const allNames = pending.map(p => p.name);
-      try {
-        const recheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
-        if (recheck.missing.length > 0) {
-          this.log(`[CINEMATIC] ⚠ Post-approval check: ${recheck.missing.length} element(s) STILL missing: ${recheck.missing.map(n => '@' + n).join(', ')}`, 'warn');
-          this.emit({ type: 'cinematic-manual-element-checklist', pending: recheck.missing.map(n => ({ name: n, description: '' })) });
-
-          // Re-gate — don't proceed with missing elements
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'elements-ready' });
-          this.log(`[CINEMATIC] ${recheck.missing.length} element(s) still missing — waiting again for "Elements Ready" click`);
-          await this.waitForApproval('elements-ready');
-
-          // Second check — if still missing, log warning but proceed (user explicitly confirmed twice)
-          const recheck2 = await cinemaStudio._verifyElementsViaAtButton(allNames);
-          if (recheck2.missing.length > 0) {
-            this.log(`[CINEMATIC] ⚠ Still ${recheck2.missing.length} missing after 2nd approval — proceeding on user authority: ${recheck2.missing.map(n => '@' + n).join(', ')}`, 'warn');
-          } else {
-            this.log(`[CINEMATIC] ✓ All ${allNames.length} elements confirmed via @ button after 2nd approval`);
-          }
-        } else {
-          this.log(`[CINEMATIC] ✓ All ${allNames.length} elements confirmed via @ button — proceeding`);
-        }
-      } catch (recheckErr) {
-        this.log(`[CINEMATIC] @ button re-verification failed: ${recheckErr.message} — proceeding on user authority`, 'warn');
+    try {
+      this.log(`[CINEMATIC] Running final diagnostic @ button verification on ${allElementNames.length} element(s)...`);
+      const finalCheck = await cinemaStudio._verifyElementsViaAtButton(allElementNames);
+      if (finalCheck.missing.length > 0) {
+        this.log(`[CINEMATIC] Diagnostic @ button still misses ${finalCheck.missing.length} element(s): ${finalCheck.missing.map(n => '@' + n).join(', ')} - continuing because Elements modal proof passed`, 'warn');
+      } else {
+        this.log(`[CINEMATIC] Diagnostic @ button confirmed all ${allElementNames.length} character elements`);
+        this.state._cinematicElementsConfirmedViaAtButton = true;
       }
-    } else {
-      // All elements created/skipped successfully. Run one final @ autocomplete
-      // verification because scraper-based skips are weaker than prompt-box
-      // availability, and downstream generation depends on @ autocomplete.
-      const allNames = pending.map(p => p.name);
-      this.log(`[CINEMATIC] Running final @ button verification on ${allNames.length} element(s)...`);
-      try {
-        const finalCheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
-        if (finalCheck.missing.length > 0) {
-          this.log(`[CINEMATIC] ⚠ Final check: ${finalCheck.missing.length} element(s) missing: ${finalCheck.missing.map(n => '@' + n).join(', ')}`, 'warn');
-          this.emit({ type: 'cinematic-manual-element-checklist', pending: finalCheck.missing.map(n => ({ name: n, description: '' })) });
-
-          this.state.status = 'waiting_approval';
-          this.emit({ type: 'waiting', gate: 'elements-ready' });
-          this.log(`[CINEMATIC] Waiting for manual confirmation after final element verification miss`);
-          await this.waitForApproval('elements-ready');
-
-          const recheck = await cinemaStudio._verifyElementsViaAtButton(allNames);
-          if (recheck.missing.length > 0) {
-            this.log(`[CINEMATIC] ⚠ Still missing after approval — proceeding on user authority: ${recheck.missing.map(n => '@' + n).join(', ')}`, 'warn');
-          } else {
-            this.log(`[CINEMATIC] ✓ All ${allNames.length} elements confirmed via @ button after approval`);
-          }
-        } else {
-          this.log(`[CINEMATIC] ✓ All ${allNames.length} character elements confirmed via @ button — proceeding to scene image generation`);
-          this.state._cinematicElementsConfirmedViaAtButton = true;
-          this._lastMissingElements = [];
-        }
-      } catch (finalErr) {
-        this.log(`[CINEMATIC] Final @ button verification failed: ${finalErr.message} — manual confirmation required`, 'warn');
-        this.emit({ type: 'cinematic-manual-element-checklist', pending: allNames.map(n => ({ name: n, description: '' })) });
-        this.state.status = 'waiting_approval';
-        this.emit({ type: 'waiting', gate: 'elements-ready' });
-        await this.waitForApproval('elements-ready');
-      }
+    } catch (finalErr) {
+      this.log(`[CINEMATIC] Final diagnostic @ button verification failed: ${finalErr.message} - continuing because Elements modal proof passed`, 'warn');
     }
+    this._lastMissingElements = [];
 
-    // ── CRITICAL: Switch from Elements panel to Generations view ──
+    // CRITICAL: Switch from Elements panel to Generations view
     // After element setup, the UI is stuck on the Elements panel (shows element
     // list with "Add to Project", "Delete", "Save" buttons). The scene generation
     // code expects the Generations view (prompt textbox + GENERATE button).
