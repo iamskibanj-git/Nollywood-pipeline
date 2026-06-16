@@ -1087,27 +1087,63 @@ class HiggsfieldElements {
   }
 
   async _uploadIntoCurrentElementPicker(page, filePath) {
-    const target = await page.evaluate(() => {
+    const inputInfo = await page.evaluate(() => {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
       };
-      return [...document.querySelectorAll('div, button, label')]
+
+      const picker = [...document.querySelectorAll('[role="dialog"], div')]
         .map((el) => {
           const r = el.getBoundingClientRect();
           const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-          return { text, cx: r.x + r.width / 2, cy: r.y + Math.min(58, r.height * 0.38), x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
+          return { el, text, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el) };
         })
-        .filter((c) => c.visible && /^Upload media\b/i.test(c.text) && c.x > 250 && c.x < 950 && c.y > 80 && c.y < 520 && c.w >= 90 && c.h >= 70)
-        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0] || null;
+        .filter((d) =>
+          d.visible &&
+          d.w > 300 &&
+          d.h > 250 &&
+          d.text.includes('Uploads') &&
+          d.text.includes('Add to Element')
+        )
+        .sort((a, b) => (a.w * a.h) - (b.w * b.h))[0]?.el || document.body;
+
+      const allFileInputs = [...document.querySelectorAll('input[type="file"]')];
+      const inputs = [...picker.querySelectorAll('input[type="file"]')]
+        .map((input, index) => {
+          const r = input.getBoundingClientRect();
+          return {
+            index,
+            globalIndex: allFileInputs.indexOf(input),
+            accept: input.getAttribute('accept') || '',
+            multiple: !!input.multiple,
+            x: r.x,
+            y: r.y,
+            w: r.width,
+            h: r.height,
+            visible: visible(input),
+          };
+        });
+      const imageInput = inputs.find((i) => /\.(jpg|jpeg|png|webp)|image\//i.test(i.accept)) || inputs[0] || null;
+      return imageInput ? { ...imageInput, count: inputs.length } : { count: 0 };
     });
-    if (!target) throw new Error('Upload media tile not found in picker');
-    const chooserPromise = page.waitForEvent('filechooser', { timeout: 15000 });
-    await page.mouse.click(target.cx, target.cy);
-    const chooser = await chooserPromise;
-    await chooser.setFiles(filePath);
-    this.log(`Filechooser accepted ${filePath}`);
+
+    if (!inputInfo || inputInfo.count === 0 || inputInfo.globalIndex == null || inputInfo.globalIndex < 0) {
+      const diag = await page.evaluate(() => ({
+        bodyText: (document.body.innerText || '').slice(0, 500).replace(/\s+/g, ' '),
+        fileInputs: [...document.querySelectorAll('input[type="file"]')].map((input, index) => ({
+          index,
+          accept: input.getAttribute('accept') || '',
+          multiple: !!input.multiple,
+        })),
+      })).catch((e) => ({ error: e.message }));
+      throw new Error(`No file input found in upload picker; diag=${JSON.stringify(diag)}`);
+    }
+
+    const fileInputs = page.locator('input[type="file"]');
+    await fileInputs.nth(inputInfo.globalIndex).setInputFiles(filePath, { timeout: 15000 });
+    this.log(`Picker file input accepted ${filePath} (picker input ${inputInfo.index + 1}/${inputInfo.count}, global input ${inputInfo.globalIndex + 1}, accept="${inputInfo.accept || 'none'}")`);
     await page.waitForFunction(() => !(document.body.innerText || '').includes('Uploading...'), { timeout: 60000 }).catch(() => {
       this.log('Upload picker still showed Uploading... after 60s; continuing to selection check', 'warn');
     });
