@@ -2178,98 +2178,6 @@ class CinemaStudioAutomation {
     await page.waitForTimeout(150);
   }
 
-  async _waitForPointerBlockersToClear({ timeoutMs = 5000, label = 'interaction' } = {}) {
-    const page = this._ensurePageAlive();
-    const started = Date.now();
-    let lastBlockers = [];
-
-    while (Date.now() - started <= timeoutMs) {
-      lastBlockers = await page.evaluate(() => {
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        return [...document.querySelectorAll('body *')]
-          .map(el => {
-            const r = el.getBoundingClientRect();
-            if (r.width <= 0 || r.height <= 0) return null;
-            const style = window.getComputedStyle(el);
-            if (style.pointerEvents === 'none' || style.visibility === 'hidden' || style.display === 'none') return null;
-            const z = Number.parseInt(style.zIndex || '0', 10) || 0;
-            const isLargeOverlay = (
-              (style.position === 'fixed' || style.position === 'absolute') &&
-              r.width >= vw * 0.5 &&
-              r.height >= vh * 0.5 &&
-              z >= 100
-            );
-            const isRadixPopper = !!el.closest('[data-radix-popper-content-wrapper]') ||
-              el.hasAttribute('data-radix-popper-content-wrapper') ||
-              (el.getAttribute('data-state') === 'instant-open' && z >= 1000);
-            const isHighZPromptPopper = (
-              z >= 1000 &&
-              r.y > vh * 0.35 &&
-              r.y < vh - 20 &&
-              (style.position === 'fixed' || style.position === 'absolute')
-            );
-            if (!isLargeOverlay && !isRadixPopper && !isHighZPromptPopper) return null;
-            return {
-              tag: el.tagName,
-              className: String(el.className || '').slice(0, 120),
-              ariaHidden: el.getAttribute('aria-hidden') || '',
-              role: el.getAttribute('role') || '',
-              state: el.getAttribute('data-state') || '',
-              radix: !!el.closest('[data-radix-popper-content-wrapper]') || el.hasAttribute('data-radix-popper-content-wrapper'),
-              zIndex: style.zIndex || '',
-              x: Math.round(r.x),
-              y: Math.round(r.y),
-              w: Math.round(r.width),
-              h: Math.round(r.height),
-            };
-          })
-          .filter(Boolean)
-          .slice(0, 6);
-      }).catch(() => []);
-
-      if (lastBlockers.length === 0) return { ok: true, blockers: [] };
-
-      this.log(`[OVERLAY] Waiting for pointer blocker(s) to clear before ${label}: ${JSON.stringify(lastBlockers)}`);
-      await page.keyboard.press('Escape').catch(() => {});
-      await page.mouse.move(20, 20).catch(() => {});
-      await page.waitForTimeout(700);
-    }
-
-    return { ok: false, blockers: lastBlockers };
-  }
-
-  async _focusPromptTextboxForPreGen(label = 'prompt') {
-    const page = this._ensurePageAlive();
-    const blockers = await this._waitForPointerBlockersToClear({ timeoutMs: 15000, label });
-    if (!blockers.ok) {
-      const onlyPoppers = (blockers.blockers || []).length > 0 &&
-        blockers.blockers.every(b => b.radix || String(b.className || '').includes('z-10000'));
-      const hasDialog = await page.locator('[role="dialog"], [aria-modal="true"]').count().catch(() => 0);
-      if (!onlyPoppers || hasDialog > 0) {
-        throw new Error(`[PRE-GEN] HARD GATE: UI blocker still intercepting ${label}: ${JSON.stringify(blockers.blockers)}. No credits burned.`);
-      }
-      this.log(`[OVERLAY] Only Radix tooltip/popper blockers remain before ${label}; using DOM focus fallback`);
-    }
-
-    const promptBox = page.locator('[role="textbox"][contenteditable="true"]').first();
-    try {
-      await promptBox.click({ timeout: 10000 });
-    } catch (e) {
-      const focused = await page.evaluate(() => {
-        const tb = document.querySelector('[role="textbox"][contenteditable="true"]');
-        if (!tb) return false;
-        tb.focus();
-        const active = document.activeElement;
-        return active === tb || tb.contains(active);
-      }).catch(() => false);
-      if (!focused) {
-        throw new Error(`[PRE-GEN] HARD GATE: Could not focus prompt for ${label}: ${e.message}. No credits burned.`);
-      }
-      this.log(`[OVERLAY] DOM focus fallback succeeded for ${label} after click interception`);
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════
   // REFERENCE IMAGE ATTACHMENT (+ button)
   // ═══════════════════════════════════════════════════════════
@@ -2594,26 +2502,69 @@ class CinemaStudioAutomation {
     const page = this._ensurePageAlive();
     return page.evaluate(() => {
       const vh = window.innerHeight;
-      const tb = document.querySelector('[role="textbox"]');
+      const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
       if (!tb) return { attached: false, debug: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
       const tbLeftEdge = tbRect.x + 10;
+      const validSrc = (src) =>
+        /^blob:|^data:image\//i.test(src || '') ||
+        /images\.higgs\.ai|cloudfront\.net|cdn\.higgsfield|higgs/i.test(src || '');
+      const imageInfo = (img, method) => {
+        const r = img.getBoundingClientRect();
+        return {
+          attached: true,
+          method,
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          srcHint: String(img.currentSrc || img.src || '').slice(0, 120),
+        };
+      };
+
+      const composerImgs = [...document.querySelectorAll('img')].filter(i => {
+        const r = i.getBoundingClientRect();
+        const src = i.currentSrc || i.src || '';
+        const centerX = r.x + r.width / 2;
+        const centerY = r.y + r.height / 2;
+        return validSrc(src) &&
+          r.width >= 25 && r.width <= 140 &&
+          r.height >= 25 && r.height <= 140 &&
+          r.y > vh * 0.45 &&
+          centerX >= tbRect.x - 20 &&
+          centerX <= tbRect.x + tbRect.width + 20 &&
+          centerY >= tbRect.y - 130 &&
+          centerY <= tbRect.y + tbRect.height + 80;
+      });
+      if (composerImgs.length > 0) return imageInfo(composerImgs[0], 'composer-thumbnail');
 
       for (const b of document.querySelectorAll('button')) {
         const r = b.getBoundingClientRect();
         if (r.y > vh * 0.55 && r.width > 0 && r.width <= 60 && r.height <= 60 && r.x <= tbLeftEdge) {
-          if (b.querySelector('img')) return { attached: true, method: 'plus-has-img' };
+          const img = b.querySelector('img');
+          if (img && validSrc(img.currentSrc || img.src || '')) return imageInfo(img, 'plus-has-img');
         }
       }
 
       const nearImgs = [...document.querySelectorAll('img')].filter(i => {
         const r = i.getBoundingClientRect();
-        return r.width > 25 && r.width <= 80 && r.height > 25 && r.height <= 80 &&
+        const src = i.currentSrc || i.src || '';
+        return validSrc(src) &&
+               r.width > 25 && r.width <= 100 && r.height > 25 && r.height <= 100 &&
                r.y > vh * 0.55 && r.x <= tbLeftEdge;
       });
-      if (nearImgs.length > 0) return { attached: true, method: 'img-left-of-textbox' };
+      if (nearImgs.length > 0) return imageInfo(nearImgs[0], 'img-left-of-textbox');
 
-      return { attached: false, debug: 'no thumbnail found near + button' };
+      return {
+        attached: false,
+        debug: 'no reference thumbnail found in composer',
+        textbox: {
+          x: Math.round(tbRect.x),
+          y: Math.round(tbRect.y),
+          w: Math.round(tbRect.width),
+          h: Math.round(tbRect.height),
+        },
+      };
     }).catch(e => ({ attached: false, debug: e.message || 'error' }));
   }
 
@@ -2718,51 +2669,6 @@ class CinemaStudioAutomation {
     }
 
     return lastState || await this._readMentionDropdownState(cleanName);
-  }
-
-  async _verifySceneReferenceViaImageMention() {
-    const page = this._ensurePageAlive();
-    const cleanName = 'image1';
-
-    this.log('[REF] Verifying attached scene reference via temporary @image1 mention...');
-    await this._clearTextbox();
-    await page.waitForTimeout(300);
-    await this._focusPromptTextboxForPreGen('@image1 reference proof');
-    await page.waitForTimeout(300);
-    await page.keyboard.type('@', { delay: 0 });
-    await page.waitForTimeout(700);
-    await page.keyboard.type(cleanName, { delay: 100 });
-
-    const dropdownState = await this._waitForMentionDropdownState(cleanName, {
-      timeoutMs: 12000,
-      pollMs: 500,
-      label: 'image-reference',
-    });
-    if (!dropdownState.exactFound && dropdownState.optionCount === 0) {
-      await page.keyboard.press('Escape').catch(() => {});
-      await this._clearTextbox();
-      return { ok: false, reason: 'no @image1 option appeared', options: dropdownState.allOptions || [] };
-    }
-
-    const selected = await this._selectExactMentionOption(cleanName);
-    if (!selected.found) {
-      await page.keyboard.press('Escape').catch(() => {});
-      await this._clearTextbox();
-      return { ok: false, reason: '@image1 exact option not found', options: selected.options || dropdownState.allOptions || [] };
-    }
-
-    await page.waitForTimeout(700);
-    const mentionDom = await this._inspectPromptMentionDom([cleanName], 'temporary @image1 reference proof');
-    const info = mentionDom.byName?.[cleanName] || {};
-    const chipCount = (info.chipLikeTextNodes || 0) + (info.chipLikeElements || 0);
-    await this._clearTextbox();
-    await page.waitForTimeout(300);
-
-    if (chipCount <= 0) {
-      return { ok: false, reason: '@image1 option selected but no chip-like DOM node found', options: selected.options || dropdownState.allOptions || [] };
-    }
-    this.log(`[REF] @image1 reference proof resolved: "${selected.option?.text || selected.text || 'Image 1'}"`);
-    return { ok: true, selected: selected.option?.text || selected.text || 'Image 1', chips: chipCount };
   }
 
   async _inspectPromptMentionDom(expectedNames = [], context = 'prompt') {
@@ -3230,42 +3136,25 @@ class CinemaStudioAutomation {
     }
     await page.waitForTimeout(2000);
 
-    // ── Step 7: Verify thumbnail on toolbar ───────────────────────────
-    let refOk = false;
+    // ── Step 7: Verify attached composer thumbnail ────────────────────
+    let finalRefCheck = { attached: false, debug: 'not checked' };
     const verifyStart = Date.now();
     while (Date.now() - verifyStart < 10000) {
-      refOk = await page.evaluate(() => {
-        const vh = window.innerHeight;
-        const tb = document.querySelector('[role="textbox"]');
-        if (!tb) return false;
-        const tbRect = tb.getBoundingClientRect();
-        const tbLeftEdge = tbRect.x + 10;
-        for (const b of document.querySelectorAll('button')) {
-          const r = b.getBoundingClientRect();
-          if (r.y > vh * 0.55 && r.width <= 60 && r.height <= 60 && r.x <= tbLeftEdge && b.querySelector('img')) return true;
-        }
-        const nearImgs = [...document.querySelectorAll('img')].filter(i => {
-          const r = i.getBoundingClientRect();
-          return r.width > 25 && r.width <= 80 && r.height > 25 && r.height <= 80 &&
-                 r.y > vh * 0.55 && r.x <= tbLeftEdge;
-        });
-        return nearImgs.length > 0;
-      }).catch(() => false);
-      if (refOk) break;
+      finalRefCheck = await this._checkSceneReferenceAttached();
+      if (finalRefCheck.attached) break;
       await page.waitForTimeout(500);
     }
 
-    if (!refOk) {
+    if (!finalRefCheck.attached) {
       detachUploadListener();
-      throw new Error('HARD STOP: Upload — reference thumbnail not confirmed after dismiss');
+      throw new Error(`HARD STOP: Upload - reference thumbnail not confirmed after dismiss (${JSON.stringify(finalRefCheck)})`);
     }
-    const finalRefCheck = { attached: true, method: 'backend-upload-selected' };
     const proofOk = this._isStartFrameProofValid(uploadProof, finalRefCheck);
     detachUploadListener();
     if (!proofOk) {
       throw new Error(`START_FRAME_UPLOAD_UNCONFIRMED: thumbnail=${JSON.stringify(finalRefCheck)}, proof=${JSON.stringify(uploadProof.responses.slice(-8))}`);
     }
-    this._lastSceneReferenceProof = { ...uploadProof, attached: true, attachedMethod: finalRefCheck.method };
+    this._lastSceneReferenceProof = { ...uploadProof, attached: true, attachedMethod: finalRefCheck.method, attachedDebug: finalRefCheck };
     this.log('[REF] ✓ Reference image attached via + button upload and backend-confirmed');
   }
 
@@ -3908,7 +3797,6 @@ class CinemaStudioAutomation {
     // Clear stale references first, then pick from the gallery.
     await this._clearAttachedReferences();
     this._lastSceneReferenceProof = null;
-    this._lastSceneReferenceMentionProof = null;
 
     this.log('[PHASE1c] Attaching location reference from Image Generations gallery');
     await this._attachLocationReference(locationImagePath);
@@ -3981,8 +3869,7 @@ class CinemaStudioAutomation {
       gateFailures.push(`GRID: ${toolbarState.grid} (need 1x1)`);
     }
 
-    // Gate 7: Reference upload must be backend-confirmed. The new image UI
-    // proves composer availability via temporary @image1 resolution after gates.
+    // Gate 7: Reference upload must be backend-confirmed.
     const startFrameProofOk = !!(
       this._lastSceneReferenceProof &&
       (this._lastSceneReferenceProof.finalizeOk || (this._lastSceneReferenceProof.batchOk && this._lastSceneReferenceProof.putOk))
@@ -4007,12 +3894,11 @@ class CinemaStudioAutomation {
     // ── BUILD PROMPT with budget-aware blocking truncation ──
     // Higgsfield prompt limit is ~2500 chars. The fixed text (opener + closer +
     // lighting) takes ~350-500 chars. Remaining budget is split across characters.
-    const imageReferenceProof = await this._verifySceneReferenceViaImageMention();
-    this._lastSceneReferenceMentionProof = imageReferenceProof;
-    if (!imageReferenceProof.ok) {
-      throw new Error(`[PRE-GEN] HARD GATE: Attached scene reference did not resolve as @image1: ${imageReferenceProof.reason}; options=${JSON.stringify(imageReferenceProof.options || [])}. No credits burned.`);
+    const imageReferenceProof = await this._checkSceneReferenceAttached();
+    if (!imageReferenceProof.attached) {
+      throw new Error(`[PRE-GEN] HARD GATE: Attached scene reference thumbnail not visible in composer: ${JSON.stringify(imageReferenceProof)}. No credits burned.`);
     }
-    this.log(`[PHASE2] @image1 reference proof passed (${imageReferenceProof.selected || 'resolved'}) - prompt cleared for real scene text`);
+    this.log(`[PHASE2] Composer reference thumbnail proof passed (${imageReferenceProof.method})`);
 
     const PROMPT_BUDGET = 2400;
     const opener = `WIDE SHOT inside this location. Characters are immersed in the scene and never look at or acknowledge the camera. `;
@@ -4233,10 +4119,10 @@ class CinemaStudioAutomation {
     // ── FINAL REFERENCE RE-CHECK (right before clicking GENERATE) ──
     // This is the LAST line of defense. If the reference somehow detached
     // (picker auto-closed, React state drift), we catch it here.
-    const finalRefCheck = { attached: !!this._lastSceneReferenceMentionProof?.ok, method: '@image1' };
+    const finalRefCheck = await this._checkSceneReferenceAttached();
 
     if (!finalRefCheck.attached) {
-      throw new Error('HARD GATE (PHASE3): Reference image NOT on + button right before GENERATE — refusing to click GENERATE without reference');
+      throw new Error(`HARD GATE (PHASE3): Reference image thumbnail not visible right before GENERATE - ${JSON.stringify(finalRefCheck)}`);
     }
     if (!this._isStartFrameProofValid(this._lastSceneReferenceProof, finalRefCheck)) {
       throw new Error(`HARD GATE (PHASE3): Start frame upload not backend-confirmed right before GENERATE — proof=${JSON.stringify(this._lastSceneReferenceProof?.responses?.slice?.(-8) || [])}`);

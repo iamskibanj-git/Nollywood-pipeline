@@ -3859,7 +3859,7 @@ Resolved Higgsfield `@` chips still expose their label in the prompt editor's `t
 
 After a scene reference upload, Higgsfield can drift aspect/resolution back to a stale duplicate toolbar row (observed `9:16` set, then Phase 2 read `3:4` / `1K`). Toolbar state and aspect clicking should prefer the row containing `Cinematic Cameras`, then read/repair aspect with readback before Phase 2. A scene that fails all generation attempts should stop the current pass so the bounded retry/fallback focuses on the missing scene instead of marching onward.
 
-Cinema Studio image references no longer prove attachment by showing a thumbnail on the `+` button. The current image UI shows the reference above the prompt textarea. For scene image generation, after backend upload proof and image settings are complete, temporarily type `@image1`, require it to resolve to `Image 1`, verify a chip-like DOM node, then clear the textbox and type the real scene prompt. Do not leave `@image1` in the final scene prompt, and do not use the old `+` thumbnail heuristic as a hard gate.
+Cinema Studio image references no longer prove attachment by showing a thumbnail on the `+` button. The current image UI shows the reference above the prompt textarea. For scene image generation, require backend upload proof plus a visible composer thumbnail above/near the textarea. Do not type temporary image-reference diagnostics; typed image-reference checks can resolve in the UI while Playwright/DOM chip detection false-negatives. Real character/location prompt `@` resolution remains required only for actual prompt construction.
 
 Element existence authority order: project Elements modal proof is source of truth. Open that modal from the top-center project `@`/`Elements` control first, and use the bottom prompt-toolbar `@` only as fallback. Valid persisted modal proof can skip setup verification on resume. Do not type `@character_name` as a setup/existence diagnostic; that path is obsolete and can false-negative even when the modal lists every element. Real scene prompt chip resolution remains a pre-Generate hard gate. When modal proof reports all expected names present, persist `_cinematicElementsModalProof` in project settings with project id, count, names, timestamp, and source. If anything claims setup elements are missing, re-run the project Elements modal proof before recreating anything.
 
@@ -3896,7 +3896,7 @@ _checkSceneReferenceAttached() -> { attached: true, method: "img-left-of-textbox
 ```
 If patching this path, prefer the visible trusted-click/filechooser path first when it works, then fall back to the hidden image file input only when it produces backend upload proof and a selectable new tile. Do not continue to Generate without both backend proof and `_checkSceneReferenceAttached()`.
 
-Update 2026-06-17: Cinema Studio scene-image Asset Library recovery is post-submit only. A timeout before proven Generate click can come from stale transparent picker overlays, textbox focus, upload proof, `@image1` proof, or prompt typing; do not search the Asset Library for an image that was never submitted. The orchestrator now tracks per-attempt Generate-click proof via `onGenClicked` and refreshes the same scene asset row for persisted `gen_clicked_at` before recovery. If neither proof exists, skip recovery and retry setup cleanly. After selecting an uploaded scene reference tile, wait for pointer-blocking overlays before clicking the prompt textbox or running temporary `@image1` proof. Blockers include both full-screen layers such as `fixed inset-0 z-[899] bg-transparent` and small high-z Radix poppers/tooltips such as `[data-radix-popper-content-wrapper]` / `z-10000` near the bottom composer. Dismiss with Escape, move the mouse away from the composer, poll up to a longer window, and use DOM focus fallback only when the remaining blocker is tooltip/popper debris rather than a real dialog. Typed `@element` existence diagnostics are obsolete for scene-image setup; use the project Elements modal/persisted modal proof for existence and reserve typed `@element` resolution for actual prompt construction.
+Update 2026-06-17: Cinema Studio scene-image Asset Library recovery is post-submit only. A timeout before proven Generate click can come from stale transparent picker overlays, textbox focus, upload proof, composer-thumbnail proof, or prompt typing; do not search the Asset Library for an image that was never submitted. The orchestrator now tracks per-attempt Generate-click proof via `onGenClicked` and refreshes the same scene asset row for persisted `gen_clicked_at` before recovery. If neither proof exists, skip recovery and retry setup cleanly. Typed `@element` existence diagnostics are obsolete for scene-image setup; use the project Elements modal/persisted modal proof for existence and reserve typed `@element` resolution for actual prompt construction. Typed image-reference diagnostics are obsolete for both scene-image and video start-frame proof.
 
 **Cinema Studio 3.5 video reference + eligibility drift (live 2026-06-16):**
 Video clip generation uses a different reference path from image generation. In Video mode, the start-frame/reference upload opens from the small `+` References button immediately left of the `@` button in the bottom Cinema Studio 3.5 composer. Inside the picker, click the inner `+` above `Upload media`; then keep the picker open and wait through the full upload/content-review lifecycle before selecting the settled uploaded tile. Do not treat first tile visibility as enough, because the tile can remain in `Checking content...` and multiple older tiles can share proxied image URLs.
@@ -3907,10 +3907,8 @@ Video mode -> References + -> Uploads picker -> Upload media + -> filechooser
 wait for Uploading... / Checking content... to clear
 select the visible settled uploaded tile
 confirm composer thumbnail attached
-click prompt textbox
-type @image1 slowly and select the resolved menu item ("Image 1")
 ```
-`@image1` resolution is now the hard proof that the attached start frame is usable by Cinema Studio video generation. If it does not resolve, stop before Generate.
+The hard proof for the attached start frame is upload/content-review completion plus the visible composer thumbnail. Do not type temporary image-reference diagnostics for video start-frame proof.
 
 Cinema Studio video element eligibility no longer exposes stable `Eligible` / `Not eligible` text. The current live card lifecycle is:
 ```text
@@ -3920,7 +3918,7 @@ The visual ready state is not sufficient by itself. After the element reaches ba
 
 Live no-Generate verification after the fix:
 ```text
-start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached, @image1 resolved as "Image 1"
+start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached
 element dry-run: opened project Elements panel, observed eligible-visual/Use, @codex_elem_test_0615 resolved and persisted eligible
 ```
 

@@ -1671,11 +1671,11 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
 
     await this._selectEligibleSceneImageAndAttach(this._lastEligibleSceneUploadCard || card);
-    const imageProof = await this._verifyPromptMentionResolution('image1', { label: 'attached start frame' });
-    if (!imageProof.ok) {
-      throw new Error(`[PRE-GEN] Attached start frame did not resolve as @image1: ${imageProof.reason}; options=${JSON.stringify(imageProof.options || [])}`);
+    const attached = await this._hasStartFrameAttached();
+    if (!attached) {
+      throw new Error('[PRE-GEN] Attached start frame thumbnail not visible in Cinema Studio composer');
     }
-    this.log(`Start frame @image1 prompt reference verified (${imageProof.selected || 'resolved'})`);
+    this.log('Start frame composer thumbnail verified');
     this.log(`Start frame uploaded and eligible (${Math.round(card.waitMs / 1000)}s upload/eligibility window)`);
   }
 
