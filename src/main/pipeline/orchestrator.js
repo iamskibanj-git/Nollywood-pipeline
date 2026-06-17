@@ -127,6 +127,27 @@ function sanitizeCinemaVideoPrompt(prompt) {
   };
 }
 
+function _escapeRegexLiteral(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function _normalizeAliasText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/^@/, '')
+    .replace(/['']/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function _displayAliasText(value) {
+  return String(value || '')
+    .replace(/^@/, '')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 const NIGERIAN_PROP_GROUNDING = {
   debt_document: {
     aliases: ['paper', 'document', 'debt document', 'debt agreement', 'debt instrument', 'agreement', 'receipt'],
@@ -6466,6 +6487,109 @@ class PipelineOrchestrator {
   }
 
   /**
+   * Build human/display aliases for a resolved cinematic character element.
+   * The script often says "Tunde" while the element key is "barrister_tunde".
+   */
+  _buildCinematicCharacterAliases(characterIdOrBase, elementName) {
+    const aliases = new Set();
+    const add = (value) => {
+      const normalized = _normalizeAliasText(value);
+      if (normalized) aliases.add(normalized);
+    };
+
+    const raw = String(characterIdOrBase || '').replace(/^@/, '');
+    add(raw);
+    add(elementName);
+
+    const elemMap = this.state.cinematicElementNames || {};
+    const canonical = elemMap[raw.toLowerCase()] || elemMap[`@${raw.toLowerCase()}`] || elementName;
+    add(canonical);
+
+    const bible = this.state.script?.character_bible || [];
+    const char = bible.find(c =>
+      String(c.id || '').toLowerCase() === raw.toLowerCase() ||
+      String(c.element_name_hint || '').toLowerCase() === raw.toLowerCase()
+    ) || bible.find(c => {
+      const hint = String(c.element_name_hint || '').toLowerCase();
+      return hint && String(canonical || '').toLowerCase().startsWith(`${hint}_`);
+    });
+
+    if (char) {
+      add(char.id);
+      add(char.element_name_hint);
+      add(char.name);
+
+      const label = String(char.description_label || char.name || '').split(/[—-]/)[0].trim();
+      add(label);
+
+      const words = label
+        .replace(/[^\w\s']/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
+      if (words.length) {
+        add(words[0]);
+        for (const word of words) add(word);
+        if (words.length >= 2) add(`${words[0]} ${words[1]}`);
+        if (words.length >= 3) {
+          add(`${words[0]} ${words[1]} ${words[2]}`);
+          add(`${words[1]} ${words[2]}`);
+        }
+        if (words.length >= 2) add(words[words.length - 1]);
+      }
+    }
+
+    return [...aliases]
+      .filter(a => a && a !== _normalizeAliasText(elementName))
+      .sort((a, b) => b.length - a.length);
+  }
+
+  _replaceCharacterAliasesWithElements(text, characters) {
+    if (!text || !characters?.length) return text;
+    let out = String(text);
+    const pairs = [];
+
+    for (const ch of characters) {
+      const canonical = ch.name;
+      const aliases = new Set([
+        ...(ch.aliases || []),
+        ch.baseName,
+        ch.name,
+      ].map(_normalizeAliasText).filter(Boolean));
+      for (const alias of aliases) {
+        pairs.push({ alias, canonical });
+      }
+    }
+
+    pairs.sort((a, b) => b.alias.length - a.alias.length);
+    for (const { alias, canonical } of pairs) {
+      if (!alias || !canonical) continue;
+      const display = _displayAliasText(alias);
+      const patterns = [
+        new RegExp(`@${_escapeRegexLiteral(alias)}\\b`, 'gi'),
+        new RegExp(`(?<!@)\\b${_escapeRegexLiteral(alias)}\\b`, 'gi'),
+      ];
+      if (display && display !== alias) {
+        patterns.push(new RegExp(`(?<!@)\\b${_escapeRegexLiteral(display)}\\b`, 'gi'));
+      }
+      for (const re of patterns) {
+        out = out.replace(re, `@${canonical}`);
+      }
+    }
+    return out;
+  }
+
+  _canonicalizeCinematicBlocking(blocking, characters) {
+    if (!blocking || typeof blocking !== 'object') return blocking;
+    const clean = { ...blocking };
+    for (const key of ['frame_left', 'frame_center', 'frame_right', 'notes']) {
+      if (typeof clean[key] === 'string') {
+        clean[key] = this._replaceCharacterAliasesWithElements(clean[key], characters);
+      }
+    }
+    return clean;
+  }
+
+  /**
    * Use Claude Vision to refine blocking for a single scene based on the actual
    * location image. Instead of generic frame-left/center/right positions, this
    * produces blocking grounded in the spatial layout of the real location.
@@ -6643,20 +6767,11 @@ Output ONLY the JSON array, no explanation.`,
           // Vision returns base names (e.g. "toward adanna") — we need to convert
           // these to @suffixed_name (e.g. "toward @adanna_mseb_0419") so Higgsfield
           // creates the correct element pill.
-          let cleanedBlocking = match.blocking;
-          for (const c of characters) {
-            const cBase = (c.baseName || c.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // Replace @baseName with @suffixedName (e.g. "@adanna" → "@adanna_mseb_0419")
-            const atBaseRegex = new RegExp(`@${cBase}\\b`, 'gi');
-            cleanedBlocking = cleanedBlocking.replace(atBaseRegex, `@${c.name}`);
-            // Replace bare baseName (not already @-prefixed) with @suffixedName
-            const bareBaseRegex = new RegExp(`(?<!@)\\b${cBase}\\b`, 'gi');
-            cleanedBlocking = cleanedBlocking.replace(bareBaseRegex, `@${c.name}`);
-          }
+          let cleanedBlocking = this._replaceCharacterAliasesWithElements(match.blocking, characters);
           if (cleanedBlocking !== match.blocking) {
             this.log(`[VISION-BLOCKING] Fixed character names in blocking: "${match.blocking}" → "${cleanedBlocking}"`);
           }
-          refinedChars.push({ name: origChar.name, baseName: origChar.baseName, position: cleanedBlocking });
+          refinedChars.push({ name: origChar.name, baseName: origChar.baseName, aliases: origChar.aliases, position: cleanedBlocking });
           this.log(`[VISION-BLOCKING] @${origChar.name}: "${cleanedBlocking}"`);
         } else {
           refinedChars.push(origChar); // Keep original if no match
@@ -6861,12 +6976,7 @@ Output ONLY the JSON array.`,
         });
         if (match && match.blocking) {
           // Post-process: replace bare names with @suffixed names
-          let cleanedBlocking = match.blocking;
-          for (const c of characters) {
-            const cBase = (c.baseName || c.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            cleanedBlocking = cleanedBlocking.replace(new RegExp(`@${cBase}\\b`, 'gi'), `@${c.name}`);
-            cleanedBlocking = cleanedBlocking.replace(new RegExp(`(?<!@)\\b${cBase}\\b`, 'gi'), `@${c.name}`);
-          }
+          let cleanedBlocking = this._replaceCharacterAliasesWithElements(match.blocking, characters);
           // Check if position changed meaningfully
           if (cleanedBlocking !== origChar.position) {
             corrections++;
@@ -7550,7 +7660,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           const resolvedName = elementName || charId;
           const baseMatch = resolvedName.match(/^(.+?)(?:_o\d+)?_[a-z]{2,5}_\d{4}$/);
           const baseName = baseMatch ? baseMatch[1] : resolvedName;
-          characters.push({ name: resolvedName, baseName, position: `${pos}: ${hint.replace(/@[a-z0-9_]+/gi, '').trim()}` });
+          characters.push({
+            name: resolvedName,
+            baseName,
+            aliases: this._buildCinematicCharacterAliases(charId, resolvedName),
+            position: `${pos}: ${hint.replace(/@[a-z0-9_]+/gi, '').trim()}`,
+          });
         }
       }
 
@@ -7626,8 +7741,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // Serialize the vision-refined character positions so they can be read back
       // at video gen time and injected into the Kling multi_shot_prompt.
       // This ensures the animation prompt matches the start frame image exactly.
+      const canonicalBlocking = this._canonicalizeCinematicBlocking(blocking, refinedCharacters);
       const visionBlockingJson = JSON.stringify({
-        blocking,
+        blocking: canonicalBlocking,
         location_hint: scene.location_element_hint,
         vision_refined_characters: refinedCharacters,
         scene_prop_contract: scenePropContract,
@@ -7652,7 +7768,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           const result = await cinema.generateSceneImage({
             locationImagePath: locInfo.imagePath,
             characters: refinedCharacters,
-            lighting: blocking.notes || '',
+            lighting: canonicalBlocking.notes || '',
             outputPath,
             aspectRatio: this.state.aspectRatio || '16:9',
             projectName: this._titleInitials(this.state.selectedTitle || this.state.script?.title).toUpperCase(),

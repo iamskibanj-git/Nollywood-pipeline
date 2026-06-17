@@ -51,6 +51,70 @@
 
 const path = require('path');
 
+function escapeRegexLiteral(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeCharacterAlias(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/^@/, '')
+    .replace(/['']/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function aliasDisplayText(value) {
+  return String(value || '')
+    .replace(/^@/, '')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildCharacterAliasMap(characters) {
+  const names = {};
+  for (const ch of characters || []) {
+    if (!ch?.name) continue;
+    const variants = [
+      ch.name,
+      ch.baseName,
+      ...(ch.aliases || []),
+    ];
+    for (const variant of variants) {
+      const normalized = normalizeCharacterAlias(variant);
+      if (normalized) names[normalized] = ch.name;
+      const display = aliasDisplayText(variant);
+      const displayNorm = normalizeCharacterAlias(display);
+      if (displayNorm) names[displayNorm] = ch.name;
+    }
+  }
+  return names;
+}
+
+function replaceCharacterAliasesWithMarkers(text, aliasMap) {
+  let out = String(text || '');
+  const aliases = Object.keys(aliasMap || {}).sort((a, b) => b.length - a.length);
+  for (const alias of aliases) {
+    const canonical = aliasMap[alias];
+    if (!alias || !canonical) continue;
+    const escaped = escapeRegexLiteral(alias);
+    const display = aliasDisplayText(alias);
+    out = out.replace(new RegExp(`(?<![a-z0-9_])@?${escaped}(?='s\\b)`, 'gi'), `@@${canonical}@@`);
+    out = out.replace(new RegExp(`(?<![a-z0-9_])@?${escaped}\\b`, 'gi'), `@@${canonical}@@`);
+    if (display && display !== alias) {
+      const displayPattern = escapeRegexLiteral(display).replace(/\\ /g, '\\s+');
+      out = out.replace(new RegExp(`(?<![a-z0-9_])@?${displayPattern}(?='s\\b)`, 'gi'), `@@${canonical}@@`);
+      out = out.replace(new RegExp(`(?<![a-z0-9_])@?${displayPattern}\\b`, 'gi'), `@@${canonical}@@`);
+    }
+  }
+  return out;
+}
+
+function replaceCharacterAliasesWithAtText(text, aliasMap) {
+  return replaceCharacterAliasesWithMarkers(text, aliasMap).replace(/@@([^@]+)@@/g, '@$1');
+}
+
 class CinemaStudioAutomation {
   constructor({ automation, logger, projectId }) {
     this.automation = automation;
@@ -3972,6 +4036,7 @@ class CinemaStudioAutomation {
       seenNames.add(key);
       return true;
     });
+    const characterAliasMap = buildCharacterAliasMap(uniqueChars);
 
     const segments = [];
     segments.push(opener);
@@ -3982,16 +4047,7 @@ class CinemaStudioAutomation {
       // autocomplete dropdown resolves them to UUID pills via the @-trigger.
       // Ensure any bare base names also get @-prefixed with their suffixed form.
       let posText = c.position || '';
-      for (const other of uniqueChars) {
-        if (other.baseName && other.baseName !== other.name) {
-          const atBaseRe = new RegExp(`@${other.baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-          posText = posText.replace(atBaseRe, `@${other.name}`);
-          const bareBaseRe = new RegExp(`(?<!@)\\b${other.baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-          posText = posText.replace(bareBaseRe, `@${other.name}`);
-        }
-        const bareRe = new RegExp(`(?<!@)\\b${other.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-        posText = posText.replace(bareRe, `@${other.name}`);
-      }
+      posText = replaceCharacterAliasesWithAtText(posText, characterAliasMap);
       // Truncate position text at sentence/comma boundary if too long
       if (posText.length > maxPosLen) {
         const truncated = posText.slice(0, maxPosLen);
@@ -4014,21 +4070,7 @@ class CinemaStudioAutomation {
     // Strategy: find bare names, split into [text, {at:name}, text, ...] segments.
     if (cleanLighting.trim()) {
       let litText = cleanLighting;
-      // Normalize all character name variants to @@MARKER@@ for splitting
-      const litNames = {};
-      for (const ch of uniqueChars) {
-        litNames[ch.name.toLowerCase()] = ch.name;
-        if (ch.baseName && ch.baseName !== ch.name) {
-          litNames[ch.baseName.toLowerCase()] = ch.name;
-        }
-      }
-      const sortedLitNames = Object.keys(litNames).sort((a, b) => b.length - a.length);
-      for (const nv of sortedLitNames) {
-        const esc = nv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Match possessive forms too (adanna's → marker + 's)
-        litText = litText.replace(new RegExp(`@?${esc}(?='s\\b)`, 'gi'), `@@${litNames[nv]}@@`);
-        litText = litText.replace(new RegExp(`@?${esc}\\b`, 'gi'), `@@${litNames[nv]}@@`);
-      }
+      litText = replaceCharacterAliasesWithMarkers(litText, characterAliasMap);
       // Split on markers
       const litParts = litText.split(/@@([^@]+)@@/);
       for (let li = 0; li < litParts.length; li++) {
@@ -4047,44 +4089,11 @@ class CinemaStudioAutomation {
     // text + { at: name } sequences so every character reference becomes a
     // proper Higgsfield element pill in the UI.
     {
-      // Build name lookup: lowercase variant → canonical suffixed name
-      const gateNames = {};
-      for (const ch of uniqueChars) {
-        gateNames[ch.name.toLowerCase()] = ch.name;
-        if (ch.baseName && ch.baseName !== ch.name) {
-          gateNames[ch.baseName.toLowerCase()] = ch.name;
-        }
-      }
-      // Sort longest-first to avoid partial matches (e.g. "ada" inside "adanna")
-      const sortedGateNames = Object.keys(gateNames).sort((a, b) => b.length - a.length);
-
       let fixCount = 0;
       for (let si = segments.length - 1; si >= 0; si--) {
         if (typeof segments[si] !== 'string') continue; // skip { at: name } objects
-        let text = segments[si];
-
-        // Check if this text segment contains explicit @mentions or bare names.
-        let hasCharacterReference = false;
-        for (const nv of sortedGateNames) {
-          const esc = nv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          if (
-            new RegExp(`@${esc}\\b`, 'gi').test(text) ||
-            new RegExp(`(?<!@)\\b${esc}\\b`, 'gi').test(text)
-          ) {
-            hasCharacterReference = true;
-            break;
-          }
-        }
-        if (!hasCharacterReference) continue;
-
-        // Replace explicit @mentions and bare names with @@MARKER@@ delimiters, then split.
-        for (const nv of sortedGateNames) {
-          const esc = nv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          // Handle possessives: "adanna's" → @@name@@'s
-          text = text.replace(new RegExp(`@?${esc}(?='s\\b)`, 'gi'), `@@${gateNames[nv]}@@`);
-          // Handle normal occurrences
-          text = text.replace(new RegExp(`@?${esc}\\b`, 'gi'), `@@${gateNames[nv]}@@`);
-        }
+        let text = replaceCharacterAliasesWithMarkers(segments[si], characterAliasMap);
+        if (text === segments[si]) continue;
 
         // Split on @@markers@@ into alternating [text, name, text, name, ...]
         const parts = text.split(/@@([^@]+)@@/);
