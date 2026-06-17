@@ -7736,6 +7736,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                     issues: (sceneVerifyResult.issues || []).slice(0, 5),
                   });
                   if (sceneAsset) db.markAssetFailed(sceneAsset.id, `vision-reject: score ${sceneVerifyResult.score}`);
+                  this.log(`[CINEMATIC] Scene verify failed — resetting browser context before regenerating Ch${chapter} Sc${scene.scene_number}`);
+                  await new Promise(r => setTimeout(r, 3000));
+                  try {
+                    await cinema.resetFormForNextGeneration();
+                    this.log(`[CINEMATIC] Scene verify regeneration reset complete for Ch${chapter} Sc${scene.scene_number}`);
+                  } catch (resetErr) {
+                    this.log(`[CINEMATIC] WARN: Scene verify regeneration reset failed: ${resetErr.message}`, 'warn');
+                  }
+                  await new Promise(r => setTimeout(r, 2000));
                   continue; // retry within the existing retry loop
                 } else if (sceneVerifyResult.verdict === 'pass' && sceneAsset) {
                   // Vision pass — lock scene + all upstream (location, grids, portraits)
