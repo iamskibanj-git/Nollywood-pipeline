@@ -3868,7 +3868,7 @@ Higgsfield can render duplicate overlapping image composers/toolbars at the same
 _readToolbarState() -> image, cinematic-cameras, 16:9, 2K, 1x1, cost 2
 _setupToolbarSequence('9:16') -> image, cinematic-cameras, 9:16, 4K, 1x1, cost 4
 ```
-Update 2026-06-16: duplicate rows can share the exact same Y coordinate. Y-band grouping is not sufficient. When anchoring on `Cinematic Cameras`, use an x-window: controls to the right of that model button and before the next model button at the same Y. This prevents stale same-Y `Nano Banana Pro / 3:4 / 1K` controls from overwriting the Cinematic Cameras row or being clicked during aspect repair.
+Update 2026-06-16: duplicate rows can share the exact same Y coordinate and overlapping X coordinates. Y-band grouping and "before next same-Y model" x-windows are not sufficient, because stale `Nano Banana Pro` can start inside the active `Cinematic Cameras` model button's x-range. Use ancestor/panel grouping instead. The active Cinematic panel text includes `Cinematic Cameras 16:9/9:16 2K/4K 1x1`, while stale Nano panels include `Nano Banana Pro ... Unlimited`; stale video panels include `Cinema Studio 3.5`, `1080p`, `8s`, etc. `_readToolbarState()` and `_setAspectRatio()` should read/click buttons whose ancestor panel includes `Cinematic Cameras` and excludes `Nano Banana`, `Cinema Studio 3.5`, `1080p`, `720p`, `8s`, and `15s`. Live test project `65526eef-52d2-4f13-9c32-29558273ee41` verified readback: before aspect repair `image/cinematic-cameras/16:9/2K/1x1/cost 2`; after `_setAspectRatio('9:16')`: `image/cinematic-cameras/9:16/2K/1x1/cost 2`.
 
 Live verification for element existence after the fix:
 ```text

@@ -1179,6 +1179,51 @@ class CinemaStudioAutomation {
       //
       // Strategy: Find the leftmost model button → get its y → all toolbar
       // buttons within ±5px of that y belong to the controlling set.
+      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      const panelFor = (el) => {
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+          const r = n.getBoundingClientRect();
+          const text = norm(n.innerText || n.textContent || '');
+          if (r.x >= 550 && r.y > vh * 0.55 && r.width >= 450 && r.height >= 60 &&
+              text.includes('Cinematic Cameras') &&
+              !text.includes('Nano Banana') &&
+              !text.includes('Cinema Studio 3.5') &&
+              !text.includes('1080p') &&
+              !text.includes('720p') &&
+              !/\b(8s|15s)\b/.test(text)) {
+            return { x: r.x, y: r.y, w: r.width, h: r.height, text };
+          }
+        }
+        return null;
+      };
+
+      const activeCinematicButtons = btns
+        .map((b) => ({ el: b, panel: panelFor(b) }))
+        .filter((item) => item.panel);
+
+      if (activeCinematicButtons.length > 0) {
+        result.mode = 'image';
+        result.model = 'cinematic-cameras';
+        for (const { el } of activeCinematicButtons) {
+          const r = el.getBoundingClientRect();
+          const text = el.textContent?.trim() || '';
+          if (/^(9:16|16:9|1:1|3:4|4:3|2:3|3:2|21:9)$/.test(text)) {
+            result.aspect = text;
+          } else if (/^(1k|2k|4k)$/i.test(text)) {
+            result.resolution = text.toUpperCase();
+          } else if (/^(1x1|2x2|1x2|2x1)$/.test(text)) {
+            result.grid = text;
+          } else if (!text && el.querySelector('svg') && r.width >= 20 && r.width <= 60) {
+            result.hasAtButton = true;
+          } else if (text.includes('GENERATE') || /^Generate\d/.test(text)) {
+            result.hasGenerate = true;
+            const costMatch = text.match(/([\d,.]+)\s*$/);
+            if (costMatch) result.generateCost = parseFloat(costMatch[1].replace(/,/g, ''));
+          }
+        }
+        return result;
+      }
+
       const modelNames = [
         'Cinematic Cameras', 'Cinematic Characters', 'Cinematic Locations',
         'Soul Cinema', 'Cinema Studio', 'Higgsfield Soul', 'Nano Banana',
@@ -3230,6 +3275,49 @@ class CinemaStudioAutomation {
         const toolbarZone = vh * 0.65;
         const btns = [...document.querySelectorAll('button')];
         const aspectPattern = /^(9:16|16:9|1:1|3:4|2:3|4:3|21:9|3:2)$/;
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const panelFor = (el) => {
+          for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+            const r = n.getBoundingClientRect();
+            const text = norm(n.innerText || n.textContent || '');
+            if (r.x >= 550 && r.y > window.innerHeight * 0.55 && r.width >= 450 && r.height >= 60 &&
+                text.includes('Cinematic Cameras') &&
+                !text.includes('Nano Banana') &&
+                !text.includes('Cinema Studio 3.5') &&
+                !text.includes('1080p') &&
+                !text.includes('720p') &&
+                !/\b(8s|15s)\b/.test(text)) {
+              return { x: r.x, y: r.y, w: r.width, h: r.height, text };
+            }
+          }
+          return null;
+        };
+
+        const panelCandidates = btns
+          .map((b) => {
+            const r = b.getBoundingClientRect();
+            return {
+              el: b,
+              panel: panelFor(b),
+              x: r.x,
+              y: r.y,
+              text: b.textContent?.trim() || '',
+            };
+          })
+          .filter((item) => item.panel && aspectPattern.test(item.text))
+          .sort((a, b) => a.x - b.x);
+        if (panelCandidates.length > 0) {
+          const target = panelCandidates[0];
+          target.el.click();
+          return {
+            clicked: true,
+            method: 'active-cinematic-panel',
+            controllingY: target.y,
+            btnY: target.y,
+            btnText: target.text,
+            panel: target.panel,
+          };
+        }
 
         // ── DUAL TOOLBAR FIX: find controlling set by leftmost model button's Y ──
         const modelNames = ['Cinematic Cameras', 'Soul Cinema', 'Nano Banana', 'Cinema Studio', 'Higgsfield Soul'];
