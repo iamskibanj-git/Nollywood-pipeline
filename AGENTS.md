@@ -360,6 +360,22 @@ Files changed:
 - `src/main/pipeline/orchestrator.js` — restored-map verification, post-save confirmation hardening, outfit-aware persistence, path guards, final `@` verification
 - `AGENTS.md` — this section
 
+**Session 30V-B - Cinema Studio Scene Retry Credit Protection (June 17, 2026):**
+
+Live SCWOB scene-image run exposed a credit-risk timeout path: Cinema Studio could keep an image tile actively generating after the app's 240s poll timeout. The old retry logic attempted Asset Library harvest, then clicked Generate again if harvest missed the result, which could stack duplicate 4-credit image generations while the first one was still in progress.
+
+Rules now documented for future work:
+- A timeout after Generate was clicked is not proof that generation failed.
+- If a gallery/composer tile still shows active generation (spinner/progress/large blank loading tile), the pipeline must not click Generate again for that scene.
+- Active-generation timeout enters wait/harvest mode: progressive waits of 30s, 60s, 90s, then 120s intervals, harvesting between waits.
+- If the active generation never becomes recoverable, stop the scene pass and mark the asset failed with an active-generation timeout message. Do not burn another credit retry.
+- Asset Library recovery similarity can be flaky for long prompts with chips; recency/prompt-prefix matching may need future hardening, but active spinner proof always overrides retry.
+
+Files changed:
+- `src/main/automation/cinema-studio-automation.js` - detects active image-generation tiles before timing out.
+- `src/main/pipeline/orchestrator.js` - active-generation timeout branch waits/harvests progressively and blocks duplicate Generate clicks.
+- `AGENTS.md` - this section.
+
 **Session 30W — Script Realism + Background Roles Guardrails:**
 
 Problem observed in long cinematic scripts: institutional scenes could become visually/logically thin, e.g. court-related scenes without any judge/lawyer/clerk presence, or legal/medical/business stakes resolved by dialogue alone without visible proof. Adding every functional person as a full character would bloat portraits, elements, promo posts, and the 3-character scene constraint.

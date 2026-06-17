@@ -7787,6 +7787,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           // upload proof, prompt typing). Those must not search Asset Library for an
           // image that was never submitted.
           const isTimeout = errMsg.includes('timeout');
+          const isActiveGenTimeout = errMsg.includes('[active-gen]');
           const isPreGen = errMsg.includes('[pre-gen]');
           let freshSceneAsset = sceneAsset;
           if (sceneAsset) {
@@ -7796,6 +7797,47 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           const hasSubmittedProof = !!(attemptState.generateClicked || freshSceneAsset?.gen_clicked_at);
           if (isTimeout && !isPreGen && attempt < MAX_SCENE_RETRIES && !hasSubmittedProof) {
             this.log(`[CINEMATIC] Timeout on attempt ${attempt} happened before Generate proof — skipping Asset Library recovery and retrying setup cleanly`);
+          }
+          if (isActiveGenTimeout && !isPreGen && hasSubmittedProof) {
+            const blockingParts = [
+              blocking.notes || '',
+              blocking.frame_left || '',
+              blocking.frame_center || '',
+              blocking.frame_right || '',
+            ].filter(Boolean).join(' ');
+            const recoveryPrompt = blockingParts.length > 30 ? blockingParts : visionBlockingJson;
+            const waitSteps = [30000, 60000, 90000, 120000, 120000, 120000, 120000, 120000];
+            let waitedMs = 0;
+            let recoveredFromActive = false;
+
+            this.log(`[CINEMATIC] Active generation detected after Generate for Ch${chapter} Sc${scene.scene_number} — entering wait/harvest mode; no retry Generate will be clicked`, 'warn');
+            for (let waitIdx = 0; waitIdx < waitSteps.length; waitIdx++) {
+              const waitMs = waitSteps[waitIdx];
+              waitedMs += waitMs;
+              this.log(`[CINEMATIC] Active generation wait ${waitIdx + 1}/${waitSteps.length}: waiting ${Math.round(waitMs / 1000)}s (total ${Math.round(waitedMs / 1000)}s), then harvesting...`);
+              await new Promise(r => setTimeout(r, waitMs));
+              try {
+                const harvested = await cinema.attemptHarvestRecovery(recoveryPrompt, outputPath);
+                if (harvested) {
+                  this.log(`[CINEMATIC] ✓ ACTIVE-GEN HARVEST succeeded for Ch${chapter} Sc${scene.scene_number} after ${Math.round(waitedMs / 1000)}s — no re-generation needed`);
+                  if (sceneAsset) db.markAssetDone(sceneAsset.id, outputPath, { model: 'cinematic-cameras', sourceGenId: harvested.sourceGenId });
+                  sceneSuccess = true;
+                  recoveredFromActive = true;
+                  break;
+                }
+                this.log(`[CINEMATIC] Active-generation harvest attempt ${waitIdx + 1} found no match yet`);
+              } catch (harvestErr) {
+                this.log(`[CINEMATIC] Active-generation harvest attempt ${waitIdx + 1} failed: ${harvestErr.message}`, 'warn');
+              }
+            }
+
+            if (recoveredFromActive) {
+              break;
+            }
+
+            this.log(`[CINEMATIC] Active generation for Ch${chapter} Sc${scene.scene_number} did not become recoverable after ${Math.round(waitedMs / 1000)}s — stopping scene pass to avoid duplicate credit spend`, 'error');
+            if (sceneAsset) db.markAssetFailed(sceneAsset.id, `active-generation-timeout: unrecovered after ${Math.round(waitedMs / 1000)}s; no duplicate Generate submitted`);
+            break;
           }
           if (isTimeout && !isPreGen && attempt < MAX_SCENE_RETRIES && hasSubmittedProof) {
             const proof = attemptState.generateClicked

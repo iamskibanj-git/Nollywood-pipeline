@@ -4326,6 +4326,13 @@ class CinemaStudioAutomation {
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       if (elapsed % 15 === 0) this.log(`[POLL] Waiting for generation... (${elapsed}s, tiles: ${currentTiles.length})`);
     }
+
+    const activeGeneration = await this.detectActiveImageGenerationTiles().catch(() => ({ active: false, count: 0, evidence: [] }));
+    if (activeGeneration?.active) {
+      const evidence = JSON.stringify((activeGeneration.evidence || []).slice(0, 3));
+      throw new Error(`[ACTIVE-GEN] Timeout (${maxWaitMs / 1000}s) but ${activeGeneration.count} active generation tile(s) still visible — wait/harvest only. Evidence: ${evidence}`);
+    }
+
     // ── TIMEOUT RECOVERY: Try to harvest the generation from the Asset library ──
     // The generation may have completed on Higgsfield's side — just the tile
     // detection missed it. Instead of re-generating (wasting credits), navigate
@@ -4342,6 +4349,83 @@ class CinemaStudioAutomation {
     }
 
     throw new Error(`Timeout (${maxWaitMs / 1000}s) — harvest also failed`);
+  }
+
+  async detectActiveImageGenerationTiles() {
+    const page = this._ensurePageAlive();
+    const result = await page.evaluate(() => {
+      const vh = window.innerHeight || 900;
+      const vw = window.innerWidth || 1400;
+      const galleryBottom = vh * 0.74;
+      const toolbarTop = vh * 0.72;
+      const candidates = [];
+      const seen = new Set();
+
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 80 && r.height > 80 && r.bottom > 0 && r.right > 0 &&
+          r.x < vw && r.y < galleryBottom && r.y < toolbarTop &&
+          style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.05;
+      };
+
+      const loadingHint = (el) => {
+        const text = (el.innerText || el.textContent || '').toLowerCase();
+        const cls = String(el.className || '').toLowerCase();
+        const aria = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('role') || ''}`.toLowerCase();
+        const html = `${text} ${cls} ${aria}`;
+        return /generating|loading|processing|creating|spinner|progress|animate-spin|animate_spin/.test(html);
+      };
+
+      const roots = Array.from(document.querySelectorAll('figure, [data-asset-id], div, article, button'));
+      for (const el of roots) {
+        if (!visible(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 120 || r.height < 120) continue;
+        const key = `${Math.round(r.x)}:${Math.round(r.y)}:${Math.round(r.width)}:${Math.round(r.height)}`;
+        if (seen.has(key)) continue;
+
+        const imgs = Array.from(el.querySelectorAll('img')).filter(img => {
+          const ir = img.getBoundingClientRect();
+          return ir.width > 40 && ir.height > 40;
+        });
+        const hasLargeImage = imgs.some(img => {
+          const ir = img.getBoundingClientRect();
+          return ir.width > 80 && ir.height > 80 && (img.currentSrc || img.src);
+        });
+        const hasSvg = !!el.querySelector('svg');
+        const hasLoadingHint = loadingHint(el);
+        const isBlankLargeTile = !hasLargeImage && hasSvg && r.width > 140 && r.height > 140;
+        const isDimmedTile = hasLargeImage && Number(window.getComputedStyle(el).opacity || 1) < 0.75 && hasSvg;
+
+        if (hasLoadingHint || isBlankLargeTile || isDimmedTile) {
+          seen.add(key);
+          candidates.push({
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+            hasLargeImage,
+            hasSvg,
+            loadingHint: hasLoadingHint,
+            blankLargeTile: isBlankLargeTile,
+            dimmedTile: isDimmedTile,
+          });
+        }
+      }
+
+      const filtered = candidates
+        .filter(c => c.y > 100)
+        .sort((a, b) => (a.y - b.y) || (a.x - b.x))
+        .slice(0, 8);
+
+      return { active: filtered.length > 0, count: filtered.length, evidence: filtered };
+    });
+    if (result?.active) {
+      this.log(`[POLL] Active generation tile(s) visible: ${result.count} ${JSON.stringify((result.evidence || []).slice(0, 3))}`);
+    }
+    return result || { active: false, count: 0, evidence: [] };
   }
 
   /**
