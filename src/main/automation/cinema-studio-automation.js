@@ -2178,6 +2178,98 @@ class CinemaStudioAutomation {
     await page.waitForTimeout(150);
   }
 
+  async _waitForPointerBlockersToClear({ timeoutMs = 5000, label = 'interaction' } = {}) {
+    const page = this._ensurePageAlive();
+    const started = Date.now();
+    let lastBlockers = [];
+
+    while (Date.now() - started <= timeoutMs) {
+      lastBlockers = await page.evaluate(() => {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        return [...document.querySelectorAll('body *')]
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return null;
+            const style = window.getComputedStyle(el);
+            if (style.pointerEvents === 'none' || style.visibility === 'hidden' || style.display === 'none') return null;
+            const z = Number.parseInt(style.zIndex || '0', 10) || 0;
+            const isLargeOverlay = (
+              (style.position === 'fixed' || style.position === 'absolute') &&
+              r.width >= vw * 0.5 &&
+              r.height >= vh * 0.5 &&
+              z >= 100
+            );
+            const isRadixPopper = !!el.closest('[data-radix-popper-content-wrapper]') ||
+              el.hasAttribute('data-radix-popper-content-wrapper') ||
+              (el.getAttribute('data-state') === 'instant-open' && z >= 1000);
+            const isHighZPromptPopper = (
+              z >= 1000 &&
+              r.y > vh * 0.35 &&
+              r.y < vh - 20 &&
+              (style.position === 'fixed' || style.position === 'absolute')
+            );
+            if (!isLargeOverlay && !isRadixPopper && !isHighZPromptPopper) return null;
+            return {
+              tag: el.tagName,
+              className: String(el.className || '').slice(0, 120),
+              ariaHidden: el.getAttribute('aria-hidden') || '',
+              role: el.getAttribute('role') || '',
+              state: el.getAttribute('data-state') || '',
+              radix: !!el.closest('[data-radix-popper-content-wrapper]') || el.hasAttribute('data-radix-popper-content-wrapper'),
+              zIndex: style.zIndex || '',
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+            };
+          })
+          .filter(Boolean)
+          .slice(0, 6);
+      }).catch(() => []);
+
+      if (lastBlockers.length === 0) return { ok: true, blockers: [] };
+
+      this.log(`[OVERLAY] Waiting for pointer blocker(s) to clear before ${label}: ${JSON.stringify(lastBlockers)}`);
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.mouse.move(20, 20).catch(() => {});
+      await page.waitForTimeout(700);
+    }
+
+    return { ok: false, blockers: lastBlockers };
+  }
+
+  async _focusPromptTextboxForPreGen(label = 'prompt') {
+    const page = this._ensurePageAlive();
+    const blockers = await this._waitForPointerBlockersToClear({ timeoutMs: 15000, label });
+    if (!blockers.ok) {
+      const onlyPoppers = (blockers.blockers || []).length > 0 &&
+        blockers.blockers.every(b => b.radix || String(b.className || '').includes('z-10000'));
+      const hasDialog = await page.locator('[role="dialog"], [aria-modal="true"]').count().catch(() => 0);
+      if (!onlyPoppers || hasDialog > 0) {
+        throw new Error(`[PRE-GEN] HARD GATE: UI blocker still intercepting ${label}: ${JSON.stringify(blockers.blockers)}. No credits burned.`);
+      }
+      this.log(`[OVERLAY] Only Radix tooltip/popper blockers remain before ${label}; using DOM focus fallback`);
+    }
+
+    const promptBox = page.locator('[role="textbox"][contenteditable="true"]').first();
+    try {
+      await promptBox.click({ timeout: 10000 });
+    } catch (e) {
+      const focused = await page.evaluate(() => {
+        const tb = document.querySelector('[role="textbox"][contenteditable="true"]');
+        if (!tb) return false;
+        tb.focus();
+        const active = document.activeElement;
+        return active === tb || tb.contains(active);
+      }).catch(() => false);
+      if (!focused) {
+        throw new Error(`[PRE-GEN] HARD GATE: Could not focus prompt for ${label}: ${e.message}. No credits burned.`);
+      }
+      this.log(`[OVERLAY] DOM focus fallback succeeded for ${label} after click interception`);
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════
   // REFERENCE IMAGE ATTACHMENT (+ button)
   // ═══════════════════════════════════════════════════════════
@@ -2635,9 +2727,7 @@ class CinemaStudioAutomation {
     this.log('[REF] Verifying attached scene reference via temporary @image1 mention...');
     await this._clearTextbox();
     await page.waitForTimeout(300);
-
-    const promptBox = page.locator('[role="textbox"][contenteditable="true"]').first();
-    await promptBox.click({ timeout: 3000 });
+    await this._focusPromptTextboxForPreGen('@image1 reference proof');
     await page.waitForTimeout(300);
     await page.keyboard.type('@', { delay: 0 });
     await page.waitForTimeout(700);
@@ -3809,20 +3899,7 @@ class CinemaStudioAutomation {
       this.log(`[PHASE1b] *** VIDEO MODE DETECTED *** — smoking guns: [${videoSmokeCheck.join(', ')}]. Toolbar setup gave false positive!`);
       throw new Error(`SAFETY STOP: Still in Video mode after toolbar setup — indicators: [${videoSmokeCheck.join(', ')}]`);
     } else {
-      this.log('[PHASE1b] Verifying elements via @ button (no video indicators found)...');
-
-      const characterNames = characters.map(c => c.name);
-      try {
-        const elementCheck = await this._verifyElementsViaAtButton(characterNames);
-        this.log(`[PHASE1b] Element check: ${elementCheck.available.length} found, ${elementCheck.missing.length} missing`);
-      } catch (e) {
-        this.log(`[PHASE1b] Element verification failed: ${e.message}`);
-        // @ button missing or wrong mode — toolbar setup didn't land on Image/Cinematic Cameras
-        if (e.message.includes('@ button not found') || e.message.includes('Video mode') || e.message.includes('ELEMENT-CHECK FAIL')) {
-          throw new Error(`SAFETY STOP: Element check failed — ${e.message}`);
-        }
-        // Other errors (empty dropdown etc.) — log warning but continue
-      }
+      this.log('[PHASE1b] Video-mode smoke guard passed; skipping obsolete typed @element diagnostic');
     }
 
     // ── Attach location reference image ──

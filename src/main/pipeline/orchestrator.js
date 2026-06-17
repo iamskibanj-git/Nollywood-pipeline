@@ -7643,6 +7643,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       const MAX_SCENE_RETRIES = 3;
       let sceneSuccess = false;
       for (let attempt = 1; attempt <= MAX_SCENE_RETRIES; attempt++) {
+        const attemptState = {
+          generateClicked: false,
+          creditCost: null,
+        };
         try {
           if (sceneAsset) db.markAssetGenerating(sceneAsset.id, visionBlockingJson);
           const result = await cinema.generateSceneImage({
@@ -7654,6 +7658,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             projectName: this._titleInitials(this.state.selectedTitle || this.state.script?.title).toUpperCase(),
             propContract: scenePropContract,
             onGenClicked: (creditCost) => {
+              attemptState.generateClicked = true;
+              attemptState.creditCost = creditCost ?? null;
               if (sceneAsset) db.markAssetGenClicked(sceneAsset.id, creditCost);
             },
           });
@@ -7767,13 +7773,26 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             break;
           }
 
-          // ── PRE-RETRY HARVEST: if this was a timeout (credits likely burned),
-          // attempt to recover the image from Higgsfield before re-generating.
-          // The image may have completed server-side after our poll window closed.
+          // ── PRE-RETRY HARVEST: only after a proven Generate click.
+          // Pre-submit failures can include timeouts (stale overlays, textbox focus,
+          // upload proof, prompt typing). Those must not search Asset Library for an
+          // image that was never submitted.
           const isTimeout = errMsg.includes('timeout');
           const isPreGen = errMsg.includes('[pre-gen]');
-          if (isTimeout && !isPreGen && attempt < MAX_SCENE_RETRIES) {
-            this.log(`[CINEMATIC] Timeout on attempt ${attempt} — waiting 30s then attempting harvest recovery before retry...`);
+          let freshSceneAsset = sceneAsset;
+          if (sceneAsset) {
+            freshSceneAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+              .find(a => a.id === sceneAsset.id) || sceneAsset;
+          }
+          const hasSubmittedProof = !!(attemptState.generateClicked || freshSceneAsset?.gen_clicked_at);
+          if (isTimeout && !isPreGen && attempt < MAX_SCENE_RETRIES && !hasSubmittedProof) {
+            this.log(`[CINEMATIC] Timeout on attempt ${attempt} happened before Generate proof — skipping Asset Library recovery and retrying setup cleanly`);
+          }
+          if (isTimeout && !isPreGen && attempt < MAX_SCENE_RETRIES && hasSubmittedProof) {
+            const proof = attemptState.generateClicked
+              ? `current attempt Generate click (cost=${attemptState.creditCost ?? 'unknown'})`
+              : `persisted gen_clicked_at=${freshSceneAsset?.gen_clicked_at}`;
+            this.log(`[CINEMATIC] Timeout on attempt ${attempt} after ${proof} — waiting 30s then attempting harvest recovery before retry...`);
             await new Promise(r => setTimeout(r, 30000)); // let Higgsfield finish
             try {
               // Build a recovery prompt from the blocking fields — these form the
