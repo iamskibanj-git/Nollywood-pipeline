@@ -410,10 +410,12 @@ class CinemaStudioAutomation {
       innerHeight: window.innerHeight,
       screenWidth: window.screen.width,
       screenHeight: window.screen.height,
+      availWidth: window.screen.availWidth || window.screen.width,
+      availHeight: window.screen.availHeight || window.screen.height,
       dpr: window.devicePixelRatio || 1,
     }));
 
-    this.log(`[VIEWPORT] Current: ${dims.innerWidth}x${dims.innerHeight} (screen: ${dims.screenWidth}x${dims.screenHeight}, dpr: ${dims.dpr})`);
+    this.log(`[VIEWPORT] Current: ${dims.innerWidth}x${dims.innerHeight} (screen: ${dims.screenWidth}x${dims.screenHeight}, avail: ${dims.availWidth}x${dims.availHeight}, dpr: ${dims.dpr})`);
 
     // Cinema Studio renders all toolbar buttons at ANY viewport size (verified
     // via Chrome DevTools inspection April 2026). The previous assumption that
@@ -425,6 +427,11 @@ class CinemaStudioAutomation {
     try {
       const cdp = await page.context().newCDPSession(page);
       const { windowId } = await cdp.send('Browser.getWindowForTarget');
+      const availableWidth = dims.availWidth || dims.screenWidth || minWidth;
+      const availableHeight = dims.availHeight || dims.screenHeight || minHeight;
+      const safeWidth = Math.min(availableWidth, Math.max(800, Math.min(minWidth, availableWidth - 8)));
+      const safeHeight = Math.min(availableHeight, Math.max(600, Math.min(minHeight, availableHeight - 8)));
+      this.log(`[VIEWPORT] Applying on-screen bounds: left=0 top=0 size=${safeWidth}x${safeHeight}`);
 
       // Un-maximize first (setWindowBounds can't resize a maximized window)
       await cdp.send('Browser.setWindowBounds', {
@@ -433,24 +440,91 @@ class CinemaStudioAutomation {
       });
       await page.waitForTimeout(300);
 
-      // Request as large as possible
+      // Request the largest safe on-screen window, capped by the work area.
       await cdp.send('Browser.setWindowBounds', {
         windowId,
-        bounds: { width: minWidth, height: minHeight },
+        bounds: { left: 0, top: 0, width: safeWidth, height: safeHeight },
       });
       await page.waitForTimeout(500);
 
+      const bounds = await cdp.send('Browser.getWindowBounds', { windowId }).catch(() => null);
       const after = await page.evaluate(() => ({
         w: window.innerWidth,
         h: window.innerHeight,
+        outerW: window.outerWidth,
+        outerH: window.outerHeight,
       }));
-      this.log(`[VIEWPORT] After CDP resize: ${after.w}x${after.h}`);
+      this.log(`[VIEWPORT] After CDP fit: inner=${after.w}x${after.h}, outer=${after.outerW}x${after.outerH}, bounds=${JSON.stringify(bounds?.bounds || null)}`);
 
       // Give Cinema Studio time to re-render with new dimensions
       await page.waitForTimeout(1000);
+      let visibility = await this._readComposerControlVisibility();
+      this.log(`[VIEWPORT] Composer control visibility: ${JSON.stringify(visibility)}`);
+      if (!visibility.ok) {
+        await this._scrollToolbarIntoView().catch(() => {});
+        await page.waitForTimeout(500);
+        visibility = await this._readComposerControlVisibility();
+        this.log(`[VIEWPORT] Composer control visibility after scroll: ${JSON.stringify(visibility)}`);
+      }
     } catch (e) {
       this.log(`[VIEWPORT] Resize failed: ${e.message.split('\n')[0]} — continuing with current size`);
     }
+  }
+
+  async _readComposerControlVisibility() {
+    const page = this._ensurePageAlive();
+    return page.evaluate(() => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const margin = 6;
+      const textOf = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
+      const rectInfo = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const visible = r.width > 0 && r.height > 0;
+        const inViewport = visible &&
+          r.right > margin && r.left < vw - margin &&
+          r.bottom > margin && r.top < vh - margin;
+        return {
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          inViewport,
+        };
+      };
+      const buttons = [...document.querySelectorAll('button')].filter((b) => {
+        const r = b.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      const textbox = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
+      const generate = buttons.find((b) => /^GENERATE|^Generate/.test(textOf(b)));
+      const image = buttons.find((b) => textOf(b) === 'Image');
+      const video = buttons.find((b) => textOf(b) === 'Video');
+      const toolbarIconCount = buttons.filter((b) => {
+        const r = b.getBoundingClientRect();
+        return !textOf(b) && !!b.querySelector('svg') &&
+          r.width > 0 && r.width <= 70 &&
+          r.height > 0 && r.height <= 70 &&
+          r.y > vh * 0.45 &&
+          r.right > margin && r.left < vw - margin &&
+          r.bottom > margin && r.top < vh - margin;
+      }).length;
+      const proof = {
+        viewport: { w: vw, h: vh },
+        textbox: rectInfo(textbox),
+        generate: rectInfo(generate),
+        image: rectInfo(image),
+        video: rectInfo(video),
+        toolbarIconCount,
+      };
+      proof.ok = !!(
+        proof.textbox?.inViewport &&
+        proof.generate?.inViewport &&
+        (proof.image?.inViewport || proof.video?.inViewport)
+      );
+      return proof;
+    }).catch(e => ({ ok: false, error: e.message || 'evaluate failed' }));
   }
 
   /**
