@@ -497,7 +497,27 @@ class CinemaStudioAutomation {
         const r = b.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
       });
-      const textbox = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
+      const findVisibleComposer = () => {
+        const candidates = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea, button, div')]
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const text = textOf(el);
+            const semantic = el.matches('[role="textbox"], textarea, [contenteditable="true"]');
+            const placeholderLike = /Describe (the )?scene/i.test(text);
+            return { el, r, semantic, placeholderLike };
+          })
+          .filter((c) =>
+            c.r.width > 80 && c.r.height > 20 &&
+            c.r.y > window.innerHeight * 0.35 &&
+            (c.semantic || c.placeholderLike)
+          )
+          .sort((a, b) => {
+            if (a.semantic !== b.semantic) return a.semantic ? -1 : 1;
+            return (b.r.width * b.r.height) - (a.r.width * a.r.height);
+          });
+        return candidates[0]?.el || null;
+      };
+      const textbox = findVisibleComposer();
       const generate = buttons.find((b) => /^GENERATE|^Generate/.test(textOf(b)));
       const image = buttons.find((b) => textOf(b) === 'Image');
       const video = buttons.find((b) => textOf(b) === 'Video');
@@ -2310,6 +2330,55 @@ class CinemaStudioAutomation {
         }
       }
     } catch (_) {}
+    try {
+      const closedPromo = await page.evaluate(() => {
+        const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+        const viewportArea = window.innerWidth * window.innerHeight;
+        const promoTextPattern = /Seedance|Unlimited Access|Get Unlimited|Try Seedance|Offer Expires|Switch to Seedance/i;
+        const containers = [...document.querySelectorAll('[role="dialog"], [class*="modal" i], [class*="overlay" i], div, section')]
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const text = norm(el.textContent || '');
+            return { el, r, text };
+          })
+          .filter((c) =>
+            c.r.width > 180 && c.r.height > 120 &&
+            c.r.width * c.r.height < viewportArea * 0.85 &&
+            promoTextPattern.test(c.text)
+          )
+          .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+        const promo = containers[0];
+        if (!promo) return { closed: false, reason: 'no promo overlay' };
+        const buttons = [...promo.el.querySelectorAll('button, [role="button"]')]
+          .map((btn) => {
+            const r = btn.getBoundingClientRect();
+            const text = norm(btn.textContent || '');
+            const aria = norm(btn.getAttribute('aria-label') || '');
+            const nearTopRight = r.width > 0 && r.height > 0 &&
+              r.x > promo.r.x + promo.r.width * 0.72 &&
+              r.y < promo.r.y + promo.r.height * 0.28;
+            const closeLike = /close|dismiss/i.test(`${text} ${aria}`) ||
+              (!text && btn.querySelector('svg') && r.width <= 56 && r.height <= 56 && nearTopRight) ||
+              /^[×x]$/i.test(text);
+            return { btn, r, text, aria, closeLike };
+          })
+          .filter((b) => b.closeLike && b.r.width > 0 && b.r.height > 0)
+          .sort((a, b) => a.r.y - b.r.y || b.r.x - a.r.x);
+        const target = buttons[0];
+        if (!target) return { closed: false, reason: 'promo found but no close button', text: promo.text.slice(0, 120) };
+        target.btn.click();
+        return {
+          closed: true,
+          text: promo.text.slice(0, 80),
+          x: Math.round(target.r.x),
+          y: Math.round(target.r.y),
+        };
+      });
+      if (closedPromo?.closed) {
+        this.log(`[OVERLAY] Closed promo overlay (${JSON.stringify(closedPromo)})`);
+        await page.waitForTimeout(700);
+      }
+    } catch (_) {}
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(150);
     await page.keyboard.press('Escape').catch(() => {});
@@ -2640,7 +2709,27 @@ class CinemaStudioAutomation {
     const page = this._ensurePageAlive();
     return page.evaluate(() => {
       const vh = window.innerHeight;
-      const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
+      const findVisibleComposer = () => {
+        const candidates = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea, button, div')]
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            const semantic = el.matches('[role="textbox"], textarea, [contenteditable="true"]');
+            const placeholderLike = /Describe (the )?scene/i.test(text);
+            return { el, r, semantic, placeholderLike };
+          })
+          .filter((c) =>
+            c.r.width > 80 && c.r.height > 20 &&
+            c.r.y > window.innerHeight * 0.35 &&
+            (c.semantic || c.placeholderLike)
+          )
+          .sort((a, b) => {
+            if (a.semantic !== b.semantic) return a.semantic ? -1 : 1;
+            return (b.r.width * b.r.height) - (a.r.width * a.r.height);
+          });
+        return candidates[0]?.el || null;
+      };
+      const tb = findVisibleComposer();
       if (!tb) return { attached: false, debug: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
       if (tbRect.width <= 1 || tbRect.height <= 1) {
@@ -2744,7 +2833,27 @@ class CinemaStudioAutomation {
     const page = this._ensurePageAlive();
     return page.evaluate(() => {
       const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-      const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
+      const findVisibleComposer = () => {
+        const candidates = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea, button, div')]
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const text = norm(el.textContent || '');
+            const semantic = el.matches('[role="textbox"], textarea, [contenteditable="true"]');
+            const placeholderLike = /Describe (the )?scene/i.test(text);
+            return { el, r, semantic, placeholderLike };
+          })
+          .filter((c) =>
+            c.r.width > 80 && c.r.height > 20 &&
+            c.r.y > window.innerHeight * 0.35 &&
+            (c.semantic || c.placeholderLike)
+          )
+          .sort((a, b) => {
+            if (a.semantic !== b.semantic) return a.semantic ? -1 : 1;
+            return (b.r.width * b.r.height) - (a.r.width * a.r.height);
+          });
+        return candidates[0]?.el || null;
+      };
+      const tb = findVisibleComposer();
       const tbRect = tb?.getBoundingClientRect?.();
       const textbox = tbRect ? {
         x: Math.round(tbRect.x),
@@ -2795,15 +2904,18 @@ class CinemaStudioAutomation {
         p.hasReferenceSignal &&
         (p.nearComposer || p.hasUploadControl || p.hasUploadTab || p.w >= 240)
       );
+      const hasVisiblePicker = realPickerPanels.length > 0 || hasPickerText;
+      const hasVisibleComposer = !!textbox && textbox.w > 1 && textbox.h > 1;
       return {
-        ok: !!textbox && textbox.w > 1 && textbox.h > 1 && (realPickerPanels.length > 0 || hasPickerText),
+        ok: hasVisiblePicker,
         textbox,
         panels: panels.slice(0, 6),
         tabs: tabs.slice(0, 10),
         hasPickerText,
-        reason: !textbox ? 'no textbox' :
-          textbox.w <= 1 || textbox.h <= 1 ? 'textbox zero bounds' :
-          realPickerPanels.length === 0 && !hasPickerText ? 'no reference picker signals' : '',
+        composerOk: hasVisibleComposer,
+        reason: !hasVisiblePicker ? 'no reference picker signals' :
+          !textbox ? 'picker visible; no composer textbox' :
+          textbox.w <= 1 || textbox.h <= 1 ? 'picker visible; textbox zero bounds' : '',
       };
     }).catch(e => ({ ok: false, reason: e.message || 'evaluate failed' }));
   }
@@ -3126,7 +3238,28 @@ class CinemaStudioAutomation {
         el.removeAttribute('data-cs-btn-hidden');
       });
 
-      const tb = document.querySelector('[role="textbox"][contenteditable="true"]');
+      const findVisibleComposer = () => {
+        const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+        const candidates = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea, button, div')]
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const text = norm(el.textContent || '');
+            const semantic = el.matches('[role="textbox"], textarea, [contenteditable="true"]');
+            const placeholderLike = /Describe (the )?scene/i.test(text);
+            return { el, r, semantic, placeholderLike };
+          })
+          .filter((c) =>
+            c.r.width > 80 && c.r.height > 20 &&
+            c.r.y > window.innerHeight * 0.35 &&
+            (c.semantic || c.placeholderLike)
+          )
+          .sort((a, b) => {
+            if (a.semantic !== b.semantic) return a.semantic ? -1 : 1;
+            return (b.r.width * b.r.height) - (a.r.width * a.r.height);
+          });
+        return candidates[0]?.el || null;
+      };
+      const tb = findVisibleComposer();
       if (!tb) return { ok: false, reason: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
       const tbLeftEdge = tbRect.x + 15;
