@@ -7904,6 +7904,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           // image that was never submitted.
           const isTimeout = errMsg.includes('timeout');
           const isActiveGenTimeout = errMsg.includes('[active-gen]');
+          const isGenFailedRefunded = errMsg.includes('[gen-failed-refunded]');
+          const isGenFailedUnknown = errMsg.includes('[gen-failed-unknown]');
           const isPreGen = errMsg.includes('[pre-gen]');
           let freshSceneAsset = sceneAsset;
           if (sceneAsset) {
@@ -7911,6 +7913,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               .find(a => a.id === sceneAsset.id) || sceneAsset;
           }
           const hasSubmittedProof = !!(attemptState.generateClicked || freshSceneAsset?.gen_clicked_at);
+          if (isGenFailedRefunded || isGenFailedUnknown) {
+            const refundNote = isGenFailedRefunded ? 'credits refunded' : 'refund status unknown';
+            this.log(`[CINEMATIC] Higgsfield returned terminal Failed tile for Ch${chapter} Sc${scene.scene_number} (${refundNote}) — retrying automatically; no harvest/manual gate`, isGenFailedRefunded ? 'warn' : 'error');
+          }
           if (isTimeout && !isPreGen && attempt < MAX_SCENE_RETRIES && !hasSubmittedProof) {
             this.log(`[CINEMATIC] Timeout on attempt ${attempt} happened before Generate proof — skipping Asset Library recovery and retrying setup cleanly`);
           }
@@ -8064,97 +8070,25 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this.log(`[CINEMATIC] Scene image stage: ${allScenes.length - missingScenes.length}/${allScenes.length} done${missingScenes.length ? `, ${missingScenes.length} missing` : ''}`);
 
     if (missingScenes.length > 0) {
-      if (!this._cinematicSceneFallbackRetryAttempted && !browserDead && !this.cancelled) {
-        this._cinematicSceneFallbackRetryAttempted = true;
-        this.log(`[CINEMATIC] ${missingScenes.length} scene image(s) still missing after primary pass — running one bounded retry pass before manual fallback`, 'warn');
+      const maxRecoveryCycles = 20;
+      this._cinematicSceneAutoRecoveryCycles = (this._cinematicSceneAutoRecoveryCycles || 0) + 1;
+      if (!browserDead && !this.cancelled && this._cinematicSceneAutoRecoveryCycles <= maxRecoveryCycles) {
+        const delayMs = Math.min(60000, 5000 + (this._cinematicSceneAutoRecoveryCycles - 1) * 5000);
+        this.log(`[CINEMATIC] ${missingScenes.length} scene image(s) still missing after pass — auto-recovery cycle ${this._cinematicSceneAutoRecoveryCycles}/${maxRecoveryCycles}; retrying without human gate after ${Math.round(delayMs / 1000)}s`, 'warn');
         try {
           await cinema.resetFormForNextGeneration();
         } catch (resetErr) {
-          this.log(`[CINEMATIC] WARN: fallback retry reset failed: ${resetErr.message} — retry pass will still proceed`, 'warn');
+          this.log(`[CINEMATIC] WARN: auto-recovery reset failed: ${resetErr.message} — retry pass will still proceed`, 'warn');
         }
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, delayMs));
         return await this._runCinematicSceneImageStage(projectId, projectDir);
       }
+      throw new Error(`[CINEMATIC] Scene image automation exhausted ${maxRecoveryCycles} recovery cycle(s); ${missingScenes.length} scene image(s) still missing. No human scene-image gate emitted.`);
 
-      // Build a clear checklist + emit to UI
-      const checklistLines = [
-        '',
-        '═══════════════════════════════════════════════════════════════',
-        '  CINEMA STUDIO AUTOMATION INCOMPLETE — MANUAL SCENE IMAGES NEEDED',
-        '═══════════════════════════════════════════════════════════════',
-        '',
-        `${missingScenes.length} scene image(s) couldn't be generated automatically (selector/UI fragility).`,
-        'Generate each one manually in Cinema Studio 3.5 and save to the listed path:',
-        '',
-      ];
-      // Translate @character_N refs → actual @element_names for manual use
-      const elemMap = this.state.cinematicElementNames || {};
-      const _xlat = (text) => {
-        if (!text) return text;
-        return text.replace(/@([a-z0-9_]+)/gi, (match, name) => {
-          const resolved = elemMap[name.toLowerCase()] || elemMap[`@${name.toLowerCase()}`];
-          return resolved ? `@${resolved}` : match;
-        });
-      };
-
-      for (const m of missingScenes) {
-        checklistLines.push(`  Ch${m.chapter} Sc${m.scene}: ${m.location || '(unknown location)'}`);
-        if (m.locationImagePath) checklistLines.push(`    Location ref: ${m.locationImagePath}`);
-        if (m.blocking) {
-          if (m.blocking.frame_left)   checklistLines.push(`    Frame-left:   ${_xlat(m.blocking.frame_left)}`);
-          if (m.blocking.frame_center) checklistLines.push(`    Frame-center: ${_xlat(m.blocking.frame_center)}`);
-          if (m.blocking.frame_right)  checklistLines.push(`    Frame-right:  ${_xlat(m.blocking.frame_right)}`);
-          if (m.blocking.notes)        checklistLines.push(`    Lighting:     ${_xlat(m.blocking.notes)}`);
-        }
-        checklistLines.push(`    Save to:      ${m.expectedPath}`);
-        checklistLines.push('');
-      }
-      checklistLines.push('Steps for each scene:');
-      checklistLines.push('  1. Open Higgsfield → Cinema Studio 3.5 (top nav)');
-      checklistLines.push('  2. Select your project in the left sidebar (hover icons to find it)');
-      checklistLines.push('  3. Click "Image" tab → ensure "Cinematic Cameras" is active in bottom toolbar');
-      checklistLines.push('  4. Click + (left of prompt) → "Image Generations" tab → pick the location ref image listed above');
-      checklistLines.push('  5. Type a blocking prompt using @character refs + the position descriptions above');
-      checklistLines.push('  6. Set aspect ratio + 2K → Generate');
-      checklistLines.push('  7. Right-click the result → Download → save to the "Save to" path above');
-      checklistLines.push('');
-      checklistLines.push('When all scene images exist on disk, click "Scene Images Ready — Continue" to proceed.');
-      checklistLines.push('═══════════════════════════════════════════════════════════════');
-      this.log(checklistLines.join('\n'), 'warn');
-
-      // Translate blocking @refs in the emitted data so the UI shows real element names
-      const translatedScenes = missingScenes.map(m => ({
-        ...m,
-        blocking: m.blocking ? {
-          frame_left: _xlat(m.blocking.frame_left),
-          frame_center: _xlat(m.blocking.frame_center),
-          frame_right: _xlat(m.blocking.frame_right),
-          notes: _xlat(m.blocking.notes),
-        } : null,
-      }));
-      this.emit({ type: 'cinematic-manual-scene-images', pending: translatedScenes });
-      this.state.status = 'waiting_approval';
-      this.emit({ type: 'waiting', gate: 'scene-images-ready' });
-      this.log('[CINEMATIC] Pipeline paused — finish scene image generation manually, then click "Scene Images Ready — Continue"');
-      await this.waitForApproval('scene-images-ready');
-
-      // After user clicks Continue: rescan the disk and mark any newly-present
-      // scene images as done. Then re-check; if still missing, allow proceeding
-      // anyway (with warning) so the user doesn't get permanently stuck.
-      let manualRecovered = 0;
-      for (const m of missingScenes) {
-        if (fs.existsSync(m.expectedPath)) {
-          const assets = db.getAssets(projectId, { type: 'scene_image_cinematic' })
-            .filter(a => a.chapter === m.chapter && a.scene === m.scene);
-          for (const a of assets) {
-            db.markAssetDone(a.id, m.expectedPath, { model: 'cinematic-cameras-manual', sourceGenId: null });
-          }
-          manualRecovered++;
-        }
-      }
-      this.log(`[CINEMATIC] Manual recovery: ${manualRecovered}/${missingScenes.length} scene images now present on disk`);
     }
 
+    this._cinematicSceneAutoRecoveryCycles = 0;
+    this._cinematicSceneFallbackRetryAttempted = false;
     this.log(`[CINEMATIC] Scene image stage complete — ${allScenes.length} scenes processed`);
   }
 

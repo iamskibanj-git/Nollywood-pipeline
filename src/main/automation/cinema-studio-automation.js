@@ -4246,6 +4246,7 @@ class CinemaStudioAutomation {
     // tile (e.g., URL changes after upload processing).
     let initialSrcSet = new Set();
     let initialTileCount = 0;
+    let initialFailedTileKeys = new Set();
     try {
       const initial = await page.evaluate(() => {
         const vh = window.innerHeight;
@@ -4265,6 +4266,11 @@ class CinemaStudioAutomation {
       });
       initialSrcSet = new Set(initial.srcs);
       initialTileCount = initial.count;
+      const initialState = await this.scanImageGenerationTiles().catch(() => ({ failedRefunded: [], failedUnknown: [] }));
+      initialFailedTileKeys = new Set([
+        ...(initialState.failedRefunded || []),
+        ...(initialState.failedUnknown || []),
+      ].map(t => t.key).filter(Boolean));
       this.log(`[POLL] Initial state: ${initialTileCount} gallery tiles snapshotted`);
     } catch (e) {
       throw new Error(`Page closed before download polling started: ${e.message.split('\n')[0]}`);
@@ -4307,6 +4313,16 @@ class CinemaStudioAutomation {
 
       // Find any tile src that was NOT in the initial snapshot — that's the new generation.
       // This is robust against stale tiles from previous projects/sessions.
+      const generationState = await this.scanImageGenerationTiles().catch(() => ({ failedRefunded: [], failedUnknown: [] }));
+      const newRefundedFailure = (generationState.failedRefunded || []).find(t => !initialFailedTileKeys.has(t.key));
+      const newUnknownFailure = (generationState.failedUnknown || []).find(t => !initialFailedTileKeys.has(t.key));
+      if (newRefundedFailure) {
+        throw new Error(`[GEN-FAILED-REFUNDED] Higgsfield returned Failed / Credits refunded for this scene image. Evidence: ${JSON.stringify(newRefundedFailure)}`);
+      }
+      if (newUnknownFailure) {
+        throw new Error(`[GEN-FAILED-UNKNOWN] Higgsfield returned Failed for this scene image; refund status unclear. Evidence: ${JSON.stringify(newUnknownFailure)}`);
+      }
+
       const newSrc = currentTiles.find(src => src && !initialSrcSet.has(src));
 
       if (newSrc) {
@@ -4336,6 +4352,16 @@ class CinemaStudioAutomation {
       if (elapsed % 15 === 0) this.log(`[POLL] Waiting for generation... (${elapsed}s, tiles: ${currentTiles.length})`);
     }
 
+    const terminalState = await this.scanImageGenerationTiles().catch(() => ({ failedRefunded: [], failedUnknown: [] }));
+    const newRefundedFailure = (terminalState.failedRefunded || []).find(t => !initialFailedTileKeys.has(t.key));
+    const newUnknownFailure = (terminalState.failedUnknown || []).find(t => !initialFailedTileKeys.has(t.key));
+    if (newRefundedFailure) {
+      throw new Error(`[GEN-FAILED-REFUNDED] Higgsfield returned Failed / Credits refunded for this scene image. Evidence: ${JSON.stringify(newRefundedFailure)}`);
+    }
+    if (newUnknownFailure) {
+      throw new Error(`[GEN-FAILED-UNKNOWN] Higgsfield returned Failed for this scene image; refund status unclear. Evidence: ${JSON.stringify(newUnknownFailure)}`);
+    }
+
     const activeGeneration = await this.detectActiveImageGenerationTiles().catch(() => ({ active: false, count: 0, evidence: [] }));
     if (activeGeneration?.active) {
       const evidence = JSON.stringify((activeGeneration.evidence || []).slice(0, 3));
@@ -4360,7 +4386,7 @@ class CinemaStudioAutomation {
     throw new Error(`Timeout (${maxWaitMs / 1000}s) — harvest also failed`);
   }
 
-  async detectActiveImageGenerationTiles() {
+  async scanImageGenerationTiles() {
     const page = this._ensurePageAlive();
     const result = await page.evaluate(() => {
       const vh = window.innerHeight || 900;
@@ -4368,6 +4394,8 @@ class CinemaStudioAutomation {
       const galleryBottom = vh * 0.74;
       const toolbarTop = vh * 0.72;
       const candidates = [];
+      const failedRefunded = [];
+      const failedUnknown = [];
       const seen = new Set();
 
       const visible = (el) => {
@@ -4393,6 +4421,25 @@ class CinemaStudioAutomation {
         if (r.width < 120 || r.height < 120) continue;
         const key = `${Math.round(r.x)}:${Math.round(r.y)}:${Math.round(r.width)}:${Math.round(r.height)}`;
         if (seen.has(key)) continue;
+        const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const textLower = text.toLowerCase();
+        const hasFailed = /\bfailed\b/.test(textLower);
+        const hasRefunded = /\bcredits?\s+refunded\b|\brefunded\b/.test(textLower);
+
+        if (hasFailed) {
+          seen.add(key);
+          const record = {
+            key,
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            text: text.slice(0, 120),
+          };
+          if (hasRefunded) failedRefunded.push(record);
+          else failedUnknown.push(record);
+          continue;
+        }
 
         const imgs = Array.from(el.querySelectorAll('img')).filter(img => {
           const ir = img.getBoundingClientRect();
@@ -4429,12 +4476,29 @@ class CinemaStudioAutomation {
         .sort((a, b) => (a.y - b.y) || (a.x - b.x))
         .slice(0, 8);
 
-      return { active: filtered.length > 0, count: filtered.length, evidence: filtered };
+      return {
+        active: filtered.length > 0,
+        count: filtered.length,
+        evidence: filtered,
+        failedRefunded,
+        failedUnknown,
+      };
     });
+    return result || { active: false, count: 0, evidence: [], failedRefunded: [], failedUnknown: [] };
+  }
+
+  async detectActiveImageGenerationTiles() {
+    const result = await this.scanImageGenerationTiles();
     if (result?.active) {
       this.log(`[POLL] Active generation tile(s) visible: ${result.count} ${JSON.stringify((result.evidence || []).slice(0, 3))}`);
     }
-    return result || { active: false, count: 0, evidence: [] };
+    if (result?.failedRefunded?.length) {
+      this.log(`[POLL] Terminal failed/refunded tile(s) visible: ${JSON.stringify(result.failedRefunded.slice(0, 3))}`);
+    }
+    if (result?.failedUnknown?.length) {
+      this.log(`[POLL] Terminal failed tile(s) visible (refund unknown): ${JSON.stringify(result.failedUnknown.slice(0, 3))}`);
+    }
+    return result || { active: false, count: 0, evidence: [], failedRefunded: [], failedUnknown: [] };
   }
 
   /**
