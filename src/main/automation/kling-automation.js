@@ -1701,20 +1701,24 @@ class KlingAutomation {
       // These appear after re-login and block ALL pointer events until dismissed.
       // Must be handled BEFORE ads because ads sit behind the overlay.
       await this._dismissAgreementModal(tag);
+      await this._dismissSeedanceAndAIDirectorOverlays(tag);
 
       this.log(`${tag} Waiting 3s for any ads to render before dismissing...`);
       await page.waitForTimeout(3000);
 
       // Round 1
       await this.automation._dismissPromoAd();
+      await this._dismissSeedanceAndAIDirectorOverlays(tag);
       await page.waitForTimeout(1000);
 
       // Round 2: catch late-arriving ads
       await this.automation._dismissPromoAd();
+      await this._dismissSeedanceAndAIDirectorOverlays(tag);
       await page.waitForTimeout(1000);
 
       // Round 3: final sweep
       await this.automation._dismissPromoAd();
+      await this._dismissSeedanceAndAIDirectorOverlays(tag);
 
       this.log(`${tag} Ad dismissal complete, proceeding`);
     } catch (e) {
@@ -1779,6 +1783,120 @@ class KlingAutomation {
     } catch (e) {
       // Non-fatal — if no modal present, this is a no-op
     }
+  }
+
+  /**
+   * Dismiss current Higgsfield Seedance promos and AI Director drawers.
+   *
+   * These are targeted by text first, then close geometry inside that same
+   * container. Never click CTA buttons such as "Try Seedance" or "Get Unlimited".
+   */
+  async _dismissSeedanceAndAIDirectorOverlays(tag = '[OVERLAY]') {
+    const page = this.automation.page;
+    if (!page) return false;
+
+    // Seedance promos often render a beat after the page/composer appears.
+    // Give them a short chance to mount before deciding the path is clear.
+    await page.waitForTimeout(1200).catch(() => {});
+
+    let dismissedAny = false;
+    for (let pass = 0; pass < 4; pass++) {
+      const target = await page.evaluate(() => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
+            && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+        };
+        const overlayTextRe = /30\s*days\s*unlimited\s*seedance|switch\s+to\s+seedance|try\s+seedance|get\s+unlimited\s+access\s+offer|better\s+quality\s+generations|seedance\s+unlimited\s+offer/i;
+        const aiDirectorRe = /\bAI\s+Director\b|How can i help you today\?/i;
+        const ctaRe = /try\s+seedance|get\s+unlimited|pick\s+a\s+camera|send|browse/i;
+        const containers = [...document.querySelectorAll('div, section, aside, article, [role="dialog"], [role="alertdialog"]')]
+          .filter(visible)
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            const text = clean(el.innerText || el.textContent || '');
+            const seedance = overlayTextRe.test(text);
+            const aiDirector = aiDirectorRe.test(text);
+            return { el, r, text, seedance, aiDirector };
+          })
+          .filter(o => {
+            if (!o.seedance && !o.aiDirector) return false;
+            if (o.r.width < 220 || o.r.height < 180) return false;
+            if (o.r.width > innerWidth * 0.98 && o.r.height > innerHeight * 0.98) return false;
+            return true;
+          })
+          .sort((a, b) => {
+            const aScore = (a.seedance ? 100 : 0) + (a.aiDirector ? 20 : 0) + (a.r.width * a.r.height > innerWidth * innerHeight * 0.20 ? 10 : 0);
+            const bScore = (b.seedance ? 100 : 0) + (b.aiDirector ? 20 : 0) + (b.r.width * b.r.height > innerWidth * innerHeight * 0.20 ? 10 : 0);
+            return bScore - aScore || (a.r.width * a.r.height) - (b.r.width * b.r.height);
+          });
+
+        for (const container of containers) {
+          const { el, r, text, seedance, aiDirector } = container;
+          const closeCandidates = [...el.querySelectorAll('button, [role="button"], [aria-label], svg')]
+            .filter(visible)
+            .map(btn => {
+              const br = btn.getBoundingClientRect();
+              const btnText = clean(btn.innerText || btn.textContent || '');
+              const aria = clean(btn.getAttribute?.('aria-label') || '');
+              const cls = String(btn.getAttribute?.('class') || '').toLowerCase();
+              const relX = (br.left + br.width / 2) - r.left;
+              const relY = (br.top + br.height / 2) - r.top;
+              const closeChar = btnText.length === 1 && ['x', 'X'].includes(btnText)
+                || btnText.length === 1 && [215, 10005, 10006, 10799].includes(btnText.charCodeAt(0));
+              const explicitClose = closeChar || /close|dismiss/i.test(aria) || /close|dismiss/i.test(cls);
+              const topRight = relX > r.width * 0.62 && relY < r.height * 0.25;
+              const small = br.width >= 12 && br.height >= 12 && br.width <= 70 && br.height <= 70;
+              const hasSvg = btn.tagName.toLowerCase() === 'svg' || !!btn.querySelector?.('svg, path');
+              return {
+                x: br.left + br.width / 2,
+                y: br.top + br.height / 2,
+                w: br.width,
+                h: br.height,
+                text: btnText,
+                aria,
+                explicitClose,
+                topRight,
+                small,
+                hasSvg,
+                cta: ctaRe.test(`${btnText} ${aria}`),
+              };
+            })
+            .filter(c => !c.cta && c.small && (c.explicitClose || (c.topRight && c.hasSvg)))
+            .sort((a, b) => {
+              if (a.explicitClose !== b.explicitClose) return Number(b.explicitClose) - Number(a.explicitClose);
+              if (a.topRight !== b.topRight) return Number(b.topRight) - Number(a.topRight);
+              return (a.w * a.h) - (b.w * b.h);
+            });
+          const close = closeCandidates[0];
+          if (!close) continue;
+          return {
+            x: Math.round(close.x),
+            y: Math.round(close.y),
+            kind: seedance ? 'seedance' : 'ai-director',
+            text: text.slice(0, 180),
+            closeText: close.text,
+            closeAria: close.aria,
+            box: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+          };
+        }
+        return null;
+      }).catch(() => null);
+
+      if (!target) break;
+      this.log(`${tag} Dismissing ${target.kind} overlay at (${target.x}, ${target.y}) box=${JSON.stringify(target.box)}`);
+      await page.mouse.move(target.x, target.y).catch(() => {});
+      await page.waitForTimeout(150);
+      await page.mouse.click(target.x, target.y);
+      dismissedAny = true;
+      await page.waitForTimeout(1200);
+    }
+    if (dismissedAny) {
+      await page.waitForTimeout(800).catch(() => {});
+    }
+    return dismissedAny;
   }
 
   /**

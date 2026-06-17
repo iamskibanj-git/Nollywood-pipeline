@@ -700,6 +700,7 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _focusPromptTextboxForTyping() {
     const page = this.automation.page;
+    await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
     const target = await page.evaluate(() => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const inCinemaComposer = (el) => {
@@ -973,6 +974,7 @@ class CinemaVideoAutomation extends KlingAutomation {
   async _assertGenerateClickPointClear(genBtnBox) {
     const page = this.automation.page;
     if (!page || !genBtnBox) throw new Error('[PRE-GEN] Generate button box unavailable');
+    await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
     const point = { x: Math.round(genBtnBox.x), y: Math.round(genBtnBox.y) };
     const info = await page.evaluate(({ x, y }) => {
       const el = document.elementFromPoint(x, y);
@@ -1688,6 +1690,7 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _openSceneUploadPicker() {
     const page = this.automation.page;
+    await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
     const pickerAlreadyOpen = async () => page.evaluate(() => {
       const body = document.body?.innerText || '';
       return /\bUploads\b/i.test(body) && /\bUpload media\b/i.test(body);
@@ -2595,6 +2598,7 @@ class CinemaVideoAutomation extends KlingAutomation {
   }
 
   async _ensureElementEligibility(validElements) {
+    await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
     const names = [...new Set([...(validElements || [])]
       .filter(Boolean)
       .map(name => String(name).trim().replace(/^@/, ''))
