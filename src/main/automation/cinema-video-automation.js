@@ -1202,7 +1202,7 @@ class CinemaVideoAutomation extends KlingAutomation {
 
     const state = await page.evaluate(() => {
       const text = document.body?.innerText || '';
-      const manualOff = /Manual Style\s*·\s*Off/i.test(text);
+      const manualOff = /Manual Style[^\n\r]{0,12}Off/i.test(text);
       const hasPanel = /Style Settings/i.test(text);
       const autoCount = (text.match(/\bAuto\b/g) || []).length;
       return { ok: hasPanel && manualOff && autoCount >= 4, hasPanel, manualOff, autoCount };
@@ -1226,9 +1226,9 @@ class CinemaVideoAutomation extends KlingAutomation {
     const state = await page.evaluate(() => {
       const text = document.body?.innerText || '';
       const hasPanel = /Camera Settings/i.test(text);
-      const hasCameraAuto = /CAMERA[\s\S]{0,120}\bAuto\b/i.test(text);
-      const hasLensAuto = /LENS[\s\S]{0,120}\bAuto\b/i.test(text);
-      const hasApertureAuto = /APERTURE[\s\S]{0,120}\bAuto\b/i.test(text);
+      const hasCameraAuto = /CAMERA[^\n\r]*(?:\n|\r\n?)\s*Auto/i.test(text) || /CAMERA[\s\S]{0,120}\bAuto\b/i.test(text);
+      const hasLensAuto = /LENS[^\n\r]*(?:\n|\r\n?)\s*Auto/i.test(text) || /LENS[\s\S]{0,120}\bAuto\b/i.test(text);
+      const hasApertureAuto = /APERTURE[^\n\r]*(?:\n|\r\n?)\s*Auto/i.test(text) || /APERTURE[\s\S]{0,120}\bAuto\b/i.test(text);
       return { ok: hasPanel && hasCameraAuto && hasLensAuto && hasApertureAuto, hasPanel, hasCameraAuto, hasLensAuto, hasApertureAuto };
     });
     await page.keyboard.press('Escape').catch(() => {});
@@ -2711,11 +2711,25 @@ class CinemaVideoAutomation extends KlingAutomation {
         return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
           && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
       };
-      const body = clean(document.body?.innerText || '');
-      if (!/(Assets|Uploads|Image Generations|Video Generations|My Elements)[\s\S]{0,220}\bElements\b/i.test(body)) return false;
-      return [...document.querySelectorAll('button, [role="tab"], div, span')]
-        .filter(visible)
-        .some(el => clean(el.innerText || el.textContent || '') === 'Elements');
+      const modalish = [...document.querySelectorAll(
+        '[role="dialog"], [data-state="open"], [class*="Dialog"], [class*="Sheet"], [class*="modal"], [class*="Modal"], [class*="popover"], [class*="Popover"]'
+      )].filter(visible);
+      for (const el of modalish) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 300 || r.height < 220) continue;
+        const text = clean(el.innerText || el.textContent || '');
+        const hasElementsSignals =
+          /\bElements\b/i.test(text) &&
+          (
+            /Assets\s+Elements/i.test(text) ||
+            /\bMy Elements\b/i.test(text) ||
+            /\bAll Pinned\b/i.test(text) ||
+            /\bShow subfolders elements\b/i.test(text)
+          );
+        const hasPickerTabs = /\b(Uploads|Image Generations|Video Generations)\b/i.test(text);
+        if (hasElementsSignals || (hasPickerTabs && /\bMy Elements\b/i.test(text))) return true;
+      }
+      return false;
     }).catch(() => false);
   }
 
@@ -2732,14 +2746,32 @@ class CinemaVideoAutomation extends KlingAutomation {
     const target = await page.evaluate(() => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const candidates = [...document.querySelectorAll('button, [role="button"], div')]
-        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || el.getAttribute('aria-label') || '') }))
-        .filter(o => o.r.width > 30 && o.r.height > 20 && o.r.y > 60 && o.r.y < innerHeight * 0.45 && /^Elements$/i.test(o.text))
-        .sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x);
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const aria = clean(el.getAttribute('aria-label') || '');
+          const inProjectControlBand = r.y > 60 && r.y < innerHeight * 0.40 && r.x > innerWidth * 0.38 && r.x < innerWidth * 0.82;
+          const score =
+            (inProjectControlBand ? 100 : 0) +
+            (/^Elements$/i.test(aria) ? 30 : 0) +
+            (/^Elements$/i.test(text) ? 20 : 0) +
+            (r.y < 60 ? -80 : 0) +
+            (r.width >= 30 && r.width <= 90 && r.height >= 28 && r.height <= 90 ? 15 : 0);
+          return { el, r, text, aria, score };
+        })
+        .filter(o =>
+          o.r.width >= 30 && o.r.width <= 160 &&
+          o.r.height >= 20 && o.r.height <= 100 &&
+          o.r.y > 40 && o.r.y < innerHeight * 0.45 &&
+          o.r.x > innerWidth * 0.35 && o.r.x < innerWidth * 0.85 &&
+          (/^Elements$/i.test(o.text) || /^Elements$/i.test(o.aria))
+        )
+        .sort((a, b) => b.score - a.score || a.r.y - b.r.y || a.r.x - b.r.x);
       const item = candidates[0];
       return item ? {
         x: Math.round(item.r.x + item.r.width / 2),
         y: Math.round(item.r.y + item.r.height / 2),
-        text: item.text,
+        text: item.text || item.aria,
       } : null;
     }).catch(() => null);
     if (!target) throw new Error('Project Elements button not found');

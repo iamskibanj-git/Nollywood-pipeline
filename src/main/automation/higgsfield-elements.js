@@ -339,16 +339,31 @@ class HiggsfieldElements {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
       };
       return [...document.querySelectorAll('button, [role="button"], div, a')]
         .map((el) => {
           const r = el.getBoundingClientRect();
           const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const aria = (el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+          const isExactElements = /^Elements$/i.test(text) || /^Elements$/i.test(aria);
+          const inProjectControlBand =
+            r.y > 60 &&
+            r.y < window.innerHeight * 0.40 &&
+            r.x > window.innerWidth * 0.38 &&
+            r.x < window.innerWidth * 0.82;
+          const score =
+            (inProjectControlBand ? 100 : 0) +
+            (/^Elements$/i.test(aria) ? 30 : 0) +
+            (/^Elements$/i.test(text) ? 20 : 0) +
+            (r.y < 60 ? -80 : 0) +
+            (r.width >= 30 && r.width <= 90 && r.height >= 28 && r.height <= 90 ? 15 : 0);
           return {
             tag: el.tagName,
             role: el.getAttribute('role'),
             text,
+            aria,
             cx: r.x + r.width / 2,
             cy: r.y + r.height / 2,
             w: r.width,
@@ -356,18 +371,22 @@ class HiggsfieldElements {
             y: r.y,
             x: r.x,
             visible: visible(el),
+            isExactElements,
+            score,
           };
         })
         .filter((c) =>
           c.visible &&
-          c.text === 'Elements' &&
-          c.w >= 40 &&
+          c.isExactElements &&
+          c.w >= 30 &&
           c.w <= 160 &&
+          c.h >= 20 &&
+          c.h <= 100 &&
           c.x > window.innerWidth * 0.35 &&
           c.x < window.innerWidth * 0.85 &&
           c.y < window.innerHeight * 0.45
         )
-        .sort((a, b) => a.y - b.y || a.x - b.x)
+        .sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x)
         .slice(0, 4);
     }).catch(() => []);
 
@@ -389,14 +408,23 @@ class HiggsfieldElements {
    */
   async _isElementsModalOpen(page) {
     return page.evaluate(() => {
-      const strictCandidates = [...document.querySelectorAll('[role="dialog"], [data-state="open"]')];
+      const strictCandidates = [...document.querySelectorAll('[role="dialog"], [data-state="open"], [class*="Dialog"], [class*="Sheet"], [class*="modal"], [class*="Modal"]')];
       for (const el of strictCandidates) {
         const rect = el.getBoundingClientRect();
-        if (rect.width < 350 || rect.height < 250) continue;
+        const style = getComputedStyle(el);
+        if (
+          rect.width < 350 || rect.height < 250 ||
+          style.display === 'none' || style.visibility === 'hidden' ||
+          rect.top >= innerHeight || rect.left >= innerWidth || rect.bottom <= 0 || rect.right <= 0
+        ) continue;
 
         const text = (el.innerText || el.textContent || '').toLowerCase();
         const hasModalListSignals =
-          text.includes('my elements') &&
+          (
+            text.includes('assets elements') ||
+            text.includes('my elements') ||
+            text.includes('all pinned')
+          ) &&
           (
             text.includes('show subfolders elements') ||
             text.includes('all pinned') ||
