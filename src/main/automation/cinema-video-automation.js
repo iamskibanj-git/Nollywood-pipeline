@@ -374,6 +374,16 @@ class CinemaVideoAutomation extends KlingAutomation {
       const findGenerateButtons = () => [...document.querySelectorAll('button[type="submit"], button')]
         .filter((b) => /generate/i.test(b.textContent || '') && b.getBoundingClientRect().width > 0);
       const isAllowedNow = () => Date.now() < (window.__cinemaGenerateSafetyAllowUntil || 0);
+      const eventInsideGenerateButton = (event) => {
+        if (!event || typeof event.clientX !== 'number' || typeof event.clientY !== 'number') return null;
+        for (const button of findGenerateButtons()) {
+          const r = button.getBoundingClientRect();
+          if (event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom) {
+            return button;
+          }
+        }
+        return null;
+      };
       const prevent = (event, reason) => {
         if (!window.__cinemaGenerateSafetyLocked || isAllowedNow()) return false;
         event?.preventDefault?.();
@@ -427,9 +437,13 @@ class CinemaVideoAutomation extends KlingAutomation {
             if (!b.hasAttribute('data-cinema-old-tabindex')) {
               b.setAttribute('data-cinema-old-tabindex', b.getAttribute('tabindex') ?? '');
             }
+            if (!b.hasAttribute('data-cinema-old-disabled')) {
+              b.setAttribute('data-cinema-old-disabled', b.disabled ? 'true' : 'false');
+            }
             b.setAttribute('data-cinema-generate-locked', 'true');
             b.setAttribute('aria-disabled', 'true');
             b.setAttribute('tabindex', '-1');
+            b.disabled = true;
             b.style.pointerEvents = 'none';
             b.style.filter = 'grayscale(0.65) brightness(0.8)';
             b.style.cursor = 'not-allowed';
@@ -440,6 +454,11 @@ class CinemaVideoAutomation extends KlingAutomation {
               if (oldTabIndex === '') b.removeAttribute('tabindex');
               else b.setAttribute('tabindex', oldTabIndex);
               b.removeAttribute('data-cinema-old-tabindex');
+            }
+            const oldDisabled = b.getAttribute('data-cinema-old-disabled');
+            if (oldDisabled !== null) {
+              b.disabled = oldDisabled === 'true';
+              b.removeAttribute('data-cinema-old-disabled');
             }
             b.removeAttribute('data-cinema-generate-locked');
             b.removeAttribute('aria-disabled');
@@ -455,7 +474,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         window.__cinemaGenerateSafetyAllowOnce = false;
         window.__cinemaGenerateSafetyAllowUntil = 0;
         window.__cinemaGenerateSafetyHandler = (event) => {
-          const target = isGenerateButton(event.target);
+          const target = isGenerateButton(event.target) || eventInsideGenerateButton(event);
           if (!target) return;
           prevent(event, event.type);
         };
@@ -510,6 +529,11 @@ class CinemaVideoAutomation extends KlingAutomation {
           if (oldTabIndex === '') b.removeAttribute('tabindex');
           else b.setAttribute('tabindex', oldTabIndex);
           b.removeAttribute('data-cinema-old-tabindex');
+        }
+        const oldDisabled = b.getAttribute('data-cinema-old-disabled');
+        if (oldDisabled !== null) {
+          b.disabled = oldDisabled === 'true';
+          b.removeAttribute('data-cinema-old-disabled');
         }
         b.removeAttribute('data-cinema-generate-locked');
         b.removeAttribute('aria-disabled');

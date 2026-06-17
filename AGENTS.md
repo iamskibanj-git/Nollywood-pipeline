@@ -3949,6 +3949,12 @@ Update 2026-06-17 coded video element flow:
 - The coded video eligibility flow must not decide the picker is open from ordinary page text (`My Elements` in the left sidebar plus project `Elements` under the title). Picker detection now requires a real modal/picker container.
 - Live sample result: a fake element made from two UI screenshots was created successfully but remained in `Check eligibility` until timeout, which is expected invalid test material rather than picker failure. The same coded eligibility method against known valid `@codex_elem_test_0615` opened the project Elements panel, detected hover/badge `Use`, and returned `eligible`.
 
+Update 2026-06-17 coded Cinema video pre-Generate checks:
+- Start-frame reference upload passed through the coded path: References `+` -> `Upload media` -> filechooser -> `checking` -> `eligible` -> select settled card -> composer thumbnail proof. Picker reset/retry also passed: after forcibly closing the picker mid-setup, `_attachStartFrameFromLocalUpload()` reopened the picker and attached a new eligible reference.
+- Credit-cost parsing passed on discounted button text. Current DOM text can flatten the crossed-out original price into `GENERATE9052.5` with text parts `["GENERATE", "90", "52.5"]`; `_parseGenerateCreditCost()` correctly returns `52.5`, not `90`.
+- Ledger baseline read is allowed to return zero Cinema Studio rows. In the sample account/project, `_readCinemaCreditLedger()` opened the credits usage page and returned `0` rows; this is still a valid baseline signature set (`[]`) before Generate.
+- Generate safety guard hardening: an explicit accidental click/Enter test originally reached the Cinema submit endpoint, which the route blocker aborted before any UI generation state appeared. The DOM guard now also stores/restores `disabled`, sets Generate buttons disabled while locked, and blocks coordinate-based pointer/click events inside Generate button rects. Retest result: endpoint block count stayed `0`, Generate buttons were locked/disabled, shield was present, and no generation UI state appeared.
+
 Cinema Studio 3.5 video toolbar drift (live 2026-06-16):
 ```text
 active row before setup: Cinema Studio 3.5 / 9:16 / 480p / 8s / 1/4 / On, cost 28
