@@ -3898,8 +3898,10 @@ If patching this path, prefer the visible trusted-click/filechooser path first w
 
 Update 2026-06-17: Cinema Studio scene-image Asset Library recovery is post-submit only. A timeout before proven Generate click can come from stale transparent picker overlays, textbox focus, upload proof, composer-thumbnail proof, or prompt typing; do not search the Asset Library for an image that was never submitted. The orchestrator now tracks per-attempt Generate-click proof via `onGenClicked` and refreshes the same scene asset row for persisted `gen_clicked_at` before recovery. If neither proof exists, skip recovery and retry setup cleanly. Typed `@element` existence diagnostics are obsolete for scene-image setup; use the project Elements modal/persisted modal proof for existence and reserve typed `@element` resolution for actual prompt construction. Typed image-reference diagnostics are obsolete for both scene-image and video start-frame proof.
 
+Update 2026-06-17 live production run: the scene-image final reference-thumbnail check was too geometry-strict after prompt typing. The attached location thumbnail can sit above/near the prompt textarea, not only left of it or below 45% viewport height. `_checkSceneReferenceAttached()` now accepts thumbnail-sized `https/blob/data:image` Higgs/CDN images in a broader composer-relative band and reports nearby candidates on failure. A 2s post-prompt settle wait was added before the final check. Live result: Ch1 scene generation passed `Reference still attached and backend-confirmed`, clicked Generate, and submitted at 4 credits. If this exact final thumbnail check fails again despite backend proof and immediate post-upload thumbnail proof, remove the final post-prompt thumbnail re-check and keep backend proof as the source of truth.
+
 **Cinema Studio 3.5 video reference + eligibility drift (live 2026-06-16):**
-Video clip generation uses a different reference path from image generation. In Video mode, the start-frame/reference upload opens from the small `+` References button immediately left of the `@` button in the bottom Cinema Studio 3.5 composer. Inside the picker, click the inner `+` above `Upload media`; then keep the picker open and wait through the full upload/content-review lifecycle before selecting the settled uploaded tile. Do not treat first tile visibility as enough, because the tile can remain in `Checking content...` and multiple older tiles can share proxied image URLs.
+Video clip generation uses a different reference path from image generation. In Video mode, the start-frame/reference upload opens from the small `+` References button immediately left of the `@` button in the bottom Cinema Studio 3.5 composer. Inside the picker, click the inner `+` above `Upload media`; then keep the picker open and wait through the full upload/content-review lifecycle before selecting the settled uploaded tile. Do not treat first tile visibility as enough, because the tile can remain in `Uploading...` / `Checking content...` and multiple older tiles can share proxied image URLs.
 
 Current verified video reference flow:
 ```text
@@ -3909,17 +3911,18 @@ select the visible settled uploaded tile
 confirm composer thumbnail attached
 ```
 The hard proof for the attached start frame is upload/content-review completion plus the visible composer thumbnail. Do not type temporary image-reference diagnostics for video start-frame proof.
+After the start frame is added, the composer reference tile count should be at least 1. After real prompt typing, distinct element mentions should increase the same above-prompt tile count; the final pre-Generate proof is `1 + distinct valid element references`.
 
 Cinema Studio video element eligibility no longer exposes stable `Eligible` / `Not eligible` text. The current live card lifecycle is:
 ```text
 Check eligibility -> Face/IP checking -> small badge / Use state
 ```
-The visual ready state is not sufficient by itself. After the element reaches badge/`Use`, close the picker, type the exact `@element_name` in the video prompt, and require the current autocomplete menu item to resolve into a prompt chip. Higgsfield currently exposes that autocomplete as `role="menu"` / `role="menuitem"` rather than only `role="option"`. Pressing Enter or clicking the exact item are both acceptable; the automation currently clicks the exact resolved item. Do not apply this video-only eligibility check to Cinema Studio image generation.
+Use the card-local lifecycle only. If `Check eligibility` is visible, click it and wait through `Face/IP checking`. The ready state is hover-revealed `Use` and/or the small green bottom-left badge on the tile. Do not run temporary typed `@character` diagnostics after eligibility; the UI can resolve for a human while Playwright misreads it. For actual video prompts, element attachment is proven by real prompt typing plus the composer reference tile-count gate before Generate. Do not apply this video-only eligibility check to Cinema Studio image generation.
 
 Live no-Generate verification after the fix:
 ```text
 start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached
-element dry-run: opened project Elements panel, observed eligible-visual/Use, @codex_elem_test_0615 resolved and persisted eligible
+element dry-run: opened project Elements panel, observed eligible-visual/Use and persisted eligible without typed diagnostic
 ```
 
 Cinema Studio 3.5 video toolbar drift (live 2026-06-16):

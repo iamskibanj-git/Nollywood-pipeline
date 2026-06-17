@@ -2505,9 +2505,8 @@ class CinemaStudioAutomation {
       const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
       if (!tb) return { attached: false, debug: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
-      const tbLeftEdge = tbRect.x + 10;
       const validSrc = (src) =>
-        /^blob:|^data:image\//i.test(src || '') ||
+        /^https?:|^blob:|^data:image\//i.test(src || '') ||
         /images\.higgs\.ai|cloudfront\.net|cdn\.higgsfield|higgs/i.test(src || '');
       const imageInfo = (img, method) => {
         const r = img.getBoundingClientRect();
@@ -2522,25 +2521,43 @@ class CinemaStudioAutomation {
         };
       };
 
+      const nearbyCandidates = [];
       const composerImgs = [...document.querySelectorAll('img')].filter(i => {
         const r = i.getBoundingClientRect();
         const src = i.currentSrc || i.src || '';
         const centerX = r.x + r.width / 2;
         const centerY = r.y + r.height / 2;
-        return validSrc(src) &&
-          r.width >= 25 && r.width <= 140 &&
-          r.height >= 25 && r.height <= 140 &&
-          r.y > vh * 0.45 &&
-          centerX >= tbRect.x - 20 &&
-          centerX <= tbRect.x + tbRect.width + 20 &&
-          centerY >= tbRect.y - 130 &&
-          centerY <= tbRect.y + tbRect.height + 80;
+        const thumbnailSized = r.width >= 24 && r.width <= 180 && r.height >= 24 && r.height <= 180;
+        const nearTextbox = centerX >= tbRect.x - 180 &&
+          centerX <= tbRect.x + tbRect.width + 180 &&
+          centerY >= tbRect.y - 260 &&
+          centerY <= tbRect.y + tbRect.height + 140;
+        const lowerComposer = centerY > vh * 0.35;
+        if (validSrc(src) && thumbnailSized && nearTextbox && lowerComposer) return true;
+        if (validSrc(src) && thumbnailSized && Math.abs(centerY - (tbRect.y + tbRect.height / 2)) < 360) {
+          nearbyCandidates.push({
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            centerX: Math.round(centerX),
+            centerY: Math.round(centerY),
+            srcHint: String(src).slice(0, 90),
+          });
+        }
+        return false;
       });
       if (composerImgs.length > 0) return imageInfo(composerImgs[0], 'composer-thumbnail');
 
       for (const b of document.querySelectorAll('button')) {
         const r = b.getBoundingClientRect();
-        if (r.y > vh * 0.55 && r.width > 0 && r.width <= 60 && r.height <= 60 && r.x <= tbLeftEdge) {
+        const centerX = r.x + r.width / 2;
+        const centerY = r.y + r.height / 2;
+        if (
+          r.width > 0 && r.width <= 80 && r.height <= 80 &&
+          centerX >= tbRect.x - 180 && centerX <= tbRect.x + tbRect.width + 80 &&
+          centerY >= tbRect.y - 260 && centerY <= tbRect.y + tbRect.height + 140
+        ) {
           const img = b.querySelector('img');
           if (img && validSrc(img.currentSrc || img.src || '')) return imageInfo(img, 'plus-has-img');
         }
@@ -2549,11 +2566,14 @@ class CinemaStudioAutomation {
       const nearImgs = [...document.querySelectorAll('img')].filter(i => {
         const r = i.getBoundingClientRect();
         const src = i.currentSrc || i.src || '';
+        const centerX = r.x + r.width / 2;
+        const centerY = r.y + r.height / 2;
         return validSrc(src) &&
-               r.width > 25 && r.width <= 100 && r.height > 25 && r.height <= 100 &&
-               r.y > vh * 0.55 && r.x <= tbLeftEdge;
+               r.width > 24 && r.width <= 180 && r.height > 24 && r.height <= 180 &&
+               centerX >= tbRect.x - 220 && centerX <= tbRect.x + tbRect.width + 220 &&
+               centerY >= tbRect.y - 300 && centerY <= tbRect.y + tbRect.height + 180;
       });
-      if (nearImgs.length > 0) return imageInfo(nearImgs[0], 'img-left-of-textbox');
+      if (nearImgs.length > 0) return imageInfo(nearImgs[0], 'img-near-textbox');
 
       return {
         attached: false,
@@ -2564,6 +2584,7 @@ class CinemaStudioAutomation {
           w: Math.round(tbRect.width),
           h: Math.round(tbRect.height),
         },
+        candidates: nearbyCandidates.slice(0, 8),
       };
     }).catch(e => ({ attached: false, debug: e.message || 'error' }));
   }
@@ -4092,7 +4113,7 @@ class CinemaStudioAutomation {
     this.log('[PROMPT] Waiting for reference/tool state to settle before typing prompt...');
     await page.waitForTimeout(2500);
     await this._typeBlockingPrompt(segments);
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(2000);
 
     // ── FINAL SAFETY CHECK before clicking GENERATE ──
     this._ensurePageAlive();

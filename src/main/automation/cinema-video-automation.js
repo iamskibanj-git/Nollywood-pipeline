@@ -7,14 +7,15 @@
  *   recoverTimedOutClip(submittedPrompt, outputPath, opts)
  *
  * Scene/start-frame images come from local project files. The + picker is the
- * only scene-upload path. The @ button is only used for element eligibility.
+ * only scene-upload path. The @/Elements picker is only used for element
+ * eligibility and real prompt attachment, never temporary diagnostics.
  */
 
 const fs = require('fs');
 const path = require('path');
 const { KlingAutomation, parsePromptSegments } = require('./kling-automation');
 
-const ELEMENT_ELIGIBILITY_CACHE_VERSION = 2;
+const ELEMENT_ELIGIBILITY_CACHE_VERSION = 3;
 
 class CinemaEligibilityError extends Error {
   constructor(message, failedAssets = []) {
@@ -132,6 +133,9 @@ class CinemaVideoAutomation extends KlingAutomation {
       this._expectedCinemaPromptText = multiShotPrompt;
       this._cinemaGeneratePhase = 'typing';
       await this._typeMultiShotPrompt(multiShotPrompt, validElements);
+      const expectedReferenceTiles = this._expectedComposerReferenceTileCount(multiShotPrompt, validElements);
+      this._lastClipElementEligibility.expectedReferenceTiles = expectedReferenceTiles;
+      await this._waitForComposerReferenceAttachmentCount(expectedReferenceTiles, 45000);
       await this._assertCurrentCinemaProjectUrl('after prompt typing');
       this._cinemaGeneratePhase = 'preBaseline';
       await this._setGenerateSafetyLock(true);
@@ -345,41 +349,20 @@ class CinemaVideoAutomation extends KlingAutomation {
     }, expected).catch(err => ({ ok: false, reason: err.message }));
   }
 
-  async _verifyPromptMentionResolution(name, { label = 'reference' } = {}) {
-    const page = this.automation.page;
-    const cleanName = String(name || '').trim().replace(/^@+/, '').toLowerCase();
-    if (!cleanName) return { ok: false, reason: 'empty name' };
-
-    await this._focusPromptTextboxForTyping();
-    await page.waitForTimeout(200);
-    await page.keyboard.press('Control+A');
-    await page.keyboard.press('Delete');
-    await page.waitForTimeout(200);
-    await page.keyboard.type('@', { delay: 0 });
-    await page.waitForTimeout(500);
-    await page.keyboard.type(cleanName, { delay: 85 });
-    await page.waitForTimeout(1700);
-
-    const selected = await this._selectExactMentionOption(cleanName);
-    if (!selected.ok) {
-      await page.keyboard.press('Escape').catch(() => {});
-      await page.keyboard.press('Control+A').catch(() => {});
-      await page.keyboard.press('Delete').catch(() => {});
-      return {
-        ok: false,
-        reason: `@${cleanName} did not resolve for ${label}`,
-        options: selected.options || [],
-      };
+  _expectedComposerReferenceTileCount(promptText, validElements) {
+    const validSet = new Set([...(validElements || [])]
+      .filter(Boolean)
+      .map(name => String(name).trim().replace(/^@/, '').toLowerCase())
+      .filter(Boolean));
+    const distinctPromptRefs = new Set();
+    for (const seg of parsePromptSegments(promptText || '')) {
+      if (!seg || !seg.at) continue;
+      const name = String(seg.at).trim().replace(/^@+/, '').toLowerCase();
+      if (!name) continue;
+      if (validSet.size > 0 && !validSet.has(name)) continue;
+      distinctPromptRefs.add(name);
     }
-
-    const audit = await this._auditPromptMentionChips(new Map([[cleanName, 1]]));
-    await page.keyboard.press('Control+A').catch(() => {});
-    await page.keyboard.press('Delete').catch(() => {});
-    await page.waitForTimeout(300);
-    if (!audit.ok) {
-      return { ok: false, reason: audit.reason || `@${cleanName} chip audit failed`, options: selected.options || [] };
-    }
-    return { ok: true, selected: selected.text, chips: audit.chips || [] };
+    return 1 + distinctPromptRefs.size;
   }
 
   async _setGenerateSafetyLock(locked) {
@@ -2448,6 +2431,30 @@ class CinemaVideoAutomation extends KlingAutomation {
     return (await this._composerStartFrameAttachmentCount()) > 0;
   }
 
+  async _waitForComposerReferenceAttachmentCount(expectedCount, timeoutMs = 45000) {
+    const page = this.automation.page;
+    const target = Math.max(1, Number(expectedCount) || 1);
+    const start = Date.now();
+    let attempt = 0;
+    let lastCount = -1;
+    while (Date.now() - start < timeoutMs) {
+      const count = await this._composerStartFrameAttachmentCount();
+      if (count >= target) {
+        this.log(`[PROMPT] Composer reference tiles ready: ${count}/${target}`);
+        return count;
+      }
+      if (count !== lastCount || attempt % 5 === 0) {
+        this.log(`[PROMPT] Waiting for composer reference tiles: ${count}/${target}`);
+        lastCount = count;
+      }
+      const waitMs = this._progressiveWaitMs(attempt, { min: 900, max: 4500, step: 350 });
+      await page.waitForTimeout(waitMs);
+      attempt++;
+    }
+    const finalCount = await this._composerStartFrameAttachmentCount();
+    throw new Error(`[PRE-GEN] Composer reference tiles incomplete after prompt typing: ${finalCount}/${target}`);
+  }
+
   async _composerStartFrameAttachmentCount() {
     const page = this.automation.page;
     return page.evaluate(() => {
@@ -2475,11 +2482,14 @@ class CinemaVideoAutomation extends KlingAutomation {
       const tbRect = tb.getBoundingClientRect();
       return [...document.querySelectorAll('img')].filter(img => {
         const r = img.getBoundingClientRect();
+        const src = String(img.currentSrc || img.src || '');
+        if (!/^(https?:|blob:|data:image\/)/i.test(src)) return false;
+        const centerX = r.x + r.width / 2;
         const centerY = r.y + r.height / 2;
         const textboxCenterY = tbRect.y + tbRect.height / 2;
         return r.width > 25 && r.width < 180 && r.height > 25 && r.height < 180 &&
-          r.x > tbRect.x - 150 && r.x < tbRect.x + 30 &&
-          Math.abs(centerY - textboxCenterY) < 120;
+          centerX > tbRect.x - 80 && centerX < tbRect.x + tbRect.width + 80 &&
+          centerY > tbRect.y - 170 && Math.abs(centerY - textboxCenterY) < 180;
       }).length;
     }).catch(() => 0);
   }
@@ -2612,21 +2622,14 @@ class CinemaVideoAutomation extends KlingAutomation {
     if (status === 'check') {
       const clicked = await this._clickElementCheckEligibility(card);
       this.log(`Element ${card.name || `@${name}`} eligibility check ${clicked ? 'clicked' : 'click target not confirmed'} — waiting for Higgsfield content review`);
-      await page.waitForTimeout(2000);
-      status = await this._waitForElementEligibility(card, 300000, { returnOnCheck: false, useFallbackStatus: false });
+      await page.waitForTimeout(3500);
+      status = await this._waitForElementEligibility(card, 420000, { returnOnCheck: false, useFallbackStatus: false });
     }
     if (status === 'eligible' || status === 'eligible-visual') {
-      await this._closePickerAndReturnToComposer();
-      const mentionProof = await this._verifyPromptMentionResolution(name, { label: 'eligible video element' });
-      if (!mentionProof.ok) {
-        this._rememberElementEligibility(name, 'not-eligible', { reason: mentionProof.reason, options: mentionProof.options || [] });
-        return 'not-eligible';
-      }
-      await this._ensureElementsPickerOpen().catch(() => {});
       const proof = await this._snapshotElementCardProof(name).catch(() => ({}));
       const textProof = proof.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
-      this.log(`Element @${name} prompt reference verified and persisted: eligible${textProof}`);
-      this._rememberElementEligibility(name, 'eligible', { ...proof, promptProof: mentionProof });
+      this.log(`Element @${name} hover Use/badge proof persisted: eligible${textProof}`);
+      this._rememberElementEligibility(name, 'eligible', proof);
       await this._closePickerAndReturnToComposer();
       return 'eligible';
     }
@@ -3142,11 +3145,33 @@ class CinemaVideoAutomation extends KlingAutomation {
         cardEl = matches[0] || pointEls[0];
       }
       const text = textOf(cardEl);
+      const hasUse = /\bUse\b/i.test(text);
+      const colorLooksReady = (value) => {
+        const m = String(value || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)/i);
+        if (!m) return false;
+        const r = Number(m[1]);
+        const g = Number(m[2]);
+        const b = Number(m[3]);
+        const a = m[4] === undefined ? 1 : Number(m[4]);
+        if (!Number.isFinite(r + g + b + a) || a < 0.25) return false;
+        return g >= 150 && r >= 100 && b <= 140 && g >= b + 45;
+      };
+      const hasReadyBadge = cardEl ? [...cardEl.querySelectorAll('*')].some(child => {
+        const r = child.getBoundingClientRect();
+        if (r.width < 7 || r.width > 32 || r.height < 7 || r.height > 32) return false;
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        const cr = cardEl.getBoundingClientRect();
+        if (cx < cr.x || cx > cr.x + cr.width * 0.45) return false;
+        if (cy < cr.y + cr.height * 0.45 || cy > cr.y + cr.height * 0.98) return false;
+        const s = getComputedStyle(child);
+        return colorLooksReady(s.backgroundColor) || colorLooksReady(s.color) || colorLooksReady(s.borderColor) || colorLooksReady(s.fill) || colorLooksReady(s.stroke);
+      }) : false;
       if (/not eligible/i.test(text)) return 'not-eligible';
       if (/face\/ip checking|checking content|checking/i.test(text)) return 'checking';
       if (/check eligibility/i.test(text)) return 'check';
       if (/\beligible\b/i.test(text)) return 'eligible';
-      if (/\bUse\b/i.test(text)) return 'eligible-visual';
+      if (hasUse && hasReadyBadge) return 'eligible-visual';
       return allowFallback && fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
     }, { ...card, allowFallback: useFallbackStatus }).catch(() => 'unknown');
   }
@@ -3181,17 +3206,42 @@ class CinemaVideoAutomation extends KlingAutomation {
           const r = el.getBoundingClientRect();
           const text = clean(el.innerText || el.textContent || '');
           const matches = exactNameIn(text);
+          const colorLooksReady = (value) => {
+            const m = String(value || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)/i);
+            if (!m) return false;
+            const red = Number(m[1]);
+            const green = Number(m[2]);
+            const blue = Number(m[3]);
+            const alpha = m[4] === undefined ? 1 : Number(m[4]);
+            return Number.isFinite(red + green + blue + alpha)
+              && alpha >= 0.25
+              && green >= 150
+              && red >= 100
+              && blue <= 140
+              && green >= blue + 45;
+          };
+          const hasReadyBadge = [...el.querySelectorAll('*')].some(child => {
+            const br = child.getBoundingClientRect();
+            if (br.width < 7 || br.width > 32 || br.height < 7 || br.height > 32) return false;
+            const cx = br.x + br.width / 2;
+            const cy = br.y + br.height / 2;
+            if (cx < r.x || cx > r.x + r.width * 0.45) return false;
+            if (cy < r.y + r.height * 0.45 || cy > r.y + r.height * 0.98) return false;
+            const s = getComputedStyle(child);
+            return colorLooksReady(s.backgroundColor) || colorLooksReady(s.color) || colorLooksReady(s.borderColor) || colorLooksReady(s.fill) || colorLooksReady(s.stroke);
+          });
+          const hasUse = /\bUse\b/i.test(text);
           const status = /not eligible/i.test(text) ? 'not-eligible'
             : /face\/ip checking|checking content|checking/i.test(text) ? 'checking'
               : /check eligibility/i.test(text) ? 'check'
                 : /\beligible\b/i.test(text) ? 'eligible'
-                  : /\bUse\b/i.test(text) ? 'eligible-visual'
+                  : hasUse && hasReadyBadge ? 'eligible-visual'
                   : 'unknown';
           const score = (matches ? 10 : 0)
             + (status !== 'unknown' ? 8 : 0)
             + (/\bCharacter\b/i.test(text) ? 2 : 0)
             - Math.abs((r.width * r.height) - 26000) / 10000;
-          return { text, status, score, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
+          return { text, status, score, hasUse, hasReadyBadge, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
         })
         .filter(o => o.score >= 8)
         .sort((a, b) => b.score - a.score);
@@ -3200,6 +3250,8 @@ class CinemaVideoAutomation extends KlingAutomation {
         status: best.status,
         text: best.text.slice(0, 500),
         source: 'hover-card',
+        hasUse: !!best.hasUse,
+        hasReadyBadge: !!best.hasReadyBadge,
         rect: best.rect,
       } : { status: 'unknown', text: '', source: 'not-found' };
     }, card || nameOrCard).catch(() => ({ status: 'unknown', text: '', source: 'snapshot-error' }));
@@ -3557,16 +3609,29 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (!toolbarText.includes(targetAspect)) issues.push(`${targetAspect} aspect not detected`);
       if (!/^On$/i.test(String(audioValue || ''))) issues.push(`Audio On not detected (current=${audioValue || 'unknown'})`);
       if (promptText.length < 20) issues.push(`Prompt too short or empty (${promptText.length} chars)`);
+      const tbRect = textbox ? textbox.getBoundingClientRect() : null;
       const imgs = [...document.querySelectorAll('img')].filter(img => {
         const r = img.getBoundingClientRect();
-        return r.width > 25 && r.width < 180 && r.height > 25 && r.height < 180 && r.y > window.innerHeight * 0.45;
+        const src = String(img.currentSrc || img.src || '');
+        if (!/^(https?:|blob:|data:image\/)/i.test(src)) return false;
+        if (!(r.width > 25 && r.width < 180 && r.height > 25 && r.height < 180 && r.y > window.innerHeight * 0.45)) return false;
+        if (!tbRect) return true;
+        const centerX = r.x + r.width / 2;
+        const centerY = r.y + r.height / 2;
+        return centerX > tbRect.x - 120
+          && centerX < tbRect.x + tbRect.width + 120
+          && centerY > tbRect.y - 180
+          && centerY < tbRect.y + tbRect.height + 120;
       });
-      if (imgs.length === 0) issues.push('Start frame not detected');
       const requiredElements = elementEligibility?.required || [];
       const eligibleElements = new Set((elementEligibility?.eligible || []).map(name => String(name).toLowerCase()));
       const missingEligible = requiredElements.filter(name => !eligibleElements.has(String(name).toLowerCase()));
       if (missingEligible.length > 0) {
         issues.push(`Required element eligibility not confirmed: ${missingEligible.join(', ')}`);
+      }
+      const expectedTiles = Math.max(1, Number(elementEligibility?.expectedReferenceTiles) || (1 + new Set(requiredElements.map(name => String(name).toLowerCase())).size));
+      if (imgs.length < expectedTiles) {
+        issues.push(`Composer reference tiles incomplete: ${imgs.length}/${expectedTiles}`);
       }
       return { ok: issues.length === 0, issues, promptLength: promptText.length };
     }, {
