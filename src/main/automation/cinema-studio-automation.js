@@ -2569,6 +2569,19 @@ class CinemaStudioAutomation {
       const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
       if (!tb) return { attached: false, debug: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
+      if (tbRect.width <= 1 || tbRect.height <= 1) {
+        return {
+          attached: false,
+          code: 'REFERENCE_COMPOSER_LOST',
+          debug: 'composer textbox has zero bounds',
+          textbox: {
+            x: Math.round(tbRect.x),
+            y: Math.round(tbRect.y),
+            w: Math.round(tbRect.width),
+            h: Math.round(tbRect.height),
+          },
+        };
+      }
       const validSrc = (src) =>
         /^https?:|^blob:|^data:image\//i.test(src || '') ||
         /images\.higgs\.ai|cloudfront\.net|cdn\.higgsfield|higgs/i.test(src || '');
@@ -2651,6 +2664,74 @@ class CinemaStudioAutomation {
         candidates: nearbyCandidates.slice(0, 8),
       };
     }).catch(e => ({ attached: false, debug: e.message || 'error' }));
+  }
+
+  async _readReferencePickerState() {
+    const page = this._ensurePageAlive();
+    return page.evaluate(() => {
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+      const tb = document.querySelector('[role="textbox"][contenteditable="true"], [role="textbox"], textarea');
+      const tbRect = tb?.getBoundingClientRect?.();
+      const textbox = tbRect ? {
+        x: Math.round(tbRect.x),
+        y: Math.round(tbRect.y),
+        w: Math.round(tbRect.width),
+        h: Math.round(tbRect.height),
+      } : null;
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const panels = [...document.querySelectorAll(
+        '[data-radix-popper-content-wrapper], [role="dialog"], [role="listbox"], ' +
+        '[class*="popover" i], [class*="modal" i], [class*="picker" i], ' +
+        '[class*="panel" i], [class*="dropdown" i], [class*="overlay" i]'
+      )]
+        .filter(visible)
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = norm(el.textContent || '');
+          const nearComposer = textbox ? (
+            r.y < textbox.y + textbox.h + 80 &&
+            r.y + r.height > textbox.y - 520 &&
+            r.x < textbox.x + textbox.w + 360 &&
+            r.x + r.width > textbox.x - 260
+          ) : false;
+          return {
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            text: text.slice(0, 120),
+            hasUploadTab: /\bUploads?\b/i.test(text),
+            hasUploadControl: /Upload (media|images?)|Drag & drop|click to upload/i.test(text),
+            hasReferenceSignal: /Image Generations|Uploads?|References?|Add to prompt box|Upload media/i.test(text),
+            nearComposer,
+          };
+        });
+      const tabs = [...document.querySelectorAll('[role="tab"]')]
+        .filter(visible)
+        .map((t) => {
+          const r = t.getBoundingClientRect();
+          return { text: norm(t.textContent || '').slice(0, 40), x: Math.round(r.x), y: Math.round(r.y) };
+        });
+      const bodyText = norm(document.body?.innerText || '');
+      const hasPickerText = /Image Generations|Uploads?|Upload media|Add to prompt box|Drag & drop|click to upload/i.test(bodyText);
+      const realPickerPanels = panels.filter((p) =>
+        p.hasReferenceSignal &&
+        (p.nearComposer || p.hasUploadControl || p.hasUploadTab || p.w >= 240)
+      );
+      return {
+        ok: !!textbox && textbox.w > 1 && textbox.h > 1 && (realPickerPanels.length > 0 || hasPickerText),
+        textbox,
+        panels: panels.slice(0, 6),
+        tabs: tabs.slice(0, 10),
+        hasPickerText,
+        reason: !textbox ? 'no textbox' :
+          textbox.w <= 1 || textbox.h <= 1 ? 'textbox zero bounds' :
+          realPickerPanels.length === 0 && !hasPickerText ? 'no reference picker signals' : '',
+      };
+    }).catch(e => ({ ok: false, reason: e.message || 'evaluate failed' }));
   }
 
   async _selectExactMentionOption(cleanName) {
@@ -2864,7 +2945,26 @@ class CinemaStudioAutomation {
 
   async _attachLocationReference(locationImagePath) {
     const page = this._ensurePageAlive();
-    await this._dismissOverlays();
+    const maxAttempts = 3;
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await this._dismissOverlays();
+      try {
+        await this._attachLocationReferenceViaUpload(locationImagePath);
+        return;
+      } catch (e) {
+        lastError = e;
+        const msg = e?.message || String(e);
+        const retryable = /REFERENCE_PICKER_NOT_OPEN|REFERENCE_COMPOSER_LOST|START_FRAME_UPLOAD_NOT_ATTACHED|START_FRAME_UPLOAD_NOT_SELECTABLE|reference thumbnail not confirmed/i.test(msg);
+        if (!retryable || attempt >= maxAttempts) break;
+        this.log(`[REF] Reference attach attempt ${attempt}/${maxAttempts} drifted (${msg.split('\n')[0]}) - resetting composer and retrying`, 'warn');
+        await page.keyboard.press('Escape').catch(() => {});
+        await this._dismissOverlays().catch(() => {});
+        await page.waitForTimeout(2000);
+        await this._scrollToolbarIntoView().catch(() => {});
+      }
+    }
+    throw lastError;
 
     // ─────────────────────────────────────────────────────────
     // UPLOAD FLOW (primary — guarantees correct image):
@@ -2882,7 +2982,6 @@ class CinemaStudioAutomation {
     //   5. Click textbox to dismiss picker
     //   6. Verify thumbnail on + button
     // ─────────────────────────────────────────────────────────
-    await this._attachLocationReferenceViaUpload(locationImagePath);
   }
 
   /**
@@ -3053,6 +3152,14 @@ class CinemaStudioAutomation {
     }
 
     // ── Step 3: Click "Uploads" tab ───────────────────────────────────
+    const pickerState = await this._readReferencePickerState();
+    this.log(`[REF] Reference picker state: ${JSON.stringify(pickerState)}`);
+    if (!pickerState.ok) {
+      detachUploadListener();
+      await page.keyboard.press('Escape').catch(() => {});
+      throw new Error(`REFERENCE_PICKER_NOT_OPEN: ${pickerState.reason || 'picker proof failed'} (${JSON.stringify(pickerState)})`);
+    }
+
     let uploadsTabFound = false;
     for (const label of ['Uploads', 'Upload', 'uploads', 'UPLOADS']) {
       try {
@@ -3205,6 +3312,11 @@ class CinemaStudioAutomation {
     if (!selectedUploadedTile.ok) {
       detachUploadListener();
       throw new Error(`START_FRAME_UPLOAD_NOT_SELECTABLE: ${selectedUploadedTile.reason}`);
+    }
+    if (!selectedUploadedTile.selected) {
+      detachUploadListener();
+      await page.keyboard.press('Escape').catch(() => {});
+      throw new Error(`START_FRAME_UPLOAD_NOT_ATTACHED: uploaded tile clicked but Higgsfield did not confirm Added to prompt box (${JSON.stringify(selectedUploadedTile)})`);
     }
     this.log(`[REF] Selected uploaded reference tile: ${JSON.stringify(selectedUploadedTile)}`);
 
