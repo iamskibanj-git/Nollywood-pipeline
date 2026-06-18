@@ -4599,7 +4599,35 @@ class CinemaStudioAutomation {
     // tile (e.g., URL changes after upload processing).
     let initialSrcSet = new Set();
     let initialTileCount = 0;
-    let initialFailedTileKeys = new Set();
+    let initialFailedTileFingerprintCounts = new Map();
+    const emptyGenerationState = { active: false, count: 0, evidence: [], failedRefunded: [], failedUnknown: [] };
+    const failedTileFingerprint = (tile) => tile?.fingerprint || tile?.stableKey || tile?.key || '';
+    const countFailedFingerprints = (state) => {
+      const counts = new Map();
+      for (const tile of [
+        ...((state && state.failedRefunded) || []),
+        ...((state && state.failedUnknown) || []),
+      ]) {
+        const fingerprint = failedTileFingerprint(tile);
+        if (!fingerprint) continue;
+        counts.set(fingerprint, (counts.get(fingerprint) || 0) + 1);
+      }
+      return counts;
+    };
+    const totalFailedFingerprints = (counts) => Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
+    const findNewFailedTile = (tiles, initialCounts) => {
+      const currentCounts = new Map();
+      for (const tile of tiles || []) {
+        const fingerprint = failedTileFingerprint(tile);
+        if (!fingerprint) continue;
+        const nextCount = (currentCounts.get(fingerprint) || 0) + 1;
+        currentCounts.set(fingerprint, nextCount);
+        if (nextCount > (initialCounts.get(fingerprint) || 0)) {
+          return tile;
+        }
+      }
+      return null;
+    };
     try {
       const initial = await page.evaluate(() => {
         const vh = window.innerHeight;
@@ -4619,12 +4647,10 @@ class CinemaStudioAutomation {
       });
       initialSrcSet = new Set(initial.srcs);
       initialTileCount = initial.count;
-      const initialState = await this.scanImageGenerationTiles().catch(() => ({ failedRefunded: [], failedUnknown: [] }));
-      initialFailedTileKeys = new Set([
-        ...(initialState.failedRefunded || []),
-        ...(initialState.failedUnknown || []),
-      ].map(t => t.key).filter(Boolean));
-      this.log(`[POLL] Initial state: ${initialTileCount} gallery tiles snapshotted`);
+      const initialState = await this.scanImageGenerationTiles().catch(() => emptyGenerationState);
+      initialFailedTileFingerprintCounts = countFailedFingerprints(initialState);
+      const staleFailedCount = totalFailedFingerprints(initialFailedTileFingerprintCounts);
+      this.log(`[POLL] Initial state: ${initialTileCount} gallery tiles snapshotted, ${staleFailedCount} stale failed tile(s) fingerprinted`);
     } catch (e) {
       throw new Error(`Page closed before download polling started: ${e.message.split('\n')[0]}`);
     }
@@ -4664,16 +4690,29 @@ class CinemaStudioAutomation {
         throw new Error(`Page closed during generation poll: ${e.message.split('\n')[0]}`);
       }
 
-      // Find any tile src that was NOT in the initial snapshot — that's the new generation.
-      // This is robust against stale tiles from previous projects/sessions.
-      const generationState = await this.scanImageGenerationTiles().catch(() => ({ failedRefunded: [], failedUnknown: [] }));
-      const newRefundedFailure = (generationState.failedRefunded || []).find(t => !initialFailedTileKeys.has(t.key));
-      const newUnknownFailure = (generationState.failedUnknown || []).find(t => !initialFailedTileKeys.has(t.key));
+      // Decide UI lifecycle before harvesting: active spinner > new failed tile > completed image src.
+      // Failed/refunded tiles visible before Generate are ignored unless their fingerprint count increases.
+      const generationState = await this.scanImageGenerationTiles().catch(() => emptyGenerationState);
+      const visibleFailedCount = ((generationState.failedRefunded || []).length + (generationState.failedUnknown || []).length);
+      if (generationState.active) {
+        if (visibleFailedCount > 0) {
+          this.log(`[POLL] Active generation visible; ignoring ${visibleFailedCount} failed/refunded tile(s) until spinner clears`);
+        }
+        continue;
+      }
+
+      const newRefundedFailure = findNewFailedTile(generationState.failedRefunded, initialFailedTileFingerprintCounts);
+      const newUnknownFailure = findNewFailedTile(generationState.failedUnknown, initialFailedTileFingerprintCounts);
       if (newRefundedFailure) {
+        this.log(`[POLL] New failed/refunded tile accepted for current attempt: ${JSON.stringify(newRefundedFailure)}`);
         throw new Error(`[GEN-FAILED-REFUNDED] Higgsfield returned Failed / Credits refunded for this scene image. Evidence: ${JSON.stringify(newRefundedFailure)}`);
       }
       if (newUnknownFailure) {
+        this.log(`[POLL] New failed tile accepted for current attempt: ${JSON.stringify(newUnknownFailure)}`);
         throw new Error(`[GEN-FAILED-UNKNOWN] Higgsfield returned Failed for this scene image; refund status unclear. Evidence: ${JSON.stringify(newUnknownFailure)}`);
+      }
+      if (visibleFailedCount > 0) {
+        this.log(`[POLL] Ignoring ${visibleFailedCount} stale failed/refunded tile(s); no new failed fingerprint count`);
       }
 
       const newSrc = currentTiles.find(src => src && !initialSrcSet.has(src));
@@ -4705,20 +4744,21 @@ class CinemaStudioAutomation {
       if (elapsed % 15 === 0) this.log(`[POLL] Waiting for generation... (${elapsed}s, tiles: ${currentTiles.length})`);
     }
 
-    const terminalState = await this.scanImageGenerationTiles().catch(() => ({ failedRefunded: [], failedUnknown: [] }));
-    const newRefundedFailure = (terminalState.failedRefunded || []).find(t => !initialFailedTileKeys.has(t.key));
-    const newUnknownFailure = (terminalState.failedUnknown || []).find(t => !initialFailedTileKeys.has(t.key));
+    const terminalState = await this.scanImageGenerationTiles().catch(() => emptyGenerationState);
+    if (terminalState?.active) {
+      const evidence = JSON.stringify((terminalState.evidence || []).slice(0, 3));
+      throw new Error(`[ACTIVE-GEN] Timeout (${maxWaitMs / 1000}s) but ${terminalState.count} active generation tile(s) still visible - wait/harvest only. Evidence: ${evidence}`);
+    }
+
+    const newRefundedFailure = findNewFailedTile(terminalState.failedRefunded, initialFailedTileFingerprintCounts);
+    const newUnknownFailure = findNewFailedTile(terminalState.failedUnknown, initialFailedTileFingerprintCounts);
     if (newRefundedFailure) {
+      this.log(`[POLL] New failed/refunded tile accepted after timeout: ${JSON.stringify(newRefundedFailure)}`);
       throw new Error(`[GEN-FAILED-REFUNDED] Higgsfield returned Failed / Credits refunded for this scene image. Evidence: ${JSON.stringify(newRefundedFailure)}`);
     }
     if (newUnknownFailure) {
+      this.log(`[POLL] New failed tile accepted after timeout: ${JSON.stringify(newUnknownFailure)}`);
       throw new Error(`[GEN-FAILED-UNKNOWN] Higgsfield returned Failed for this scene image; refund status unclear. Evidence: ${JSON.stringify(newUnknownFailure)}`);
-    }
-
-    const activeGeneration = await this.detectActiveImageGenerationTiles().catch(() => ({ active: false, count: 0, evidence: [] }));
-    if (activeGeneration?.active) {
-      const evidence = JSON.stringify((activeGeneration.evidence || []).slice(0, 3));
-      throw new Error(`[ACTIVE-GEN] Timeout (${maxWaitMs / 1000}s) but ${activeGeneration.count} active generation tile(s) still visible — wait/harvest only. Evidence: ${evidence}`);
     }
 
     // ── TIMEOUT RECOVERY: Try to harvest the generation from the Asset library ──
@@ -4750,6 +4790,51 @@ class CinemaStudioAutomation {
       const failedRefunded = [];
       const failedUnknown = [];
       const seen = new Set();
+      const normalizeText = (value) => String(value || '')
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/(refunded)(please)/ig, '$1 $2')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      const hashText = (value) => {
+        const text = String(value || '');
+        let hash = 0;
+        for (let i = 0; i < text.length; i += 1) {
+          hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+        }
+        return Math.abs(hash).toString(36);
+      };
+      const idFromUrl = (url) => {
+        const match = String(url || '').match(/(?:image|asset|preview|upload|user_|\/)([a-z0-9_-]{10,})(?:[/?#.]|$)/i);
+        return match ? match[1].slice(0, 64) : '';
+      };
+      const extractAssetId = (el) => {
+        const holder = el.closest?.('[data-asset-id], [data-asset-preview]') ||
+          el.querySelector?.('[data-asset-id], [data-asset-preview]');
+        return holder?.getAttribute?.('data-asset-id') ||
+          holder?.getAttribute?.('data-asset-preview') ||
+          el.getAttribute?.('data-asset-id') ||
+          el.getAttribute?.('data-asset-preview') ||
+          '';
+      };
+      const failedFingerprintFor = (el, text, status) => {
+        const assetId = extractAssetId(el);
+        const srcId = Array.from(el.querySelectorAll('img'))
+          .map(img => img.getAttribute('data-asset-preview') || idFromUrl(img.currentSrc || img.src))
+          .find(Boolean) || '';
+        const normalized = normalizeText(text);
+        const promptish = normalized
+          .replace(/\bfailed\b/g, ' ')
+          .replace(/credits?\s*refunded/g, ' ')
+          .replace(/credits?refunded/g, ' ')
+          .replace(/please try again/g, ' ')
+          .replace(/or change your input files or prompt/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(-260);
+        const core = assetId || srcId || hashText(promptish || normalized);
+        return `${status}:${core}`;
+      };
 
       const visible = (el) => {
         const r = el.getBoundingClientRect();
@@ -4775,14 +4860,19 @@ class CinemaStudioAutomation {
         const key = `${Math.round(r.x)}:${Math.round(r.y)}:${Math.round(r.width)}:${Math.round(r.height)}`;
         if (seen.has(key)) continue;
         const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        const textLower = text.toLowerCase();
-        const hasFailed = /\bfailed\b/.test(textLower);
-        const hasRefunded = /\bcredits?\s+refunded\b|\brefunded\b/.test(textLower);
+        const normalizedText = normalizeText(text);
+        const hasFailed = /\bfailed\b/.test(normalizedText);
+        const hasRefunded = /\bcredits?\s*refunded\b|\bcredits?refunded\b|\brefunded\b/.test(normalizedText);
 
         if (hasFailed) {
           seen.add(key);
+          const status = hasRefunded ? 'failed-refunded' : 'failed';
+          const fingerprint = failedFingerprintFor(el, text, status);
           const record = {
             key,
+            fingerprint,
+            stableKey: fingerprint,
+            approxKey: `${Math.round(r.x / 40)}:${Math.round(r.y / 40)}:${Math.round(r.width / 40)}:${Math.round(r.height / 40)}`,
             x: Math.round(r.x),
             y: Math.round(r.y),
             w: Math.round(r.width),
