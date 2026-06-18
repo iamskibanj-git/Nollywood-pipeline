@@ -31,6 +31,8 @@ Default engineering posture: make small scoped changes, preserve existing gates,
 
 2026-06-18 follow-up: Higgsfield eligibility can flip from stale Not eligible to hover `Use`/eligible-visual after the failure list is built. Before deleting/recreating a visible element, repair code must re-check current eligibility. If the card now shows eligible/Use, mark it repaired and skip deletion; do not keep retrying destructive repair from the stale failure status.
 
+2026-06-18 Face/IP recast repair: Cinema Studio video element eligibility repair now has a bounded off-ramp. After 3 failed delete/recreate eligibility attempts for a character element, the pipeline treats it as Face/IP recast required. Automatic recast is allowed only before video generation starts; if any `video_clip_cinematic` row has `gen_clicked_at`, `source_gen_id`, `file_path`, `cdn_url`, or `done` status, recast is blocked and the existing human eligibility gate is emitted. In the pre-video path, the automation safely deletes all outfit elements for the affected character from Higgsfield first, rewrites the character `physical_description` with a fictional/no-public-figure caveat, persists `script.json` and DB `script_json`, regenerates the master portrait, outfit portraits, grids, and character elements, re-runs eligibility, then archives/regenerates only scene images containing that character and clears pre-video clip metadata tied to those scenes. Do not delete or regenerate video files as part of automatic recast.
+
 ## Architecture
 
 - **Main process** (Node.js): `src/main/main.js` — IPC handlers, Electron lifecycle

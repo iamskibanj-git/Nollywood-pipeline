@@ -55,6 +55,7 @@ Tone: [Specific emotion, e.g., Blissful, Spiteful, Terrified].
 - No self-harm promotion
 - No misleading health claims
 - No impersonation of real public figures
+- Character visuals must describe fictional original people only. Do NOT make any character resemble a well-known, famous, public, or celebrity figure.
 - All characters fully clothed in culturally appropriate attire
 - No weapons, blood, or graphic injury in image prompts
 

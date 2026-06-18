@@ -632,7 +632,7 @@ Return JSON with this EXACT structure:
       "id": "character_id",
       "description_label": "Human-readable name",
       "element_name_hint": "snake_case_name",
-      "physical_description": "PERMANENT physical features ONLY: face shape, skin tone, build, height, hair texture, distinguishing marks, age appearance. NO clothing here — clothing goes in outfits[]. This anchors face identity across all outfit changes.",
+      "physical_description": "PERMANENT physical features ONLY: face shape, skin tone, build, height, hair texture, distinguishing marks, age appearance. NO clothing here — clothing goes in outfits[]. This anchors face identity across all outfit changes. Must describe a fictional original person who does not resemble any well-known, famous, public, or celebrity figure.",
       "outfits": [
         {
           "outfit_id": "o1",
@@ -696,7 +696,7 @@ Return JSON with this EXACT structure:
 }
 
 RULES FOR OUTLINE:
-- The character_bible MUST separate physical_description (permanent body/face features used for portrait generation) from outfits[] (clothing/styling that changes across the story). physical_description NEVER includes clothing — it anchors face identity across outfit changes.
+- The character_bible MUST separate physical_description (permanent body/face features used for portrait generation) from outfits[] (clothing/styling that changes across the story). physical_description NEVER includes clothing — it anchors face identity across outfit changes. Character visuals must describe fictional original people only and must not resemble any well-known, famous, public, or celebrity figure.
 - OUTFIT RULES: Every character must have at least 1 outfit. Protagonists and antagonists should have 2-4 outfits reflecting their life contexts (work, home, event, disguise, transformation). Supporting characters can have 1-2. Each outfit must have a clear context describing WHEN it is worn — this maps to specific scenes. Outfit descriptions must be vivid and specific enough for AI image generation (fabric type, color, accessories, styling details). outfit_id uses sequential numbering: o1, o2, o3...
 - Each character MUST have speech_style and speech_notes — these enforce voice consistency when chapters are generated independently. Nigerian drama characters speak differently by class, age, region, and role. A market woman speaks differently than a banker's wife.
 - relationship_arcs: Identify 3-5 key relationships that DRIVE the drama. Nollywood melodrama lives in the space between people — not just in plot events. The arc field describes how the bond transforms. The chapter generator uses these to ensure every scene services at least one relationship.
@@ -784,7 +784,7 @@ Return JSON with this EXACT structure:
       "id": "character_id",
       "description_label": "Human-readable name",
       "element_name_hint": "snake_case_name",
-      "physical_description": "PERMANENT physical features ONLY: face shape, skin tone, build, height, hair texture, distinguishing marks, age appearance. NO clothing.",
+      "physical_description": "PERMANENT physical features ONLY: face shape, skin tone, build, height, hair texture, distinguishing marks, age appearance. NO clothing. Must describe a fictional original person who does not resemble any well-known, famous, public, or celebrity figure.",
       "outfits": [
         {
           "outfit_id": "o1",
@@ -846,7 +846,7 @@ Return JSON with this EXACT structure:
 }
 
 RULES FOR ARC SKELETON:
-- Character bible uses the same format as standard outlines (physical_description, outfits, speech_style, speech_notes).
+- Character bible uses the same format as standard outlines (physical_description, outfits, speech_style, speech_notes). Character visuals must describe fictional original people only and must not resemble any well-known, famous, public, or celebrity figure.
 - Prestige requires 6-10 characters with mandatory roles: protagonist, antagonist, 2 confidants, 2+ B-plot leads, 2+ supporting.
 - 3+ setup/payoff pairs — these must be SPECIFIC objects/phrases/details, not abstract concepts.
 - Dual B-plots required, each with own mini-arc that COLLIDES with A-plot.

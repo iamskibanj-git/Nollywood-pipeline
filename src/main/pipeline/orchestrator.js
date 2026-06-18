@@ -1908,7 +1908,7 @@ class PipelineOrchestrator {
               || (char.physical_description
                 ? `${char.physical_description}. ${(char.outfits && char.outfits[0]) ? char.outfits[0].description : ''}`
                 : char.description_label);
-            const prompt = `Photorealistic cinematic portrait, studio-quality lighting. ${charDescription}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
+            const prompt = this._buildCharacterPortraitPrompt(charDescription);
 
             // Dedup check — skip generation if identical prompt already produced a file
             const existing = db.findExistingGeneration(prompt, 'portrait');
@@ -2213,7 +2213,7 @@ class PipelineOrchestrator {
                 const assetLabel = `portrait ${idx + 1}/${characters.length}: ${char.description_label} (retry)`;
                 const retryPath = path.join(portraitDir, `portrait_${char.id}.png`);
                 const portraitAspect = (this.state.project?.brief?.aspect_ratio === '9:16') ? '9:16' : '16:9';
-                const prompt = char.full_prompt_description || char.visual_description || `Portrait of ${char.name}`;
+                const prompt = this._buildCharacterPortraitPrompt(char.full_prompt_description || char.visual_description || `Portrait of ${char.name}`);
                 this.log(`Regenerating ${assetLabel}...`);
                 this.emit({ type: 'progress', stage: 'portraits', current: retryAssets.indexOf(asset) + 1, total: retryAssets.length });
                 db.markAssetGenerating(asset.id, prompt);
@@ -2320,7 +2320,7 @@ class PipelineOrchestrator {
                   this.emit({ type: 'progress', stage: 'portraits', current: flagged.indexOf(idx) + 1, total: flagged.length });
 
                   const portraitAspect = (this.state.project?.brief?.aspect_ratio === '9:16') ? '9:16' : '16:9';
-                  const prompt = char.full_prompt_description || char.visual_description || `Portrait of ${char.name}`;
+                  const prompt = this._buildCharacterPortraitPrompt(char.full_prompt_description || char.visual_description || `Portrait of ${char.name}`);
 
                   db.markAssetGenerating(asset.id, prompt);
 
@@ -4269,7 +4269,7 @@ class PipelineOrchestrator {
         }
 
         const portraitAspect = this.state.aspectRatio || '9:16';
-        const outfitPrompt = `Photorealistic cinematic portrait, studio-quality lighting. ${char.physical_description}. Wearing: ${outfit.description}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
+        const outfitPrompt = this._buildCharacterPortraitPrompt(`${char.physical_description}. Wearing: ${outfit.description}`);
 
         this.log(`[CINEMATIC] Generating outfit portrait: ${outfitKey} (${outfit.context || '?'})`);
 
@@ -4347,10 +4347,10 @@ class PipelineOrchestrator {
 
       const gridPath = path.join(gridDir, `${unitKey}_grid.png`);
       // Insert asset row if not present, then mark generating
-      let gridAsset = existingGrids.find(g => g.character_id === unitKey);
+      let gridAsset = existingGrids.find(g => g.character_id === unitKey && g.status !== 'archived');
       if (!gridAsset) {
         db.insertExpectedAssets(projectId, [{ type: 'character_grid', character_id: unitKey }]);
-        gridAsset = db.getAssets(projectId, { type: 'character_grid' }).find(g => g.character_id === unitKey);
+        gridAsset = db.getAssets(projectId, { type: 'character_grid' }).find(g => g.character_id === unitKey && g.status !== 'archived');
       }
       if (!gridAsset) {
         this.log(`[CINEMATIC] Couldn't create grid asset row for ${unitKey} — skipping`, 'warn');
@@ -4438,7 +4438,7 @@ class PipelineOrchestrator {
 
     // ── STRICT GATE: all grids must be complete before proceeding ──
     const failedGrids = db.getAssets(projectId, { type: 'character_grid' })
-      .filter(a => a.status !== 'done');
+      .filter(a => a.status !== 'done' && a.status !== 'archived');
     if (failedGrids.length > 0) {
       const names = failedGrids.map(g => g.character_id || g.id).join(', ');
       throw new Error(`[STAGE GATE] Cannot proceed — ${failedGrids.length} character grid(s) incomplete: ${names}. Fix the issue and restart the pipeline.`);
@@ -4864,11 +4864,11 @@ class PipelineOrchestrator {
       const persistTargets = [];
 
       if (!p.outfitId || p.outfitId === 'o1') {
-        const portraitAsset = assets.find(a => a.type === 'portrait' && a.character_id === p.char.id);
+        const portraitAsset = assets.find(a => a.type === 'portrait' && a.character_id === p.char.id && a.status !== 'archived');
         if (portraitAsset) persistTargets.push({ asset: portraitAsset, label: 'portrait' });
       }
 
-      const gridAsset = assets.find(a => a.type === 'character_grid' && a.character_id === p.unitKey);
+      const gridAsset = assets.find(a => a.type === 'character_grid' && a.character_id === p.unitKey && a.status !== 'archived');
       if (gridAsset) persistTargets.push({ asset: gridAsset, label: 'character_grid' });
 
       for (const target of persistTargets) {
@@ -10557,6 +10557,339 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
   }
 
+  _buildCharacterPortraitPrompt(charDescription) {
+    const faceIpCaveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
+    const desc = String(charDescription || '').trim();
+    const caveatAlreadyPresent = /must not resemble any well-known|fictional original person/i.test(desc);
+    const safeDescription = caveatAlreadyPresent ? desc : `${desc}. ${faceIpCaveat}`;
+    return `Photorealistic cinematic portrait, studio-quality lighting. ${safeDescription}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
+  }
+
+  _hasCinematicVideoGenerationStarted(projectId) {
+    const clips = db.getAssets(projectId, { type: 'video_clip_cinematic' });
+    const started = clips.filter(clip =>
+      clip.status === 'done' ||
+      !!clip.gen_clicked_at ||
+      !!clip.source_gen_id ||
+      !!clip.file_path ||
+      !!clip.cdn_url
+    );
+    return {
+      started: started.length > 0,
+      count: started.length,
+      examples: started.slice(0, 5).map(clip => ({
+        id: clip.id,
+        chapter: clip.chapter,
+        scene: clip.scene,
+        status: clip.status,
+        hasGenClickedAt: !!clip.gen_clicked_at,
+        hasSource: !!clip.source_gen_id,
+        hasFile: !!clip.file_path,
+      })),
+    };
+  }
+
+  _normalizeElementName(value) {
+    return String(value || '').trim().replace(/^@+/, '').toLowerCase();
+  }
+
+  _findCharacterElementNames(projectId, characterId) {
+    const names = new Set();
+    const assets = db.getAssets(projectId);
+    for (const asset of assets) {
+      const elementName = this._normalizeElementName(asset.element_name);
+      if (!elementName) continue;
+      if (asset.character_id === characterId) names.add(elementName);
+      if (String(asset.character_id || '').startsWith(`${characterId}_o`)) names.add(elementName);
+    }
+    return [...names];
+  }
+
+  _findScenesContainingCharacter(characterId) {
+    const script = this.state.script;
+    const scenes = [];
+    if (!script?.chapters?.length || !characterId) return scenes;
+    const character = (script.character_bible || []).find(c => c.id === characterId);
+    const hint = this._normalizeElementName(character?.element_name_hint);
+    const labelSlug = this._normalizeElementName(character?.description_label)
+      .replace(/^(the|a|an)_/i, '')
+      .replace(/[^a-z0-9_]+/g, '_');
+    const aliases = new Set([characterId, hint, labelSlug].filter(Boolean).map(v => this._normalizeElementName(v)));
+
+    for (const chapter of script.chapters || []) {
+      for (const scene of chapter.scenes || []) {
+        const present = (scene.characters_present || []).map(v => this._normalizeElementName(v));
+        const outfitKeys = Object.keys(scene.character_outfits || {}).map(v => this._normalizeElementName(v));
+        const text = JSON.stringify({
+          blocking: scene.blocking || {},
+          kling_clips: scene.kling_clips || [],
+        }).toLowerCase();
+        const matched = [...aliases].some(alias =>
+          present.includes(alias) ||
+          outfitKeys.includes(alias) ||
+          (alias && text.includes(`@${alias}`))
+        );
+        if (matched) {
+          scenes.push({
+            chapter: chapter.chapter_number,
+            scene: scene.scene_number,
+            hint: `ch${String(chapter.chapter_number).padStart(2, '0')}_sc${String(scene.scene_number).padStart(2, '0')}_cinematic`,
+          });
+        }
+      }
+    }
+    return scenes;
+  }
+
+  _archiveFileForRecast(filePath, label) {
+    const fs = require('fs');
+    const path = require('path');
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    const dir = path.dirname(filePath);
+    const archiveDir = path.join(dir, '.archive');
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const ext = path.extname(filePath);
+    const base = path.basename(filePath, ext);
+    const archivePath = path.join(archiveDir, `${base}_faceip_recast_${Date.now()}${ext}`);
+    fs.renameSync(filePath, archivePath);
+    this.log(`[FACE-IP-RECAST] Archived ${label}: ${filePath} -> ${archivePath}`);
+    return archivePath;
+  }
+
+  _clearCinematicElementStateForRecast(projectId, elementNames = []) {
+    this.state.cinematicElementNames = null;
+    this.state._outfitElements = null;
+    this.state._cinematicMapsRestoredFromSettings = false;
+    this.state._cinematicElementsConfirmedViaAtButton = false;
+    try {
+      const rawSettings = db.getProject(projectId)?.settings;
+      const settings = rawSettings ? (typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings) : {};
+      delete settings._cinematicElementsModalProof;
+      delete settings._cinemaElementEligibility;
+      delete settings._cinematicElementNames;
+      delete settings._outfitElements;
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+    } catch (e) {
+      this.log(`[FACE-IP-RECAST] WARN: Could not clear persisted element proof/cache: ${e.message}`, 'warn');
+    }
+  }
+
+  _archiveCharacterVisualAssetsForRecast(projectId, projectDir, characterId) {
+    const fs = require('fs');
+    const path = require('path');
+    const assets = db.getAssets(projectId);
+    const character = (this.state.script?.character_bible || []).find(c => c.id === characterId);
+    const outfitIds = (character?.outfits?.length ? character.outfits.map(o => o.outfit_id) : ['o1'])
+      .map(id => String(id || '').toLowerCase())
+      .filter(Boolean);
+
+    const masterPortraits = assets.filter(a => a.type === 'portrait' && a.character_id === characterId && a.status !== 'archived');
+    for (const asset of masterPortraits) {
+      const archivePath = this._archiveFileForRecast(asset.file_path, `master portrait ${characterId}`);
+      db.markAssetArchived(asset.id, archivePath || asset.file_path || '', 'face-ip-recast');
+    }
+    db.insertExpectedAssets(projectId, [{ type: 'portrait', character_id: characterId }]);
+
+    for (const outfitId of outfitIds) {
+      if (outfitId === 'o1') continue;
+      const outfitKey = `${characterId}_${outfitId}`;
+      const outfitPath = path.join(projectDir, 'assets', 'portraits', `portrait_${outfitKey}.png`);
+      this._archiveFileForRecast(outfitPath, `outfit portrait ${outfitKey}`);
+    }
+
+    const gridUnitKeys = outfitIds.length > 0
+      ? outfitIds.map(outfitId => `${characterId}_${outfitId}`)
+      : [characterId];
+    const gridAssets = assets.filter(a =>
+      a.type === 'character_grid' &&
+      a.status !== 'archived' &&
+      (a.character_id === characterId || String(a.character_id || '').startsWith(`${characterId}_o`))
+    );
+    for (const asset of gridAssets) {
+      const archivePath = this._archiveFileForRecast(asset.file_path, `grid ${asset.character_id}`);
+      db.markAssetArchived(asset.id, archivePath || asset.file_path || '', 'face-ip-recast');
+    }
+    for (const unitKey of gridUnitKeys) {
+      db.insertExpectedAssets(projectId, [{ type: 'character_grid', character_id: unitKey }]);
+      const gridPath = path.join(projectDir, 'assets', 'grids', `${unitKey}_grid.png`);
+      if (fs.existsSync(gridPath)) this._archiveFileForRecast(gridPath, `orphan grid ${unitKey}`);
+    }
+
+    return { outfitIds, gridUnitKeys };
+  }
+
+  _archiveScenesForCharacterRecast(projectId, characterId) {
+    const scenes = this._findScenesContainingCharacter(characterId);
+    if (scenes.length === 0) {
+      this.log(`[FACE-IP-RECAST] No scenes found for ${characterId}; no scene images reset`, 'warn');
+      return scenes;
+    }
+
+    const activeScenes = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+      .filter(a => a.status !== 'archived');
+    let archived = 0;
+    for (const sceneRef of scenes) {
+      const matches = activeScenes.filter(a => Number(a.chapter) === Number(sceneRef.chapter) && Number(a.scene) === Number(sceneRef.scene));
+      for (const asset of matches) {
+        const archivePath = this._archiveFileForRecast(asset.file_path, `scene ch${asset.chapter} sc${asset.scene}`);
+        db.markAssetArchived(asset.id, archivePath || asset.file_path || '', 'face-ip-recast');
+        archived++;
+      }
+      db.insertExpectedAssets(projectId, [{
+        type: 'scene_image_cinematic',
+        chapter: sceneRef.chapter,
+        scene: sceneRef.scene,
+      }]);
+    }
+
+    const clips = db.getAssets(projectId, { type: 'video_clip_cinematic' });
+    let clearedClips = 0;
+    for (const clip of clips) {
+      if (!scenes.some(sceneRef => Number(sceneRef.chapter) === Number(clip.chapter) && Number(sceneRef.scene) === Number(clip.scene))) continue;
+      db.clearAssetGenerationMeta(clip.id);
+      if (clip.status !== 'done') db.resetAsset(clip.id);
+      clearedClips++;
+    }
+
+    this.log(`[FACE-IP-RECAST] Archived/reset ${archived} scene image row(s) for ${characterId}; cleared pre-video metadata on ${clearedClips} tied clip row(s).`);
+    return scenes;
+  }
+
+  async _regenerateMasterPortraitForRecast(projectId, projectDir, character) {
+    const path = require('path');
+    const portraitDir = path.join(projectDir, 'assets', 'portraits');
+    const portraitPath = path.join(portraitDir, `portrait_${character.id}.png`);
+    const asset = db.getAssets(projectId, { type: 'portrait' })
+      .find(a => a.character_id === character.id && a.status !== 'archived');
+    if (!asset) throw new Error(`No pending portrait asset found for recast character ${character.id}`);
+    const desc = character.full_prompt_description
+      || (character.physical_description
+        ? `${character.physical_description}. ${(character.outfits && character.outfits[0]) ? character.outfits[0].description : ''}`
+        : character.description_label);
+    const prompt = this._buildCharacterPortraitPrompt(desc);
+    db.markAssetGenerating(asset.id, prompt);
+    const genMeta = await this._withSessionRetry(
+      () => this.automation.generateImage({
+        prompt,
+        outputPath: portraitPath,
+        references: [],
+        aspectRatio: this.state.aspectRatio || '9:16',
+        useUnlimited: true,
+        onGenClicked: (creditCost) => db.markAssetGenClicked(asset.id, creditCost),
+      }),
+      `Face/IP recast portrait ${character.id}`
+    );
+    db.markAssetDone(asset.id, portraitPath, genMeta || {});
+    return portraitPath;
+  }
+
+  async _runFaceIpRecastForCinemaElement(projectId, projectDir, failedElementName, videoAutomation) {
+    const spec = this._findCinemaElementRepairSpec(projectId, projectDir, failedElementName);
+    if (!spec?.characterId) {
+      return { ok: false, reason: `Could not identify character for @${failedElementName}` };
+    }
+    const character = (this.state.script?.character_bible || []).find(c => c.id === spec.characterId);
+    if (!character) {
+      return { ok: false, reason: `Character ${spec.characterId} not found in script` };
+    }
+
+    const videoStarted = this._hasCinematicVideoGenerationStarted(projectId);
+    if (videoStarted.started) {
+      return {
+        ok: false,
+        blocked: true,
+        reason: `Video generation already started (${videoStarted.count} clip row(s) have submit/source/file proof); automatic recast blocked`,
+        videoStarted,
+      };
+    }
+
+    const elementNames = this._findCharacterElementNames(projectId, spec.characterId);
+    if (!elementNames.includes(this._normalizeElementName(failedElementName))) {
+      elementNames.push(this._normalizeElementName(failedElementName));
+    }
+    this.log(`[FACE-IP-RECAST] Starting pre-video recast for ${spec.characterId} after @${failedElementName} stayed not eligible. Elements: ${elementNames.map(n => '@' + n).join(', ')}`);
+
+    for (const elementName of elementNames) {
+      videoAutomation.invalidateElementEligibility?.(elementName);
+      try {
+        await videoAutomation.deleteElementFromPicker(elementName, { requireNotEligible: false });
+        this.log(`[FACE-IP-RECAST] Deleted @${elementName} from Higgsfield before local recast reset.`);
+      } catch (deleteErr) {
+        const alreadyMissing = /not visible for delete|already absent|alreadyMissing/i.test(deleteErr.message || '');
+        if (alreadyMissing) {
+          this.log(`[FACE-IP-RECAST] @${elementName} already absent before recast.`);
+        } else {
+          return { ok: false, reason: `Safe delete failed for @${elementName}: ${deleteErr.message}` };
+        }
+      }
+    }
+
+    const oldPhysical = character.physical_description || character.full_prompt_description || character.description_label || '';
+    let newPhysical = await this._rewriteCharacterDescription(character, {
+      reason: 'face-ip-recast',
+      sourceField: 'physical_description',
+    }).catch(err => {
+      this.log(`[FACE-IP-RECAST] Claude physical-description rewrite failed: ${err.message}; applying deterministic caveat`, 'warn');
+      return null;
+    });
+    const caveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
+    if (!newPhysical) newPhysical = oldPhysical;
+    if (!/well-known|famous|celebrity|public figure/i.test(newPhysical)) newPhysical = `${newPhysical}. ${caveat}`;
+    character.physical_description = newPhysical;
+    if (character.full_prompt_description) {
+      character.full_prompt_description = /well-known|famous|celebrity|public figure/i.test(character.full_prompt_description)
+        ? character.full_prompt_description
+        : `${character.full_prompt_description}. ${caveat}`;
+    }
+    this._saveScriptState(projectId);
+    db.logEvent(projectId, 'face_ip_recast_description', {
+      characterId: spec.characterId,
+      failedElementName,
+      detail: `Updated physical_description for Face/IP recast: ${oldPhysical.slice(0, 120)} -> ${newPhysical.slice(0, 120)}`,
+    });
+
+    this._clearCinematicElementStateForRecast(projectId, elementNames);
+    this._archiveCharacterVisualAssetsForRecast(projectId, projectDir, spec.characterId);
+    await this._regenerateMasterPortraitForRecast(projectId, projectDir, character);
+    await this._runCinematicElementSetup(projectId, projectDir);
+
+    videoAutomation.invalidateElementEligibility?.(elementNames);
+    const eligibility = [];
+    for (const elementName of elementNames) {
+      const check = await videoAutomation.checkElementEligibility(elementName);
+      eligibility.push({ name: elementName, status: check.status || 'unknown' });
+    }
+    const stillFailed = eligibility.filter(item => item.status !== 'eligible');
+    if (stillFailed.length > 0) {
+      return {
+        ok: false,
+        reason: `Face/IP recast completed but ${stillFailed.map(item => '@' + item.name + '=' + item.status).join(', ')} remain ineligible`,
+        unresolved: stillFailed,
+      };
+    }
+
+    const scenes = this._archiveScenesForCharacterRecast(projectId, spec.characterId);
+    if (scenes.length > 0) {
+      this.log(`[FACE-IP-RECAST] Regenerating ${scenes.length} affected scene image(s) before returning to video generation.`);
+      await this._runCinematicSceneImageStage(projectId, projectDir);
+      this.verifyStageComplete('scene_image_cinematic', 'Scene Images (cinematic)');
+      db.updateProjectStage(projectId, 'scenes-done');
+    }
+    db.logEvent(projectId, 'face_ip_recast_complete', {
+      characterId: spec.characterId,
+      elementNames,
+      scenes: scenes.map(s => `ch${s.chapter}_sc${s.scene}`),
+      detail: 'Pre-video Face/IP recast completed; affected scene images reset',
+    });
+    return {
+      ok: true,
+      characterId: spec.characterId,
+      elementNames,
+      scenes,
+      eligibility,
+    };
+  }
+
   _findCinemaElementRepairSpec(projectId, projectDir, elementName) {
     const fs = require('fs');
     const path = require('path');
@@ -10651,6 +10984,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const maxAttempts = Math.max(1, Math.min(5, Number(opts.maxAttempts) || 3));
     const repaired = [];
     const unresolved = [];
+    const recastCharacters = new Set();
 
     videoAutomation.invalidateElementEligibility?.(names);
 
@@ -10674,6 +11008,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         const reason = 'No local grid image found';
         this.log(`[CINEMATIC] [ELEMENT-REPAIR] ${reason} for @${name}; refusing one-image repair.`, 'warn');
         unresolved.push({ ...failure, name, status: failure.status || 'unresolved', reason });
+        continue;
+      }
+      if (spec.characterId && recastCharacters.has(spec.characterId)) {
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} belongs to already-recast ${spec.characterId}; treating as repaired for this pass.`);
+        repaired.push({ name, status: 'eligible', attempts: 0, recreated: true, recast: true, characterId: spec.characterId });
         continue;
       }
 
@@ -10745,12 +11084,38 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
 
       if (!repairedThisElement) {
-        unresolved.push({
-          ...failure,
-          name,
-          status: finalStatus,
-          reason: `not eligible after ${maxAttempts} repair attempt(s)`,
-        });
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} exhausted ${maxAttempts} repair attempt(s); treating as Face/IP recast required.`, 'warn');
+        const recast = await this._runFaceIpRecastForCinemaElement(projectId, projectDir, name, videoAutomation).catch(err => ({
+          ok: false,
+          reason: err.message,
+        }));
+        if (recast?.ok) {
+          if (recast.characterId) recastCharacters.add(recast.characterId);
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] Face/IP recast repaired ${recast.characterId}; reset scenes: ${(recast.scenes || []).map(s => `ch${s.chapter}_sc${s.scene}`).join(', ') || 'none'}`);
+          repaired.push({
+            name,
+            status: 'eligible',
+            attempts: maxAttempts,
+            recreated: true,
+            recast: true,
+            characterId: recast.characterId,
+            elementNames: recast.elementNames || [name],
+            scenes: recast.scenes || [],
+          });
+          repairedThisElement = true;
+        } else {
+          const reason = recast?.reason || `not eligible after ${maxAttempts} repair attempt(s)`;
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] Face/IP recast could not complete for @${name}: ${reason}`, recast?.blocked ? 'error' : 'warn');
+          unresolved.push({
+            ...failure,
+            name,
+            status: finalStatus,
+            reason,
+            recastRequired: true,
+            recastBlocked: !!recast?.blocked,
+            videoStarted: recast?.videoStarted || null,
+          });
+        }
       }
     }
 
@@ -12635,7 +13000,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    * @param {Object} char - Character object from character_bible (mutated in place by caller)
    * @returns {string|null} New description, or null if rewrite failed
    */
-  async _rewriteCharacterDescription(char) {
+  async _rewriteCharacterDescription(char, options = {}) {
     const apiKey = this.store.get('claudeApiKey');
     if (!apiKey) {
       this.log('[NSFW] No Claude API key — cannot rewrite description', 'error');
@@ -12644,13 +13009,16 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
+    const sourceField = options.sourceField || 'full_prompt_description';
+    const originalDescription = char[sourceField] || char.full_prompt_description || char.physical_description || char.description_label || '';
+    const rejectionLabel = options.reason === 'face-ip-recast' ? 'Face/IP not eligible' : 'restricted content';
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       messages: [{
         role: 'user',
-        content: `An AI image generator rejected this character description as "restricted content" (it likely resembles a real person too closely). Rewrite the physical description to be more fictional and stylized while keeping the character believable for a Nollywood drama.
+        content: `An AI image generator rejected this character description as "${rejectionLabel}" (it likely resembles a real or public person too closely). Rewrite the physical description to be more fictional and stylized while keeping the character believable for a Nollywood drama.
 
 RULES:
 - Change distinctive facial features enough that they don't match any real person
@@ -12658,11 +13026,12 @@ RULES:
 - Keep the same wardrobe/clothing description (this is important for visual continuity)
 - Make features more distinctive/unique/fictional (e.g., unusual eye color, specific scar patterns, distinctive hairstyle)
 - Do NOT use any celebrity names or references to real people
+- Include this caveat naturally or verbatim: "This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure."
 - Output ONLY the rewritten description text, nothing else — no explanation, no preamble
-- Match the same format: "A [age]-year-old [nationality] [gender] with [skin], [hair], [eyes], [features], [build] at [height], wearing [wardrobe]"
+- Match the same format and clothing scope as the original description
 
 ORIGINAL DESCRIPTION:
-${char.full_prompt_description}
+${originalDescription}
 
 CHARACTER NAME: ${char.name || char.description_label}
 
@@ -12691,10 +13060,8 @@ REWRITTEN DESCRIPTION:`,
       fs.writeFileSync(scriptPath, JSON.stringify(this.state.script, null, 2));
       this.log(`[SCRIPT] Saved updated script to ${scriptPath}`);
 
-      // Also update in DB if the method exists
-      if (db.updateProjectScript) {
-        db.updateProjectScript(projectId, this.state.script);
-      }
+      db.updateProject(projectId, { script_json: this.state.script });
+      this.log('[SCRIPT] Updated DB script_json with current script state');
     } catch (e) {
       this.log(`[SCRIPT] Failed to save script state: ${e.message}`, 'warn');
     }
