@@ -2382,9 +2382,9 @@ class PipelineOrchestrator {
       // creates Higgsfield Character elements that downstream Cinema Studio
       // 2.0 + Kling 3.0 stages reference via @charactername.
       //
-      // Element creation must stay automated. If any element is missing, the
-      // setup path waits briefly, re-scrapes the project Elements modal, and
-      // retries only the missing names until all are accounted for.
+      // Element creation is automated first. If any element is still missing
+      // after bounded retries, hand off to the manual Elements Ready gate
+      // rather than spinning forever in the external UI.
       //
       // Staged mode is a no-op passthrough. Stage runs only once per project
       // (idempotent): if all elements already exist, the stage completes
@@ -4767,10 +4767,11 @@ class PipelineOrchestrator {
     let modalProof = await verifyElementsViaModal(allElementNames, 'Initial Elements modal proof');
     let missingSpecs = modalProof.missing.map(name => specByName.get(normalizeElementName(name))).filter(Boolean);
     let retryRound = 0;
+    const MAX_ELEMENT_RECREATE_ROUNDS = 3;
 
     while (missingSpecs.length > 0) {
       retryRound++;
-      this.log(`[CINEMATIC] Element retry round ${retryRound}: recreating ${missingSpecs.length} missing element(s) until all are accounted for`);
+      this.log(`[CINEMATIC] Element retry round ${retryRound}/${MAX_ELEMENT_RECREATE_ROUNDS}: recreating ${missingSpecs.length} missing element(s)`);
 
       for (let idx = 0; idx < missingSpecs.length; idx++) {
         if (this.cancelled) return;
@@ -4799,6 +4800,26 @@ class PipelineOrchestrator {
 
       modalProof = await verifyElementsViaModal(allElementNames, `Post-retry round ${retryRound} Elements modal proof`);
       missingSpecs = modalProof.missing.map(name => specByName.get(normalizeElementName(name))).filter(Boolean);
+
+      if (missingSpecs.length > 0 && retryRound >= MAX_ELEMENT_RECREATE_ROUNDS) {
+        const missingNames = missingSpecs.map(p => `@${p.name}`).join(', ');
+        this.log(`[CINEMATIC] Element setup still missing ${missingSpecs.length} element(s) after ${retryRound} automated recreate round(s): ${missingNames}. Waiting for manual Elements Ready confirmation.`, 'warn');
+        this._lastMissingElements = missingSpecs.map(p => p.name);
+        this.emit({
+          type: 'cinematic-manual-element-checklist',
+          pending: missingSpecs.map(p => ({
+            name: p.name,
+            description: p.description || '',
+          })),
+        });
+        await this.waitForApproval('elements-ready');
+        modalProof = await verifyElementsViaModal(allElementNames, `Manual Elements Ready proof after ${retryRound} retry round(s)`);
+        missingSpecs = modalProof.missing.map(name => specByName.get(normalizeElementName(name))).filter(Boolean);
+        if (missingSpecs.length > 0) {
+          const stillMissing = missingSpecs.map(p => `@${p.name}`).join(', ');
+          throw new Error(`Manual Elements Ready confirmed, but ${missingSpecs.length} element(s) are still missing from the Higgsfield project Elements modal: ${stillMissing}`);
+        }
+      }
     }
 
     this.log(`[CINEMATIC] Element setup: all ${allElementNames.length} elements accounted for via project Elements modal`);
