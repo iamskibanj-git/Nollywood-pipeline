@@ -1373,7 +1373,7 @@ class PipelineOrchestrator {
           // path). The generic resume can't reconstruct this — clear the gate
           // and let the video gen loop re-encounter the clip naturally.
           const PER_CLIP_GATES = ['prompt-preview', 'clip-review'];
-          const RECONSTRUCTIBLE_STAGE_GATES = ['elements-ready', 'scene-images-ready'];
+          const RECONSTRUCTIBLE_STAGE_GATES = ['elements-ready', 'scene-images-ready', 'cinema-eligibility-failed'];
 
           // ── STALE GATE CHECK ──
           // If clips have already been generated, earlier gates (scenes, dialogue-triage)
@@ -1388,9 +1388,11 @@ class PipelineOrchestrator {
           if (PER_CLIP_GATES.includes(pendingGate) || RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate) || isStaleGate) {
             const clearReason = isStaleGate
               ? `${existingDoneClips.length} clips already done`
-              : (RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate)
-                ? 'stage will recompute missing assets and re-enter the retry/manual path'
-                : 'video loop will re-fire with clip data');
+              : (pendingGate === 'cinema-eligibility-failed'
+                ? 'video stage will re-run element eligibility and automated repair'
+                : (RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate)
+                  ? 'stage will recompute missing assets and re-enter the retry/manual path'
+                  : 'video loop will re-fire with clip data'));
             this.log(`[RESUME] Pending ${isStaleGate ? 'stale' : (RECONSTRUCTIBLE_STAGE_GATES.includes(pendingGate) ? 'reconstructible' : 'per-clip')} gate "${pendingGate}" — clearing (${clearReason})`);
             let gateClearSucceeded = false;
             try {

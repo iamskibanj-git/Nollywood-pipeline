@@ -3945,6 +3945,7 @@ Update 2026-06-18 Cinema video not-eligible repair:
 - `Not eligible` remains the dominant status even when the hover proof also contains `Use`; `Use` can be a card action affordance and must not override an explicit failure label.
 - Cinema video pre-Generate setup now treats not-eligible elements as repairable before any human gate: clear stale eligibility cache, open the project Elements picker, exact-match the element card, use the card-local three-dot menu to delete it, recreate the character element from the local portrait + grid image pair, and run `Check eligibility` again.
 - The repair loop is bounded at 3 attempts per failed element and only exits as successful when the element re-check returns `eligible`. If a local portrait/grid pair is missing, or the element remains not eligible after the cap, the existing `cinema-eligibility-failed` human gate is still emitted with the unresolved names. No Generate click is allowed during this repair loop.
+- On restart, a persisted `cinema-eligibility-failed` gate is reconstructible and should be cleared by the generic resume path. The video stage must re-run eligibility and automated repair rather than re-entering the old human wait before the repair code can execute.
 
 Live no-Generate verification after the fix:
 ```text
