@@ -5231,10 +5231,11 @@ class CinemaStudioAutomation {
    *
    * @param {string} submittedPrompt - the prompt that was submitted before timeout
    * @param {string} outputPath - Where to save the harvested image
+   * @param {Object} [opts]
    * @returns {{ sourceGenId: string, assetUuid: string }|null}
    */
-  async attemptHarvestRecovery(submittedPrompt, outputPath) {
-    return this.recoverTimedOutImage(submittedPrompt, outputPath);
+  async attemptHarvestRecovery(submittedPrompt, outputPath, opts = {}) {
+    return this.recoverTimedOutImage(submittedPrompt, outputPath, opts);
   }
 
   /**
@@ -5254,21 +5255,26 @@ class CinemaStudioAutomation {
   }
 
   /**
-   * Normalize a prompt string for fuzzy comparison. Strips whitespace runs,
-   * lowercases, removes @-mention prefixes.
+   * Normalize a prompt string for fuzzy comparison. Higgsfield may render the
+   * same character reference as @element_name, a raw UUID, or <<<uuid>>>.
    */
   _normalizePrompt(text) {
     return (text || '')
       .toLowerCase()
-      .replace(/@/g, '')           // strip @ symbols
-      .replace(/\s+/g, ' ')       // collapse whitespace
-      .replace(/[""'']/g, '"')    // normalize quotes
+      .replace(/<<<\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s*>>>/g, ' element ')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g, ' element ')
+      .replace(/@[a-z0-9_]+/g, ' element ')
+      .replace(/@/g, '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/[{}\[\]<>:]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/[""'']/g, '"')
       .trim();
   }
 
   /**
    * Calculate prompt similarity (0-100) using word overlap.
-   * Same algorithm as Kling's _promptSimilarity.
+   * Uses Jaccard overlap, with containment only as a near-exact/subset boost.
    */
   _promptSimilarity(a, b) {
     const normA = this._normalizePrompt(a);
@@ -5284,9 +5290,13 @@ class CinemaStudioAutomation {
     for (const w of wordsA) {
       if (wordsB.has(w)) overlap++;
     }
-    // Jaccard-ish: overlap / union
+    // Jaccard catches same-prompt matches. Containment is only allowed as a
+    // high-confidence boost, otherwise common template text can overmatch.
     const union = new Set([...wordsA, ...wordsB]).size;
-    return Math.round((overlap / union) * 100);
+    const jaccard = overlap / union;
+    const containment = overlap / Math.min(wordsA.size, wordsB.size);
+    const containmentBoost = containment >= 0.85 ? containment : 0;
+    return Math.round(Math.max(jaccard, containmentBoost) * 100);
   }
 
   /**

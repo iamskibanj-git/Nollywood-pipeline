@@ -7789,24 +7789,80 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.log(`[CINEMATIC] WARN: failed to persist exact submitted prompt for Ch${chapter} Sc${scene.scene_number}: ${promptPersistErr.message}`, 'warn');
         }
       };
+      const buildLegacySceneRecoveryPrompt = (payload) => {
+        if (!payload || typeof payload !== 'object') return '';
+        const legacyBlocking = payload.blocking && typeof payload.blocking === 'object' ? payload.blocking : {};
+        const legacyChars = Array.isArray(payload.vision_refined_characters)
+          ? payload.vision_refined_characters
+          : [];
+        if (!legacyChars.length && !legacyBlocking.notes) return '';
+
+        const cleanName = (value) => String(value || '').replace(/^@+/, '').trim();
+        const firstString = (...values) => values.find(v => typeof v === 'string' && v.trim()) || '';
+        const resolveHolderName = (holder) => {
+          const raw = cleanName(holder).toLowerCase();
+          const match = legacyChars.find(c =>
+            cleanName(firstString(c.name, c.elementName, c.element, c.characterName)).toLowerCase() === raw ||
+            cleanName(c.baseName).toLowerCase() === raw
+          );
+          return cleanName(firstString(match?.name, match?.elementName, match?.element, match?.characterName) || holder);
+        };
+
+        const opener = 'WIDE SHOT inside this location. Characters are immersed in the scene and never look at or acknowledge the camera. ';
+        const propAwareCloser = 'Photorealistic cinematic still, shallow depth of field, 35mm. Natural candid moment - no posing, no eye contact with camera. Location must match the attached image exactly. Do not add unrelated props, furniture, or objects. Required story props are allowed and must appear physically anchored.';
+        const defaultCloser = 'Photorealistic cinematic still, shallow depth of field, 35mm. Natural candid moment - no posing, no eye contact with camera. Location must match the attached image exactly. Do not add unrelated props, furniture, or objects. Optional story prop cues may appear only if natural and physically anchored.';
+        const legacyContract = payload.scene_prop_contract || {};
+        const promptProps = [
+          ...((legacyContract.requiredProps || []).filter(p => p.requiredVisible)),
+          ...((legacyContract.mediumConfidenceMentions || [])),
+        ].slice(0, 4);
+        const requiredProps = (legacyContract.requiredProps || []).filter(p => p.requiredVisible);
+        const propText = promptProps.length > 0
+          ? `Nigerian story props: ${promptProps.map(p => {
+              const propName = Array.isArray(p.aliases) ? (p.aliases[0] || p.prop) : (p.aliases || p.prop || 'story prop');
+              const holder = p.holder ? `show @${resolveHolderName(p.holder)} ${propName}` : `show ${propName}`;
+              const placement = p.placement || 'visible and physically anchored in the scene';
+              const required = p.requiredVisible ? 'must appear' : 'optional cue';
+              const culturalDescription = p.culturalDescription || `culturally plausible Nigerian ${propName}`;
+              return `${holder} ${placement}; ${culturalDescription}; ${required}; never floating`;
+            }).join('. ')}. `
+          : '';
+        const characterText = legacyChars
+          .map(c => {
+            const name = cleanName(firstString(c.name, c.elementName, c.element, c.characterName) || c.baseName);
+            const position = String(firstString(c.position, c.blocking, c.placement, c.scene_position)).replace(/\s+/g, ' ').trim();
+            if (!name || !position) return '';
+            return `@${name} ${position.replace(/[,.\s]+$/, '')}. `;
+          })
+          .join('');
+        const lighting = String(legacyBlocking.notes || '').replace(/\s+/g, ' ').trim();
+        const closer = requiredProps.length > 0 ? propAwareCloser : defaultCloser;
+        return `${opener}${characterText}${propText}${lighting ? lighting + ' ' : ''}${closer}`
+          .replace(/\s+/g, ' ')
+          .trim();
+      };
       const selectSceneImageRecoveryPrompt = (asset, inMemorySubmittedPrompt = '') => {
         const raw = asset?.prompt_used;
         const payload = parseScenePromptPayload(raw);
         const storedExact = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
         if (storedExact.length > 50) {
-          return { prompt: storedExact, source: 'stored exact submitted prompt' };
+          return { prompt: storedExact, source: 'stored exact submitted prompt', minSimilarity: 85 };
         }
         const inMemoryExact = String(inMemorySubmittedPrompt || '').trim();
         if (inMemoryExact.length > 50) {
-          return { prompt: inMemoryExact, source: 'current exact submitted prompt' };
+          return { prompt: inMemoryExact, source: 'current exact submitted prompt', minSimilarity: 85 };
         }
         if (typeof raw === 'string') {
           const rawTrimmed = raw.trim();
           if (rawTrimmed.length > 50 && !rawTrimmed.startsWith('{')) {
-            return { prompt: rawTrimmed, source: 'legacy raw prompt_used' };
+            return { prompt: rawTrimmed, source: 'legacy raw prompt_used', minSimilarity: 85 };
           }
         }
-        return { prompt: visionBlockingJson, source: 'fallback vision blocking metadata' };
+        const legacyPrompt = buildLegacySceneRecoveryPrompt(payload);
+        if (legacyPrompt.length > 80) {
+          return { prompt: legacyPrompt, source: 'legacy reconstructed scene prompt', minSimilarity: 70 };
+        }
+        return { prompt: '', source: 'no usable recovery prompt', minSimilarity: 85 };
       };
 
       // ── RETRY LOOP for scene image generation ──
@@ -7820,22 +7876,29 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         const recoveryPromptInfo = selectSceneImageRecoveryPrompt(sceneAsset);
         this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: prior Generate click detected (${sceneAsset.gen_clicked_at}) — attempting Asset Library recovery before any new Generate using ${recoveryPromptInfo.source} (${recoveryPromptInfo.prompt.length} chars)`, 'warn');
         try {
-          const harvested = await cinema.attemptHarvestRecovery(recoveryPromptInfo.prompt, outputPath);
-          if (harvested) {
-            this.log(`[CINEMATIC] ✓ PRE-GENERATE RECOVERY succeeded for Ch${chapter} Sc${scene.scene_number} — no new credits burned`);
-            if (sceneAsset) db.markAssetDone(sceneAsset.id, outputPath, { model: 'cinematic-cameras', sourceGenId: harvested.sourceGenId });
-            sceneSuccess = true;
+          if (!recoveryPromptInfo.prompt || recoveryPromptInfo.prompt.length < 20) {
+            deferSceneGenerationForRecovery = true;
+            this.log(`[CINEMATIC] No usable recovery prompt for prior submitted Ch${chapter} Sc${scene.scene_number}; deferring instead of clicking Generate again`, 'warn');
           } else {
-            const priorError = String(sceneAsset.error_message || '').toLowerCase();
-            const recoveryOnly = sceneAsset.status === 'pending' ||
-              !priorError ||
-              priorError.includes('active-generation-timeout') ||
-              priorError.includes('[active-gen]');
-            if (recoveryOnly) {
-              deferSceneGenerationForRecovery = true;
-              this.log(`[CINEMATIC] Pre-generate recovery found no match for prior submitted Ch${chapter} Sc${scene.scene_number}; deferring instead of clicking Generate again`, 'warn');
+            const harvested = await cinema.attemptHarvestRecovery(recoveryPromptInfo.prompt, outputPath, {
+              minSimilarity: recoveryPromptInfo.minSimilarity,
+            });
+            if (harvested) {
+              this.log(`[CINEMATIC] ✓ PRE-GENERATE RECOVERY succeeded for Ch${chapter} Sc${scene.scene_number} — no new credits burned`);
+              if (sceneAsset) db.markAssetDone(sceneAsset.id, outputPath, { model: 'cinematic-cameras', sourceGenId: harvested.sourceGenId });
+              sceneSuccess = true;
             } else {
-              this.log(`[CINEMATIC] Pre-generate recovery found no match for Ch${chapter} Sc${scene.scene_number} — proceeding to controlled retry`);
+              const priorError = String(sceneAsset.error_message || '').toLowerCase();
+              const recoveryOnly = sceneAsset.status === 'pending' ||
+                !priorError ||
+                priorError.includes('active-generation-timeout') ||
+                priorError.includes('[active-gen]');
+              if (recoveryOnly) {
+                deferSceneGenerationForRecovery = true;
+                this.log(`[CINEMATIC] Pre-generate recovery found no match for prior submitted Ch${chapter} Sc${scene.scene_number}; deferring instead of clicking Generate again`, 'warn');
+              } else {
+                this.log(`[CINEMATIC] Pre-generate recovery found no match for Ch${chapter} Sc${scene.scene_number} — proceeding to controlled retry`);
+              }
             }
           }
         } catch (preRecoverErr) {
@@ -8030,7 +8093,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               this.log(`[CINEMATIC] Active generation wait ${waitIdx + 1}/${waitSteps.length}: waiting ${Math.round(waitMs / 1000)}s (total ${Math.round(waitedMs / 1000)}s), then harvesting...`);
               await new Promise(r => setTimeout(r, waitMs));
               try {
-                const harvested = await cinema.attemptHarvestRecovery(recoveryPrompt, outputPath);
+                const harvested = await cinema.attemptHarvestRecovery(recoveryPrompt, outputPath, {
+                  minSimilarity: recoveryPromptInfo.minSimilarity,
+                });
                 if (harvested) {
                   this.log(`[CINEMATIC] ✓ ACTIVE-GEN HARVEST succeeded for Ch${chapter} Sc${scene.scene_number} after ${Math.round(waitedMs / 1000)}s — no re-generation needed`);
                   if (sceneAsset) db.markAssetDone(sceneAsset.id, outputPath, { model: 'cinematic-cameras', sourceGenId: harvested.sourceGenId });
@@ -8062,7 +8127,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               const recoveryPromptInfo = selectSceneImageRecoveryPrompt(freshSceneAsset, attemptState.submittedPrompt);
               const recoveryPrompt = recoveryPromptInfo.prompt;
               this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: using ${recoveryPromptInfo.source} for harvest recovery matching (${recoveryPrompt.length} chars)`);
-              const harvested = await cinema.attemptHarvestRecovery(recoveryPrompt, outputPath);
+              const harvested = await cinema.attemptHarvestRecovery(recoveryPrompt, outputPath, {
+                minSimilarity: recoveryPromptInfo.minSimilarity,
+              });
               if (harvested) {
                 this.log(`[CINEMATIC] ✓ HARVEST RECOVERY succeeded for Ch${chapter} Sc${scene.scene_number} — no re-generation needed`);
                 if (sceneAsset) db.markAssetDone(sceneAsset.id, outputPath, { model: 'cinematic-cameras', sourceGenId: harvested.sourceGenId });
