@@ -2904,6 +2904,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
       };
       const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      const checkingRe = /face\s*\/\s*ip\s*check(?:ing)?|checking content|checking/i;
       const all = [...document.querySelectorAll('figure, [role="button"], button, div')];
       const cards = [];
       for (const el of all) {
@@ -2920,7 +2921,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           .find(child => /check eligibility/i.test(textOf(child)));
         const cr = checkBtn ? checkBtn.getBoundingClientRect() : r;
         const statusText = /not eligible/i.test(text) ? 'not-eligible'
-          : /face\/ip checking|checking content|checking/i.test(text) ? 'checking'
+          : checkingRe.test(text) ? 'checking'
           : /check eligibility/i.test(text) ? 'check'
           : /\beligible\b/i.test(text) ? 'eligible'
           : /\bUse\b/i.test(text) ? 'eligible-visual'
@@ -2983,7 +2984,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           const r = el.getBoundingClientRect();
           const text = clean(el.innerText || el.textContent || '');
           const score = (/(Uploads|Image Generations|Video Generations|Elements|Liked)/i.test(text) ? 5 : 0)
-            + (/Check eligibility|Face\/IP checking|Checking content|Character|\bUse\b/i.test(text) ? 5 : 0)
+            + (/Check eligibility|Face\s*\/\s*IP\s*check(?:ing)?|Checking content|Character|\bUse\b/i.test(text) ? 5 : 0)
             + (r.width > 600 && r.height > 300 ? 3 : 0)
             + Math.min(4, Math.floor((el.scrollHeight - el.clientHeight) / 300));
           return { el, r, score };
@@ -3177,6 +3178,8 @@ class CinemaVideoAutomation extends KlingAutomation {
         return tokens;
       };
       const exactNameIn = (text) => !fullTarget || tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
+      const checkingRe = /face\s*\/\s*ip\s*check(?:ing)?|checking content|checking/i;
+      const statusSignalRe = /face\s*\/\s*ip\s*check(?:ing)?|eligible|eligibility|checking|check eligibility|\bUse\b/i;
       const pointEls = [
         document.elementFromPoint(x, y),
         checkX && checkY ? document.elementFromPoint(checkX, checkY) : null,
@@ -3191,13 +3194,13 @@ class CinemaVideoAutomation extends KlingAutomation {
             r.width >= 80 && r.width <= 260
             && r.height >= 50 && r.height <= 280
             && matchesTarget
-            && /face\/ip checking|eligible|eligibility|checking|check eligibility|\bUse\b/i.test(text)
+            && statusSignalRe.test(text)
           ) {
             cardEl = node;
             break;
           }
         }
-        if (cardEl && /face\/ip checking|eligible|eligibility|checking|check eligibility|\bUse\b/i.test(textOf(cardEl))) break;
+        if (cardEl && statusSignalRe.test(textOf(cardEl))) break;
       }
       if (!cardEl && fullTarget) {
         const matches = [...document.querySelectorAll('figure, [role="button"], button, div')].filter(node => {
@@ -3207,7 +3210,7 @@ class CinemaVideoAutomation extends KlingAutomation {
             && r.height >= 50 && r.height <= 280
             && r.top < innerHeight && r.bottom > 0
             && exactNameIn(text)
-            && /face\/ip checking|eligible|eligibility|checking|check eligibility|\bUse\b/i.test(text);
+            && statusSignalRe.test(text);
         });
         cardEl = matches[0] || pointEls[0];
       }
@@ -3232,10 +3235,13 @@ class CinemaVideoAutomation extends KlingAutomation {
         if (cx < cr.x || cx > cr.x + cr.width * 0.45) return false;
         if (cy < cr.y + cr.height * 0.45 || cy > cr.y + cr.height * 0.98) return false;
         const s = getComputedStyle(child);
-        return colorLooksReady(s.backgroundColor) || colorLooksReady(s.color) || colorLooksReady(s.borderColor) || colorLooksReady(s.fill) || colorLooksReady(s.stroke);
+        const tag = String(child.tagName || '').toLowerCase();
+        const hasReadyColor = colorLooksReady(s.backgroundColor) || colorLooksReady(s.color) || colorLooksReady(s.borderColor) || colorLooksReady(s.fill) || colorLooksReady(s.stroke);
+        const logoLike = hasUse && /^(img|svg|canvas)$/i.test(tag) && !textOf(child);
+        return hasReadyColor || logoLike;
       }) : false;
       if (/not eligible/i.test(text)) return 'not-eligible';
-      if (/face\/ip checking|checking content|checking/i.test(text)) return 'checking';
+      if (checkingRe.test(text)) return 'checking';
       if (/check eligibility/i.test(text)) return 'check';
       if (/\beligible\b/i.test(text)) return 'eligible';
       if (hasUse && hasReadyBadge) return 'eligible-visual';
@@ -3267,6 +3273,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         return r.width > 20 && r.height > 20 && s.display !== 'none' && s.visibility !== 'hidden'
           && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
       };
+      const checkingRe = /face\s*\/\s*ip\s*check(?:ing)?|checking content|checking/i;
       const candidates = [...document.querySelectorAll('figure, [role="button"], button, div')]
         .filter(visible)
         .map(el => {
@@ -3287,6 +3294,7 @@ class CinemaVideoAutomation extends KlingAutomation {
               && blue <= 140
               && green >= blue + 45;
           };
+          const hasUse = /\bUse\b/i.test(text);
           const hasReadyBadge = [...el.querySelectorAll('*')].some(child => {
             const br = child.getBoundingClientRect();
             if (br.width < 7 || br.width > 32 || br.height < 7 || br.height > 32) return false;
@@ -3295,11 +3303,13 @@ class CinemaVideoAutomation extends KlingAutomation {
             if (cx < r.x || cx > r.x + r.width * 0.45) return false;
             if (cy < r.y + r.height * 0.45 || cy > r.y + r.height * 0.98) return false;
             const s = getComputedStyle(child);
-            return colorLooksReady(s.backgroundColor) || colorLooksReady(s.color) || colorLooksReady(s.borderColor) || colorLooksReady(s.fill) || colorLooksReady(s.stroke);
+            const tag = String(child.tagName || '').toLowerCase();
+            const hasReadyColor = colorLooksReady(s.backgroundColor) || colorLooksReady(s.color) || colorLooksReady(s.borderColor) || colorLooksReady(s.fill) || colorLooksReady(s.stroke);
+            const logoLike = hasUse && /^(img|svg|canvas)$/i.test(tag) && !clean(child.innerText || child.textContent || '');
+            return hasReadyColor || logoLike;
           });
-          const hasUse = /\bUse\b/i.test(text);
           const status = /not eligible/i.test(text) ? 'not-eligible'
-            : /face\/ip checking|checking content|checking/i.test(text) ? 'checking'
+            : checkingRe.test(text) ? 'checking'
               : /check eligibility/i.test(text) ? 'check'
                 : /\beligible\b/i.test(text) ? 'eligible'
                   : hasUse && hasReadyBadge ? 'eligible-visual'

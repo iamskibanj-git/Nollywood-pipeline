@@ -3713,14 +3713,14 @@ Goal: keep the existing cinematic pipeline and add Cinema Studio 3.5 as a select
 
 7. **Element eligibility behavior:** Element status is persistent once checked. For each required element:
    ```text
-   already Eligible -> continue
+   already visually eligible -> continue
    already Not eligible -> pause
    Check eligibility -> click once -> wait
    ```
-   Observed live test: `Checking content...` settled to `Eligible` in `68.41s`. Use a generous timeout, about `180s` per element, polling for:
+   Current Cinema Studio 3.5 no longer exposes stable `Eligible` / `Not eligible` text for elements. In-progress review can render as `Face/IP check`, `Face/IP checking`, `Checking content...`, or `Checking`. Final eligible proof is visual: hover the element image tile and require the `Use` button plus the small green bottom-left badge/logo on that same tile. Use a generous timeout, about `180s` per element, polling for:
    ```text
-   Checking content...
-   Eligible
+   Face/IP check / Face/IP checking / Checking
+   Use + green bottom-left badge/logo
    Not eligible
    Check eligibility
    ```
@@ -3935,7 +3935,7 @@ Cinema Studio video element eligibility no longer exposes stable `Eligible` / `N
 ```text
 Check eligibility -> Face/IP checking -> small badge / Use state
 ```
-Use the card-local lifecycle only. If `Check eligibility` is visible, click it and wait through `Face/IP checking`. The ready state is hover-revealed `Use` and/or the small green bottom-left badge on the tile. Do not run temporary typed `@character` diagnostics after eligibility; the UI can resolve for a human while Playwright misreads it. For actual video prompts, element attachment is proven by real prompt typing plus the composer reference tile-count gate before Generate. Do not apply this video-only eligibility check to Cinema Studio image generation.
+Use the card-local lifecycle only. If `Check eligibility` is visible, click it and wait through `Face/IP check` / `Face/IP checking`. The ready state is hover-revealed `Use` plus the small green bottom-left badge/logo on the tile. Do not run temporary typed `@character` diagnostics after eligibility; the UI can resolve for a human while Playwright misreads it. For actual video prompts, element attachment is proven by real prompt typing plus the composer reference tile-count gate before Generate. Do not apply this video-only eligibility check to Cinema Studio image generation.
 
 Live no-Generate verification after the fix:
 ```text
