@@ -4137,7 +4137,7 @@ class CinemaStudioAutomation {
   // SCENE IMAGE GENERATION
   // ═══════════════════════════════════════════════════════════
 
-  async generateSceneImage({ locationImagePath, characters, lighting, outputPath, aspectRatio = '16:9', projectName, onGenClicked = null, propContract = null }) {
+  async generateSceneImage({ locationImagePath, characters, lighting, outputPath, aspectRatio = '16:9', projectName, onGenClicked = null, onSubmittedPrompt = null, propContract = null }) {
     if (!characters || characters.length === 0) {
       throw new Error('generateSceneImage: at least one character required');
     }
@@ -4546,6 +4546,9 @@ class CinemaStudioAutomation {
     if (!submittedPrompt || submittedPrompt.length < 30) {
       throw new Error(`[PRE-GEN] HARD GATE: Prompt text is ${submittedPrompt ? submittedPrompt.length + ' chars' : 'empty'} right before GENERATE — refusing to click. No credits burned.`);
     }
+    if (typeof onSubmittedPrompt === 'function') {
+      try { onSubmittedPrompt(submittedPrompt); } catch (_) {}
+    }
 
     // ── SINGLE CLICK ONLY ──
     // CRITICAL: We click GENERATE exactly ONCE. The old 3-attempt escalation pattern
@@ -4562,7 +4565,7 @@ class CinemaStudioAutomation {
 
     // Notify caller that Generate was clicked (for DB persistence + credit tracking)
     if (typeof onGenClicked === 'function') {
-      try { onGenClicked(finalCost); } catch (_) {}
+      try { onGenClicked(finalCost, submittedPrompt); } catch (_) {}
     }
 
     // ── WAIT FOR RESULT + DOWNLOAD ──
@@ -4944,6 +4947,83 @@ class CinemaStudioAutomation {
     return result || { active: false, count: 0, evidence: [], failedRefunded: [], failedUnknown: [] };
   }
 
+  async _expandAssetPromptDetails(page = this.automation?.page) {
+    if (!page) return false;
+
+    try {
+      const expanded = await page.evaluate(() => {
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const textOf = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim();
+        const promptHeading = Array.from(document.querySelectorAll('div, span, p, h1, h2, h3, h4, h5'))
+          .find((el) => visible(el) && textOf(el).toUpperCase() === 'PROMPT');
+        const promptCard = promptHeading?.closest('section, article, [class*="rounded"], [class*="card"], div') || document.body;
+        const candidates = Array.from(promptCard.querySelectorAll('button, div[role="button"], span, div'))
+          .filter((el) => visible(el) && /^See all$/i.test(textOf(el)));
+        const target = candidates[0] || Array.from(document.querySelectorAll('button, div[role="button"], span, div'))
+          .find((el) => visible(el) && /^See all$/i.test(textOf(el)));
+        if (!target) return false;
+        target.click();
+        return true;
+      }).catch(() => false);
+
+      if (expanded) {
+        await page.waitForTimeout(800);
+        return true;
+      }
+    } catch (_) {
+      // Short prompts may not render a See all control.
+    }
+
+    return false;
+  }
+
+  async _readAssetPromptText(page = this.automation?.page) {
+    if (!page) return '';
+    return await page.evaluate(() => {
+      const promptDiv = document.querySelector('.attribute-text-value');
+      if (promptDiv) return (promptDiv.textContent || '').trim();
+
+      const body = document.body?.innerText || '';
+      const promptIdx = body.indexOf('PROMPT');
+      const infoIdx = body.indexOf('INFORMATION');
+      if (promptIdx >= 0 && infoIdx > promptIdx) {
+        return body.substring(promptIdx + 6, infoIdx)
+          .replace(/^Copy\s*/i, '')
+          .replace(/\s*See all\s*$/i, '')
+          .trim();
+      }
+      return '';
+    }).catch(() => '');
+  }
+
+  async _waitForAssetPromptText(page = this.automation?.page, opts = {}) {
+    const minLength = opts.minLength || 20;
+    const timeoutMs = opts.timeoutMs || 10000;
+    const stableMs = opts.stableMs || 1500;
+    const pollMs = opts.pollMs || 500;
+    const startedAt = Date.now();
+    let lastText = '';
+    let lastChangedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const promptText = await this._readAssetPromptText(page);
+      if (promptText && promptText !== lastText) {
+        lastText = promptText;
+        lastChangedAt = Date.now();
+      }
+      if (lastText.length >= minLength && Date.now() - lastChangedAt >= stableMs) {
+        return lastText;
+      }
+      await page.waitForTimeout(pollMs);
+    }
+
+    return lastText;
+  }
+
   /**
    * Recover a timed-out scene image from the Higgsfield Asset library.
    * Mirrors the Kling recoverTimedOutClip() pattern.
@@ -4970,15 +5050,15 @@ class CinemaStudioAutomation {
    * @param {string} outputPath      - where to save the recovered image
    * @param {Object} [opts]
    * @param {number} [opts.minSimilarity=85] - minimum prompt similarity (0-100)
-   * @param {number} [opts.maxTilesToCheck=6] - max tiles to check before giving up
-   * @param {number} [opts.timeoutMs=90000]   - total recovery timeout
+   * @param {number} [opts.maxTilesToCheck=12] - max tiles to check before giving up
+   * @param {number} [opts.timeoutMs=180000]   - total recovery timeout
    * @returns {Promise<{path, sourceGenId, assetUuid}|null>}
    */
   async recoverTimedOutImage(submittedPrompt, outputPath, opts = {}) {
     const fs = require('fs');
     const minSimilarity = opts.minSimilarity || 85;
-    const maxTilesToCheck = opts.maxTilesToCheck || 6;
-    const timeoutMs = opts.timeoutMs || 90000;
+    const maxTilesToCheck = opts.maxTilesToCheck || 12;
+    const timeoutMs = opts.timeoutMs || 180000;
     const startedAt = Date.now();
 
     this.log('[RECOVERY] Starting scene image recovery from Asset library...');
@@ -5079,18 +5159,15 @@ class CinemaStudioAutomation {
           continue;
         }
 
-        // Scrape prompt text from DOM (between "PROMPT" and "INFORMATION" headings)
-        let tilePrompt = await page.evaluate(() => {
-          const body = document.body?.innerText || '';
-          const promptIdx = body.indexOf('PROMPT');
-          const infoIdx = body.indexOf('INFORMATION');
-          if (promptIdx >= 0 && infoIdx > promptIdx) {
-            let section = body.substring(promptIdx + 6, infoIdx).trim();
-            section = section.replace(/^Copy\s*/i, '').replace(/\s*See all\s*$/i, '').trim();
-            return section;
-          }
-          return '';
-        }).catch(() => '');
+        const expandedPrompt = await this._expandAssetPromptDetails(page);
+        if (expandedPrompt) {
+          this.log(`[RECOVERY] Expanded prompt details via See all for tile ${i + 1}`);
+        }
+        const tilePrompt = await this._waitForAssetPromptText(page, {
+          minLength: Math.min(180, Math.max(30, submittedPrompt.length * 0.15)),
+          timeoutMs: 12000,
+          stableMs: 1800,
+        });
 
         if (!tilePrompt || tilePrompt.length < 20) {
           this.log(`[RECOVERY] No prompt text for tile ${i + 1} — skipping`);
@@ -5100,8 +5177,8 @@ class CinemaStudioAutomation {
         // Compare prompts using normalized similarity
         const similarity = this._promptSimilarity(submittedPrompt, tilePrompt);
         this.log(`[RECOVERY] Tile ${i + 1} similarity: ${similarity}% (need ≥${minSimilarity}%)`);
-        this.log(`[RECOVERY]   Submitted (first 80): "${submittedPrompt.slice(0, 80)}..."`);
-        this.log(`[RECOVERY]   Tile      (first 80): "${tilePrompt.slice(0, 80)}..."`);
+        this.log(`[RECOVERY]   Submitted (${submittedPrompt.length} chars, first 80): "${submittedPrompt.slice(0, 80)}..."`);
+        this.log(`[RECOVERY]   Tile      (${tilePrompt.length} chars, first 80): "${tilePrompt.slice(0, 80)}..."`);
 
         if (similarity < minSimilarity) {
           continue; // Not a match — try next tile

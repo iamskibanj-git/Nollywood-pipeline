@@ -7762,6 +7762,52 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         required_prop_count: scenePropContract.requiredProps.length,
         required_prop_names: scenePropContract.requiredProps.map(p => p.aliases?.[0] || p.prop),
       });
+      const parseScenePromptPayload = (raw) => {
+        if (!raw) return {};
+        if (typeof raw === 'object') return { ...raw };
+        if (typeof raw !== 'string') return {};
+        try {
+          const parsed = JSON.parse(raw);
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        } catch (_) {
+          return { legacy_prompt_used: raw };
+        }
+      };
+      const persistSubmittedScenePrompt = (submittedPrompt) => {
+        const exactPrompt = String(submittedPrompt || '').trim();
+        if (!sceneAsset || exactPrompt.length < 30) return;
+        try {
+          const freshAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+            .find(a => a.id === sceneAsset.id) || sceneAsset;
+          const payload = parseScenePromptPayload(freshAsset.prompt_used || visionBlockingJson);
+          payload.prompt = exactPrompt;
+          payload.prompt_source = 'cinema-studio-composer';
+          payload.prompt_captured_at = new Date().toISOString();
+          db.updateAssetPromptUsed(sceneAsset.id, payload);
+          this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: persisted exact submitted prompt for recovery (${exactPrompt.length} chars)`);
+        } catch (promptPersistErr) {
+          this.log(`[CINEMATIC] WARN: failed to persist exact submitted prompt for Ch${chapter} Sc${scene.scene_number}: ${promptPersistErr.message}`, 'warn');
+        }
+      };
+      const selectSceneImageRecoveryPrompt = (asset, inMemorySubmittedPrompt = '') => {
+        const raw = asset?.prompt_used;
+        const payload = parseScenePromptPayload(raw);
+        const storedExact = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+        if (storedExact.length > 50) {
+          return { prompt: storedExact, source: 'stored exact submitted prompt' };
+        }
+        const inMemoryExact = String(inMemorySubmittedPrompt || '').trim();
+        if (inMemoryExact.length > 50) {
+          return { prompt: inMemoryExact, source: 'current exact submitted prompt' };
+        }
+        if (typeof raw === 'string') {
+          const rawTrimmed = raw.trim();
+          if (rawTrimmed.length > 50 && !rawTrimmed.startsWith('{')) {
+            return { prompt: rawTrimmed, source: 'legacy raw prompt_used' };
+          }
+        }
+        return { prompt: visionBlockingJson, source: 'fallback vision blocking metadata' };
+      };
 
       // ── RETRY LOOP for scene image generation ──
       // Up to 3 attempts per scene. On failure: reset browser context and retry.
@@ -7769,10 +7815,40 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       // reference attachment flakes, etc. Same pattern as the video stage retry loop.
       const MAX_SCENE_RETRIES = 3;
       let sceneSuccess = false;
+      let deferSceneGenerationForRecovery = false;
+      if (sceneAsset && sceneAsset.status !== 'done' && sceneAsset.gen_clicked_at) {
+        const recoveryPromptInfo = selectSceneImageRecoveryPrompt(sceneAsset);
+        this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: prior Generate click detected (${sceneAsset.gen_clicked_at}) — attempting Asset Library recovery before any new Generate using ${recoveryPromptInfo.source} (${recoveryPromptInfo.prompt.length} chars)`, 'warn');
+        try {
+          const harvested = await cinema.attemptHarvestRecovery(recoveryPromptInfo.prompt, outputPath);
+          if (harvested) {
+            this.log(`[CINEMATIC] ✓ PRE-GENERATE RECOVERY succeeded for Ch${chapter} Sc${scene.scene_number} — no new credits burned`);
+            if (sceneAsset) db.markAssetDone(sceneAsset.id, outputPath, { model: 'cinematic-cameras', sourceGenId: harvested.sourceGenId });
+            sceneSuccess = true;
+          } else {
+            const priorError = String(sceneAsset.error_message || '').toLowerCase();
+            const recoveryOnly = sceneAsset.status === 'pending' ||
+              !priorError ||
+              priorError.includes('active-generation-timeout') ||
+              priorError.includes('[active-gen]');
+            if (recoveryOnly) {
+              deferSceneGenerationForRecovery = true;
+              this.log(`[CINEMATIC] Pre-generate recovery found no match for prior submitted Ch${chapter} Sc${scene.scene_number}; deferring instead of clicking Generate again`, 'warn');
+            } else {
+              this.log(`[CINEMATIC] Pre-generate recovery found no match for Ch${chapter} Sc${scene.scene_number} — proceeding to controlled retry`);
+            }
+          }
+        } catch (preRecoverErr) {
+          deferSceneGenerationForRecovery = true;
+          this.log(`[CINEMATIC] Pre-generate recovery failed for prior submitted Ch${chapter} Sc${scene.scene_number}: ${preRecoverErr.message}; deferring instead of clicking Generate again`, 'warn');
+        }
+      }
+      if (!sceneSuccess && !deferSceneGenerationForRecovery) {
       for (let attempt = 1; attempt <= MAX_SCENE_RETRIES; attempt++) {
         const attemptState = {
           generateClicked: false,
           creditCost: null,
+          submittedPrompt: '',
         };
         try {
           if (sceneAsset) db.markAssetGenerating(sceneAsset.id, visionBlockingJson);
@@ -7784,9 +7860,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             aspectRatio: this.state.aspectRatio || '16:9',
             projectName: this._titleInitials(this.state.selectedTitle || this.state.script?.title).toUpperCase(),
             propContract: scenePropContract,
-            onGenClicked: (creditCost) => {
+            onSubmittedPrompt: (submittedPrompt) => {
+              attemptState.submittedPrompt = submittedPrompt || '';
+              persistSubmittedScenePrompt(attemptState.submittedPrompt);
+            },
+            onGenClicked: (creditCost, submittedPrompt) => {
               attemptState.generateClicked = true;
               attemptState.creditCost = creditCost ?? null;
+              if (submittedPrompt && !attemptState.submittedPrompt) {
+                attemptState.submittedPrompt = submittedPrompt;
+                persistSubmittedScenePrompt(submittedPrompt);
+              }
               if (sceneAsset) db.markAssetGenClicked(sceneAsset.id, creditCost);
             },
           });
@@ -7932,18 +8016,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[CINEMATIC] Timeout on attempt ${attempt} happened before Generate proof — skipping Asset Library recovery and retrying setup cleanly`);
           }
           if (isActiveGenTimeout && !isPreGen && hasSubmittedProof) {
-            const blockingParts = [
-              blocking.notes || '',
-              blocking.frame_left || '',
-              blocking.frame_center || '',
-              blocking.frame_right || '',
-            ].filter(Boolean).join(' ');
-            const recoveryPrompt = blockingParts.length > 30 ? blockingParts : visionBlockingJson;
+            const recoveryPromptInfo = selectSceneImageRecoveryPrompt(freshSceneAsset, attemptState.submittedPrompt);
+            const recoveryPrompt = recoveryPromptInfo.prompt;
             const waitSteps = [30000, 60000, 90000, 120000, 120000, 120000, 120000, 120000];
             let waitedMs = 0;
             let recoveredFromActive = false;
 
             this.log(`[CINEMATIC] Active generation detected after Generate for Ch${chapter} Sc${scene.scene_number} — entering wait/harvest mode; no retry Generate will be clicked`, 'warn');
+            this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: using ${recoveryPromptInfo.source} for active-generation recovery matching (${recoveryPrompt.length} chars)`);
             for (let waitIdx = 0; waitIdx < waitSteps.length; waitIdx++) {
               const waitMs = waitSteps[waitIdx];
               waitedMs += waitMs;
@@ -7979,16 +8059,9 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[CINEMATIC] Timeout on attempt ${attempt} after ${proof} — waiting 30s then attempting harvest recovery before retry...`);
             await new Promise(r => setTimeout(r, 30000)); // let Higgsfield finish
             try {
-              // Build a recovery prompt from the blocking fields — these form the
-              // core of what gets typed into Higgsfield's prompt textbox.
-              // The prompt includes location, frame positions, and lighting notes.
-              const blockingParts = [
-                blocking.notes || '',
-                blocking.frame_left || '',
-                blocking.frame_center || '',
-                blocking.frame_right || '',
-              ].filter(Boolean).join(' ');
-              const recoveryPrompt = blockingParts.length > 30 ? blockingParts : visionBlockingJson;
+              const recoveryPromptInfo = selectSceneImageRecoveryPrompt(freshSceneAsset, attemptState.submittedPrompt);
+              const recoveryPrompt = recoveryPromptInfo.prompt;
+              this.log(`[CINEMATIC] Ch${chapter} Sc${scene.scene_number}: using ${recoveryPromptInfo.source} for harvest recovery matching (${recoveryPrompt.length} chars)`);
               const harvested = await cinema.attemptHarvestRecovery(recoveryPrompt, outputPath);
               if (harvested) {
                 this.log(`[CINEMATIC] ✓ HARVEST RECOVERY succeeded for Ch${chapter} Sc${scene.scene_number} — no re-generation needed`);
@@ -8019,6 +8092,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           }
         }
       } // end retry loop
+      }
 
       // ── CONTINUITY: track the output image for same-location continuity ──
       if (sceneSuccess && sceneLocHint) {
