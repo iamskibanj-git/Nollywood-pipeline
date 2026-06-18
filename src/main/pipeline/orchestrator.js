@@ -10705,8 +10705,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           }
 
           if (visible.exists) {
-            this.log(`[CINEMATIC] [ELEMENT-REPAIR] Deleting existing @${name} before recreation. Proof: ${(visible.proof?.text || '').slice(0, 180)}`);
-            await videoAutomation.deleteElementFromPicker(name);
+            this.log(`[CINEMATIC] [ELEMENT-REPAIR] Deleting existing not-eligible @${name} before recreation with View-modal name confirmation. Proof: ${(visible.proof?.text || '').slice(0, 180)}`);
+            await videoAutomation.deleteElementFromPicker(name, { requireNotEligible: true });
           } else {
             this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} is absent; recreating from local assets.`);
           }

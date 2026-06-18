@@ -3146,6 +3146,62 @@ class CinemaVideoAutomation extends KlingAutomation {
     return state;
   }
 
+  async _setElementsPickerSearch(value) {
+    const page = this.automation.page;
+    const text = String(value || '').trim().replace(/^@/, '');
+    const target = await page.evaluate(() => {
+      const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 40 && r.height > 16 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const inElementsDialog = (el) => {
+        for (let node = el; node; node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          if (r.width < 450 || r.height < 240) continue;
+          const text = clean(node.innerText || node.textContent || '');
+          if (/\bMy Elements\b/i.test(text) && /\bShow subfolders elements\b/i.test(text)) return true;
+          if (/\bUploads\b/i.test(text) && /\bElements\b/i.test(text) && /\bImage Generations\b/i.test(text)) return true;
+        }
+        return false;
+      };
+      const candidates = [...document.querySelectorAll('input, textarea, [contenteditable="true"]')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const label = clean([
+            el.getAttribute('placeholder'),
+            el.getAttribute('aria-label'),
+            el.getAttribute('title'),
+            el.innerText,
+            el.textContent,
+          ].filter(Boolean).join(' '));
+          const score = (/search/i.test(label) ? 60 : 0)
+            + (inElementsDialog(el) ? 50 : 0)
+            + (r.y < innerHeight * 0.42 ? 10 : 0)
+            + (r.x > innerWidth * 0.45 ? 10 : 0);
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), label, score };
+        })
+        .filter(o => o.score >= 60)
+        .sort((a, b) => b.score - a.score || b.x - a.x);
+      return candidates[0] || null;
+    }).catch(() => null);
+    if (!target) return false;
+    await page.mouse.click(target.x, target.y);
+    await page.keyboard.press('Control+A').catch(() => {});
+    await page.keyboard.press('Backspace').catch(() => {});
+    if (text) await page.keyboard.type(text, { delay: 8 });
+    await page.waitForTimeout(text ? 1400 : 700);
+    await this._scrollElementPicker('top').catch(() => null);
+    return true;
+  }
+
+  async _clearElementsPickerSearch() {
+    return this._setElementsPickerSearch('');
+  }
+
   async _reacquireElementCard(card) {
     const name = card?.target || card?.name;
     if (!name) return null;
@@ -3600,6 +3656,236 @@ class CinemaVideoAutomation extends KlingAutomation {
     }).catch(() => null);
   }
 
+  async _findOpenMenuItem(label) {
+    const page = this.automation.page;
+    return page.evaluate((menuLabel) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const wanted = clean(menuLabel).toLowerCase();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 14 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const inMenu = (el) => {
+        for (let node = el; node; node = node.parentElement) {
+          const role = node.getAttribute?.('role') || '';
+          const cls = String(node.className || '');
+          const ds = String(node.getAttribute?.('data-radix-popper-content-wrapper') || '');
+          if (/menu/i.test(role) || /popover|dropdown|menu/i.test(cls) || ds) return true;
+        }
+        return false;
+      };
+      const items = [...document.querySelectorAll('button, [role="menuitem"], [role="option"], div, span')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const role = el.getAttribute('role') || '';
+          const tag = String(el.tagName || '').toLowerCase();
+          const exact = text.toLowerCase() === wanted;
+          const score = (exact ? 80 : 0)
+            + (inMenu(el) ? 40 : 0)
+            + ((role === 'menuitem' || tag === 'button') ? 20 : 0)
+            - (/Get Unlimited|Seedance|Generate/i.test(text) ? 100 : 0);
+          return {
+            text,
+            x: Math.round(r.x + r.width / 2),
+            y: Math.round(r.y + r.height / 2),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            score,
+          };
+        })
+        .filter(o => o.text.toLowerCase() === wanted && o.score >= 80)
+        .sort((a, b) => b.score - a.score || a.y - b.y);
+      return items[0] || null;
+    }, label).catch(() => null);
+  }
+
+  async _readOpenElementDetailProof(name) {
+    const page = this.automation.page;
+    return page.evaluate((targetName) => {
+      const target = String(targetName || '').toLowerCase().replace(/^@/, '').trim();
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 120 && r.height > 80 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"], [data-state="open"], section, div')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const score = (/\bElement\b/i.test(text) ? 25 : 0)
+            + (/\bStatus\b/i.test(text) ? 25 : 0)
+            + (/\bType\b/i.test(text) ? 25 : 0)
+            + (/\bFolders\b/i.test(text) ? 20 : 0)
+            + (target && normalize(text).includes(target) ? 40 : 0)
+            + (r.width >= 650 && r.height >= 360 ? 15 : 0)
+            - (/\bMy Elements\b/i.test(text) && /\bShow subfolders elements\b/i.test(text) ? 30 : 0);
+          return { el, r, text, score };
+        })
+        .filter(o => o.score >= 70)
+        .sort((a, b) => b.score - a.score || (b.r.width * b.r.height) - (a.r.width * a.r.height));
+
+      const dialog = dialogs[0] || null;
+      if (!dialog) return { open: false, name: '', nameNormalized: '', status: '', text: '', source: 'not-found' };
+
+      const texts = [...dialog.el.querySelectorAll('h1, h2, h3, h4, button, div, span, p')]
+        .map(el => clean(el.innerText || el.textContent || ''))
+        .filter(Boolean);
+      let nameText = '';
+      if (target) {
+        const exact = texts.find(t => normalize(t) === target)
+          || texts.find(t => normalize(t).startsWith(`${target} `))
+          || texts.find(t => normalize(t).includes(` ${target} `));
+        if (exact) nameText = exact;
+      }
+      if (!nameText) {
+        const token = dialog.text.match(/@?[a-z0-9][a-z0-9.-]*(?:_[a-z0-9][a-z0-9.-]*){2,}/i);
+        if (token) nameText = token[0];
+      }
+      const statusMatch = dialog.text.match(/\bStatus\s+([A-Za-z][A-Za-z -]{1,30})\b/);
+      return {
+        open: true,
+        name: nameText,
+        nameNormalized: normalize(nameText),
+        status: statusMatch ? clean(statusMatch[1]) : '',
+        text: dialog.text.slice(0, 700),
+        source: 'element-detail',
+        rect: {
+          x: Math.round(dialog.r.x),
+          y: Math.round(dialog.r.y),
+          w: Math.round(dialog.r.width),
+          h: Math.round(dialog.r.height),
+        },
+      };
+    }, name).catch(() => ({ open: false, name: '', nameNormalized: '', status: '', text: '', source: 'read-error' }));
+  }
+
+  async _findOpenElementDetailButton(label) {
+    const page = this.automation.page;
+    return page.evaluate((buttonLabel) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const wanted = clean(buttonLabel).toLowerCase();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 16 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const detailDialogs = [...document.querySelectorAll('[role="dialog"], [data-state="open"], section, div')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const score = (/\bElement\b/i.test(text) ? 25 : 0)
+            + (/\bStatus\b/i.test(text) ? 25 : 0)
+            + (/\bType\b/i.test(text) ? 25 : 0)
+            + (/\bFolders\b/i.test(text) ? 20 : 0)
+            + (r.width >= 650 && r.height >= 360 ? 15 : 0)
+            - (/\bMy Elements\b/i.test(text) && /\bShow subfolders elements\b/i.test(text) ? 30 : 0);
+          return { el, r, text, score };
+        })
+        .filter(o => o.score >= 60)
+        .sort((a, b) => b.score - a.score || (b.r.width * b.r.height) - (a.r.width * a.r.height));
+      const dialog = detailDialogs[0]?.el || null;
+      if (!dialog) return null;
+      const dr = dialog.getBoundingClientRect();
+      const buttons = [...dialog.querySelectorAll('button, [role="button"], div, span')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const tag = String(el.tagName || '').toLowerCase();
+          const role = el.getAttribute('role') || '';
+          const exact = text.toLowerCase() === wanted;
+          const nearBottom = (r.y + r.height / 2) > dr.y + dr.height * 0.72;
+          const score = (exact ? 80 : 0)
+            + (nearBottom ? 35 : 0)
+            + ((tag === 'button' || role === 'button') ? 20 : 0);
+          return { text, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), score };
+        })
+        .filter(o => o.text.toLowerCase() === wanted && o.score >= 80)
+        .sort((a, b) => b.score - a.score || b.y - a.y);
+      return buttons[0] || null;
+    }, label).catch(() => null);
+  }
+
+  async _closeOpenElementDetail() {
+    const page = this.automation.page;
+    const close = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 12 && r.height > 12 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"], [data-state="open"], section, div')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const score = (/\bElement\b/i.test(text) ? 25 : 0)
+            + (/\bStatus\b/i.test(text) ? 25 : 0)
+            + (/\bType\b/i.test(text) ? 25 : 0)
+            + (r.width >= 650 && r.height >= 360 ? 15 : 0);
+          return { el, r, score };
+        })
+        .filter(o => o.score >= 60)
+        .sort((a, b) => b.score - a.score);
+      const dialog = dialogs[0];
+      if (!dialog) return null;
+      const buttons = [...dialog.el.querySelectorAll('button, [role="button"], svg, div, span')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const aria = clean(el.getAttribute?.('aria-label') || el.getAttribute?.('title') || '');
+          const cx = r.x + r.width / 2;
+          const cy = r.y + r.height / 2;
+          const topRight = cx > dialog.r.x + dialog.r.width * 0.88 && cy < dialog.r.y + dialog.r.height * 0.16;
+          const score = (topRight ? 70 : 0)
+            + (/close|dismiss/i.test(`${text} ${aria}`) ? 40 : 0)
+            + (r.width <= 60 && r.height <= 60 ? 20 : 0);
+          return { x: Math.round(cx), y: Math.round(cy), score };
+        })
+        .filter(o => o.score >= 80)
+        .sort((a, b) => b.score - a.score);
+      return buttons[0] || null;
+    }).catch(() => null);
+    if (close) {
+      await page.mouse.click(close.x, close.y);
+      await page.waitForTimeout(900);
+      return true;
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(600);
+    return false;
+  }
+
+  async _openElementDetailFromCard(name, card) {
+    const page = this.automation.page;
+    await this._hoverElementCardControls(card);
+    const menu = await this._findElementCardMenuButton(card);
+    if (!menu) throw new Error(`Could not find hover-revealed card menu button for @${String(name).replace(/^@/, '')}`);
+    this.log(`Opening element detail for @${String(name).replace(/^@/, '')} via card menu at (${menu.x}, ${menu.y})`);
+    await page.mouse.click(menu.x, menu.y);
+    await page.waitForTimeout(900);
+    const viewItem = await this._findOpenMenuItem('View');
+    if (!viewItem) throw new Error(`View menu item not found for @${String(name).replace(/^@/, '')}`);
+    await page.mouse.click(viewItem.x, viewItem.y);
+    await page.waitForTimeout(1500);
+    const detail = await this._readOpenElementDetailProof(name);
+    if (!detail.open) throw new Error(`Element detail modal did not open for @${String(name).replace(/^@/, '')}`);
+    return detail;
+  }
+
   async _confirmElementDeleteIfNeeded() {
     const page = this.automation.page;
     const confirm = await page.evaluate(() => {
@@ -3651,16 +3937,20 @@ class CinemaVideoAutomation extends KlingAutomation {
     return false;
   }
 
-  async deleteElementFromPicker(name) {
+  async deleteElementFromPicker(name, options = {}) {
     const normalized = String(name || '').trim().replace(/^@/, '');
     if (!normalized) throw new Error('deleteElementFromPicker: element name required');
+    const requireNotEligible = options.requireNotEligible !== false;
     const page = this.automation.page;
     this.invalidateElementEligibility(normalized);
     await this._closePickerAndReturnToComposer().catch(() => {});
     await this._ensureElementsPickerOpen();
+    const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
+    if (searchFiltered) this.log(`Filtered Elements picker to @${normalized} before delete confirmation`);
     const card = await this._waitForElementCard(normalized, 45000);
     if (!card) {
       this.log(`Element @${normalized} not visible for delete; treating as already absent`);
+      await this._clearElementsPickerSearch().catch(() => {});
       await this._closePickerAndReturnToComposer().catch(() => {});
       return { deleted: false, alreadyMissing: true, proof: null };
     }
@@ -3669,24 +3959,43 @@ class CinemaVideoAutomation extends KlingAutomation {
     await this._hoverElementCardControls(centeredCard);
     const proof = await this._snapshotElementCardProof(centeredCard).catch(() => ({}));
     const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
-    await this._hoverElementCardControls(centeredCard);
-    const menu = await this._findElementCardMenuButton(centeredCard);
-    if (!menu) throw new Error(`Could not find hover-revealed card menu button for @${normalized}`);
-    this.log(`Deleting element @${normalized} via card menu at (${menu.x}, ${menu.y})${proofText}`);
-    await page.mouse.click(menu.x, menu.y);
-    await page.waitForTimeout(900);
-    const deleteItem = await this._findOpenMenuDeleteItem();
-    if (!deleteItem) throw new Error(`Delete menu item not found for @${normalized}`);
-    await page.mouse.click(deleteItem.x, deleteItem.y);
+    const cardStatus = await this._readElementCardStatus(centeredCard, {
+      hoverMs: 1000,
+      useFallbackStatus: false,
+    }).catch(() => 'unknown');
+    if (requireNotEligible && cardStatus !== 'not-eligible') {
+      await this._clearElementsPickerSearch().catch(() => {});
+      await this._closePickerAndReturnToComposer().catch(() => {});
+      throw new Error(`Refusing to delete @${normalized}: card status is ${cardStatus || 'unknown'}, not not-eligible${proofText}`);
+    }
+
+    const detail = await this._openElementDetailFromCard(normalized, centeredCard);
+    if (detail.nameNormalized !== normalized.toLowerCase()) {
+      await this._closeOpenElementDetail().catch(() => {});
+      await this._clearElementsPickerSearch().catch(() => {});
+      await this._closePickerAndReturnToComposer().catch(() => {});
+      throw new Error(`Refusing to delete @${normalized}: View modal confirmed "${detail.name || detail.nameNormalized || 'unknown'}"`);
+    }
+
+    const deleteButton = await this._findOpenElementDetailButton('Delete');
+    if (!deleteButton) {
+      await this._closeOpenElementDetail().catch(() => {});
+      await this._clearElementsPickerSearch().catch(() => {});
+      await this._closePickerAndReturnToComposer().catch(() => {});
+      throw new Error(`Detail modal Delete button not found for @${normalized}`);
+    }
+    this.log(`Deleting element @${normalized} from confirmed detail modal (status=${cardStatus})${proofText}`);
+    await page.mouse.click(deleteButton.x, deleteButton.y);
     await page.waitForTimeout(1000);
     await this._confirmElementDeleteIfNeeded();
     await page.waitForTimeout(2500);
     await this._ensureElementsPickerOpen().catch(() => false);
     const gone = await this._waitForElementDeleted(normalized, 45000);
+    await this._clearElementsPickerSearch().catch(() => {});
     await this._closePickerAndReturnToComposer().catch(() => {});
     if (!gone) throw new Error(`Element @${normalized} was still visible after delete`);
     this.invalidateElementEligibility(normalized);
-    return { deleted: true, alreadyMissing: false, proof };
+    return { deleted: true, alreadyMissing: false, proof: { ...proof, cardStatus, detail } };
   }
 
   async isElementVisibleInPicker(name) {
