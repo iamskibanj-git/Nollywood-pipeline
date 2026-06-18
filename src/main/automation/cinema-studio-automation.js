@@ -55,6 +55,121 @@ function escapeRegexLiteral(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const CHARACTER_MARKER_RE = /\[\[HF_CHAR:([0-9a-f]+)\]\]/g;
+
+function makeCharacterMarker(name) {
+  return `[[HF_CHAR:${Buffer.from(String(name || ''), 'utf8').toString('hex')}]]`;
+}
+
+function decodeCharacterMarker(payload) {
+  try {
+    return Buffer.from(String(payload || ''), 'hex').toString('utf8');
+  } catch (_) {
+    return '';
+  }
+}
+
+function replaceCharacterMarkers(text, replacer) {
+  CHARACTER_MARKER_RE.lastIndex = 0;
+  return String(text || '').replace(CHARACTER_MARKER_RE, (_, payload) => {
+    const name = decodeCharacterMarker(payload);
+    return name ? replacer(name) : '';
+  });
+}
+
+function splitCharacterMarkedText(text) {
+  const parts = [];
+  let lastIndex = 0;
+  CHARACTER_MARKER_RE.lastIndex = 0;
+  let match;
+  while ((match = CHARACTER_MARKER_RE.exec(String(text || ''))) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(String(text || '').slice(lastIndex, match.index));
+    }
+    const name = decodeCharacterMarker(match[1]);
+    if (name) parts.push({ at: name });
+    lastIndex = match.index + match[0].length;
+  }
+  const source = String(text || '');
+  if (lastIndex < source.length) {
+    parts.push(source.slice(lastIndex));
+  }
+  return parts;
+}
+
+function normalizePromptSegments(segments) {
+  const normalized = [];
+  const nextMeaningfulSegment = (start) => {
+    for (let i = start; i < segments.length; i++) {
+      const seg = segments[i];
+      if (typeof seg === 'string' && seg.length === 0) continue;
+      return seg;
+    }
+    return null;
+  };
+  const pushText = (text) => {
+    if (!text) return;
+    const last = normalized[normalized.length - 1];
+    if (typeof last === 'string') {
+      normalized[normalized.length - 1] = last + text;
+    } else {
+      normalized.push(text);
+    }
+  };
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (typeof seg === 'string') {
+      let text = seg;
+      const prev = normalized[normalized.length - 1];
+      const next = nextMeaningfulSegment(i + 1);
+      if (next && typeof next === 'object' && next.at) {
+        text = text.replace(/@+\s*$/g, '');
+      }
+      if (prev && typeof prev === 'object' && prev.at) {
+        text = text.replace(/^@+/g, '');
+      }
+      pushText(text);
+    } else if (seg && seg.at) {
+      const cleanName = String(seg.at).replace(/^@+/, '').trim();
+      if (cleanName) normalized.push({ at: cleanName });
+    }
+  }
+  return normalized;
+}
+
+function validatePromptSegments(segments, expectedMentions = []) {
+  const expected = [...new Set((expectedMentions || [])
+    .map(name => String(name || '').toLowerCase().replace(/^@+/, '').trim())
+    .filter(Boolean))];
+  const issues = [];
+
+  for (const seg of segments || []) {
+    if (typeof seg !== 'string') continue;
+    if (seg.includes('@@')) {
+      issues.push(`raw marker delimiter in "${seg.slice(0, 80)}"`);
+    }
+    CHARACTER_MARKER_RE.lastIndex = 0;
+    if (CHARACTER_MARKER_RE.test(seg)) {
+      issues.push(`encoded marker leaked in "${seg.slice(0, 80)}"`);
+    }
+    for (const name of expected) {
+      const escaped = escapeRegexLiteral(name);
+      const rawAt = new RegExp(`(?<![a-z0-9_])@+${escaped}(?![a-z0-9_])`, 'i');
+      const bare = new RegExp(`(?<![a-z0-9_])${escaped}(?![a-z0-9_])`, 'i');
+      if (rawAt.test(seg)) {
+        issues.push(`raw @mention @${name} in "${seg.slice(0, 80)}"`);
+      } else if (bare.test(seg)) {
+        issues.push(`bare element name ${name} in "${seg.slice(0, 80)}"`);
+      }
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new Error(`[PRE-GEN] HARD GATE: Unsafe prompt segment construction (${issues.slice(0, 5).join('; ')}). No credits burned.`);
+  }
+}
+
 function normalizeCharacterAlias(value) {
   return String(value || '')
     .toLowerCase()
@@ -100,19 +215,19 @@ function replaceCharacterAliasesWithMarkers(text, aliasMap) {
     if (!alias || !canonical) continue;
     const escaped = escapeRegexLiteral(alias);
     const display = aliasDisplayText(alias);
-    out = out.replace(new RegExp(`(?<![a-z0-9_])@?${escaped}(?='s\\b)`, 'gi'), `@@${canonical}@@`);
-    out = out.replace(new RegExp(`(?<![a-z0-9_])@?${escaped}\\b`, 'gi'), `@@${canonical}@@`);
+    out = out.replace(new RegExp(`(?<![a-z0-9_])@?${escaped}(?='s\\b)`, 'gi'), makeCharacterMarker(canonical));
+    out = out.replace(new RegExp(`(?<![a-z0-9_])@?${escaped}\\b`, 'gi'), makeCharacterMarker(canonical));
     if (display && display !== alias) {
       const displayPattern = escapeRegexLiteral(display).replace(/\\ /g, '\\s+');
-      out = out.replace(new RegExp(`(?<![a-z0-9_])@?${displayPattern}(?='s\\b)`, 'gi'), `@@${canonical}@@`);
-      out = out.replace(new RegExp(`(?<![a-z0-9_])@?${displayPattern}\\b`, 'gi'), `@@${canonical}@@`);
+      out = out.replace(new RegExp(`(?<![a-z0-9_])@?${displayPattern}(?='s\\b)`, 'gi'), makeCharacterMarker(canonical));
+      out = out.replace(new RegExp(`(?<![a-z0-9_])@?${displayPattern}\\b`, 'gi'), makeCharacterMarker(canonical));
     }
   }
   return out;
 }
 
 function replaceCharacterAliasesWithAtText(text, aliasMap) {
-  return replaceCharacterAliasesWithMarkers(text, aliasMap).replace(/@@([^@]+)@@/g, '@$1');
+  return replaceCharacterMarkers(replaceCharacterAliasesWithMarkers(text, aliasMap), name => `@${name}`);
 }
 
 class CinemaStudioAutomation {
@@ -4424,13 +4539,11 @@ class CinemaStudioAutomation {
     if (cleanLighting.trim()) {
       let litText = cleanLighting;
       litText = replaceCharacterAliasesWithMarkers(litText, characterAliasMap);
-      // Split on markers
-      const litParts = litText.split(/@@([^@]+)@@/);
-      for (let li = 0; li < litParts.length; li++) {
-        if (li % 2 === 0) {
-          if (litParts[li]) segments.push(litParts[li]);
+      for (const part of splitCharacterMarkedText(litText)) {
+        if (typeof part === 'string') {
+          if (part) segments.push(part);
         } else {
-          segments.push({ at: litParts[li] });
+          segments.push(part);
         }
       }
     }
@@ -4448,14 +4561,12 @@ class CinemaStudioAutomation {
         let text = replaceCharacterAliasesWithMarkers(segments[si], characterAliasMap);
         if (text === segments[si]) continue;
 
-        // Split on @@markers@@ into alternating [text, name, text, name, ...]
-        const parts = text.split(/@@([^@]+)@@/);
         const replacement = [];
-        for (let pi = 0; pi < parts.length; pi++) {
-          if (pi % 2 === 0) {
-            if (parts[pi]) replacement.push(parts[pi]);
+        for (const part of splitCharacterMarkedText(text)) {
+          if (typeof part === 'string') {
+            if (part) replacement.push(part);
           } else {
-            replacement.push({ at: parts[pi] });
+            replacement.push(part);
             fixCount++;
           }
         }
@@ -4471,6 +4582,17 @@ class CinemaStudioAutomation {
         this.log(`[PRE-GEN GATE] PASSED — all character names already properly tagged`);
       }
     }
+
+    const expectedSegmentMentions = [...new Set(segments
+      .filter(seg => seg && typeof seg === 'object' && seg.at)
+      .map(seg => String(seg.at).toLowerCase().replace(/^@+/, '')))];
+    const normalizedSegments = normalizePromptSegments(segments);
+    if (JSON.stringify(normalizedSegments) !== JSON.stringify(segments)) {
+      this.log('[PRE-GEN GATE] Normalized prompt segment boundaries before typing');
+      this.log(`[PRE-GEN GATE] Normalized segments: ${JSON.stringify(normalizedSegments, null, 2).substring(0, 2000)}`);
+    }
+    validatePromptSegments(normalizedSegments, expectedSegmentMentions);
+    segments.splice(0, segments.length, ...normalizedSegments);
 
     this.log('[PROMPT] Waiting for reference/tool state to settle before typing prompt...');
     await page.waitForTimeout(2500);
@@ -5402,4 +5524,14 @@ class CinemaStudioAutomation {
   }
 }
 
-module.exports = { CinemaStudioAutomation };
+module.exports = {
+  CinemaStudioAutomation,
+  _test: {
+    buildCharacterAliasMap,
+    replaceCharacterAliasesWithMarkers,
+    replaceCharacterAliasesWithAtText,
+    splitCharacterMarkedText,
+    normalizePromptSegments,
+    validatePromptSegments,
+  },
+};
