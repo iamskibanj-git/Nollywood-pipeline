@@ -45,6 +45,7 @@ const KLING_CREDITS_PER_PORTRAIT = 2; // ~2 credits per character portrait grid
 const MAX_PORTRAIT_PROVIDER_MISS_RETRIES = 2;
 const TEMP_SKIP_CINEMA35_PROMPT_PREVIEW = true;
 const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = false;
+const CONTINUE_OVERLAY_CLEARANCE_MS = 60_000;
 
 function sanitizeCinemaVideoPrompt(prompt) {
   if (!prompt) return { prompt, removedCount: 0, markers: [] };
@@ -2419,13 +2420,14 @@ class PipelineOrchestrator {
                 elementsAutoApproved = true;
               } else {
                 elemChecker.invalidateCache();
-                const existing = await elemChecker.listExistingElements();
-                const normalizeElementName = (value) => (value || '').toLowerCase().trim().replace(/^@+/, '').replace(/^use(?=[a-z0-9_-])/, '');
-                const existingLower = new Set(existing.map(e => normalizeElementName(e.name)));
-                const missing = expectedNames.filter(name => !existingLower.has(normalizeElementName(name)));
+                const elementCheck = await elemChecker.confirmExistingElements(expectedNames, {
+                  timeoutMs: 60000,
+                  label: 'Post-setup Elements modal dependency proof',
+                });
+                const missing = elementCheck.missing;
 
                 if (missing.length === 0) {
-                  this.log(`[CINEMATIC] ? All ${expectedNames.length} elements verified in Higgsfield ? auto-approving`);
+                  this.log(`[CINEMATIC] ? All ${expectedNames.length} elements verified in Higgsfield after ${Math.round(elementCheck.elapsedMs / 1000)}s ? auto-approving`);
                   elementsAutoApproved = true;
                 } else {
                   this.log(`[CINEMATIC] ${missing.length}/${expectedNames.length} elements missing: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '...' : ''}`, 'warn');
@@ -4131,6 +4133,7 @@ class PipelineOrchestrator {
             // Navigate to project; setup existence checks use the project Elements modal.
             const titleInitials = this._titleInitials(this.state.selectedTitle || this.state.script?.title);
             await verifyCinema.ensureProject(titleInitials.toUpperCase());
+            await this._holdForOverlayClearance('restored Higgsfield project context before restored element verification');
             await verifyCinema._ensureCinemaStudioActive();
 
             // Get the unique suffixed element names (not base names, not char IDs)
@@ -4139,34 +4142,27 @@ class PipelineOrchestrator {
 
             const persistedModalProof = this._getValidCinematicElementModalProof(projectId, storedNames);
             if (persistedModalProof) {
-              this.log(`[CINEMATIC] Valid persisted Elements modal proof found (${persistedModalProof.count}/${storedNames.length}, ${persistedModalProof.verifiedAt}) - skipping setup verification`);
+              this.log(`[CINEMATIC] Valid persisted Elements modal proof found (${persistedModalProof.count}/${storedNames.length}, ${persistedModalProof.verifiedAt}) - running live dependency check anyway`);
+            }
+            const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+            const elements = new HiggsfieldElements({
+              automation: this.automation,
+              logger: (m) => this.log(`[CINEMATIC] ${m}`),
+              projectId: this.state.higgsfield_project_id,
+            });
+            elements.invalidateCache();
+            const elementCheck = await elements.confirmExistingElements(storedNames, {
+              timeoutMs: 60000,
+              label: 'Restored Elements modal dependency proof',
+            });
+            if (elementCheck.missing.length === 0) {
+              this._persistCinematicElementModalProof(projectId, storedNames, 'project-elements-modal-resume');
+              this.log(`[CINEMATIC] Project Elements modal confirmed all ${storedNames.length} elements after ${Math.round(elementCheck.elapsedMs / 1000)}s - skipping element setup`);
               verificationPassed = true;
             } else {
-              const elementCheck = await (async () => {
-                const { HiggsfieldElements } = require('../automation/higgsfield-elements');
-                const elements = new HiggsfieldElements({
-                  automation: this.automation,
-                  logger: (m) => this.log(`[CINEMATIC] ${m}`),
-                  projectId: this.state.higgsfield_project_id,
-                });
-                elements.invalidateCache();
-                const current = await elements.listExistingElements();
-                const normalize = (value) => String(value || '').trim().toLowerCase().replace(/^@+/, '').replace(/^use(?=[a-z0-9_-])/, '');
-                const currentSet = new Set(current.map(e => normalize(e.name)).filter(Boolean));
-                const missing = storedNames.filter(name => !currentSet.has(normalize(name)));
-                if (missing.length === 0) {
-                  this._persistCinematicElementModalProof(projectId, storedNames, 'project-elements-modal-resume');
-                }
-                return { missing };
-              })();
-              if (elementCheck.missing.length === 0) {
-                this.log(`[CINEMATIC] Project Elements modal confirmed all ${storedNames.length} elements - skipping element setup`);
-                verificationPassed = true;
-              } else {
-                this.log(`[CINEMATIC] Project Elements modal missing ${elementCheck.missing.length} element(s): ${elementCheck.missing.map(n => '@' + n).join(', ')} - re-running element setup`);
-                this.state.cinematicElementNames = null;
-                // restoredSuffix preserved for consistent naming
-              }
+              this.log(`[CINEMATIC] Project Elements modal missing ${elementCheck.missing.length} element(s): ${elementCheck.missing.map(n => '@' + n).join(', ')} - re-running element setup`);
+              this.state.cinematicElementNames = null;
+              // restoredSuffix preserved for consistent naming
             }
           } catch (verifyErr) {
             this.log(`[CINEMATIC] Verification failed: ${verifyErr.message.split('\n')[0]} — re-running element setup to be safe`, 'warn');
@@ -4518,6 +4514,7 @@ class PipelineOrchestrator {
       if (!currentUrl.includes(cinemaStudio._projectId)) {
         throw new Error(`[PROJECT GATE] Wrong Cinema Studio project URL before element checks: ${currentUrl}`);
       }
+      await this._holdForOverlayClearance('Higgsfield project page visible before element checks');
 
       await cinemaStudio._ensureCinemaStudioActive();
       const setupOk = await cinemaStudio._setupToolbarSequence('16:9');
@@ -4750,15 +4747,16 @@ class PipelineOrchestrator {
       .replace(/^use(?=[a-z0-9_-])/, '');
 
     const verifyElementsViaModal = async (expectedNames, label = 'Elements modal proof') => {
-      await new Promise(r => setTimeout(r, 2000));
       elements.invalidateCache();
-      const current = await elements.listExistingElements();
-      const currentSet = new Set(current.map(e => normalizeElementName(e.name)).filter(Boolean));
-      const missing = expectedNames.filter(name => !currentSet.has(normalizeElementName(name)));
-      const existing = expectedNames.filter(name => currentSet.has(normalizeElementName(name)));
+      const proof = await elements.confirmExistingElements(expectedNames, {
+        timeoutMs: 60000,
+        label,
+      });
+      const missing = proof.missing;
+      const existing = proof.existing;
       this._lastMissingElements = missing;
       this.log(`[CINEMATIC] ${label}: ${existing.length}/${expectedNames.length} present, ${missing.length} missing via project Elements modal${missing.length ? ` (${missing.slice(0, 5).map(n => '@' + n).join(', ')}${missing.length > 5 ? '...' : ''})` : ''}`);
-      return { existing, missing, current };
+      return { existing, missing, current: proof.elements, proof };
     };
 
     const allElementNames = pending.map(p => p.name);
@@ -7458,6 +7456,19 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     });
     // Pass element name map so scene prompt can translate @character_N → @element_name
     cinema._elemMap = this.state.cinematicElementNames || {};
+
+    try {
+      await this.automation.ensureBrowser();
+      const projectUrl = `https://higgsfield.ai/generate?projectId=${this.state.higgsfield_project_id}`;
+      if (!this.automation.page.url().includes(this.state.higgsfield_project_id)) {
+        this.log(`[CINEMATIC] Navigating to persisted project URL before scene generation: ${projectUrl}`);
+        await this.automation.page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+      await this.automation.page.waitForTimeout(2500);
+      await this._holdForOverlayClearance('scene image stage project context before scene generation');
+    } catch (freshContextErr) {
+      this.log(`[CINEMATIC] Scene-stage fresh context overlay clearance warning: ${freshContextErr.message.split('\n')[0]}`, 'warn');
+    }
 
     const sceneDir = path.join(projectDir, 'assets', 'scenes');
     fs.mkdirSync(sceneDir, { recursive: true });
@@ -10923,6 +10934,40 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     });
   }
 
+  async _holdForOverlayClearance(reason) {
+    if (this.cancelled) return;
+    const seconds = Math.round(CONTINUE_OVERLAY_CLEARANCE_MS / 1000);
+    this.log(`[HIGGSFIELD] Holding pipeline for ${seconds}s after ${reason}; clearing overlays during hold`);
+
+    const startedAt = Date.now();
+    let sweeper = null;
+    if (this.automation?.page && !this.automation.page.isClosed?.()) {
+      try {
+        const { CinemaVideoAutomation } = require('../automation/cinema-video-automation');
+        sweeper = new CinemaVideoAutomation({
+          automation: this.automation,
+          logger: (m, level) => this.log(`[OVERLAY-HOLD] ${m}`, level),
+          projectId: this.state.higgsfield_project_id || null,
+        });
+      } catch (e) {
+        this.log(`[HIGGSFIELD] Overlay hold sweeper unavailable: ${e.message}`, 'warn');
+      }
+    }
+
+    while (!this.cancelled && Date.now() - startedAt < CONTINUE_OVERLAY_CLEARANCE_MS) {
+      if (sweeper) {
+        try {
+          await sweeper._dismissSeedanceAndAIDirectorOverlays('[OVERLAY-HOLD]');
+        } catch (e) {
+          this.log(`[HIGGSFIELD] Overlay hold sweep still blocked: ${e.message.split('\n')[0]}`, 'warn');
+        }
+      }
+      const remainingMs = CONTINUE_OVERLAY_CLEARANCE_MS - (Date.now() - startedAt);
+      if (remainingMs <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(5000, remainingMs)));
+    }
+  }
+
   approveResearch(selections = {}) {
     // Merge user's theme selections into the brief
     // Nationality/accent are baked in (always Nigerian), tone/setting are research-derived
@@ -11103,10 +11148,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
       try {
         elements.invalidateCache();
-        const current = await elements.listExistingElements();
-        const missing = pending.filter(p => !current.some(e =>
-          e.name && e.name.toLowerCase().replace(/^@+/, '') === p.name.toLowerCase()
-        ));
+        const proof = await elements.confirmExistingElements(pending.map(p => p.name), {
+          timeoutMs: 60000,
+          label: `Auto-poll ${i + 1} Elements modal dependency proof`,
+        });
+        const missing = pending.filter(p => proof.missing.some(name => name.toLowerCase() === p.name.toLowerCase()));
 
         if (missing.length === 0) {
           this.log(`[CINEMATIC] Auto-poll: all ${pending.length} elements now exist — auto-continuing`);

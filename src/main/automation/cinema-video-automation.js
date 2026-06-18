@@ -2643,8 +2643,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     await this._ensureElementsPickerOpen();
     const dismissedOverlay = await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
     if (dismissedOverlay) {
-      this.log(`Closed blocking Seedance/AI Director overlay before checking @${name}; reopening Elements picker if needed`);
-      await page.waitForTimeout(1000);
+      this.log(`Closed blocking overlay before checking @${name}; reopening Elements picker if needed`);
       if (!(await this._isElementsPickerOpen())) {
         await this._ensureElementsPickerOpen();
       }

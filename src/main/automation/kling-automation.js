@@ -1892,6 +1892,59 @@ class KlingAutomation {
           };
         }
 
+        const seedanceCards = containers
+          .filter(o => o.seedance)
+          .sort((a, b) => (a.r.width * a.r.height) - (b.r.width * b.r.height));
+        for (const card of seedanceCards) {
+          const closeCandidates = [...document.querySelectorAll('button, [role="button"], [aria-label], svg')]
+            .filter(visible)
+            .map(btn => {
+              const br = btn.getBoundingClientRect();
+              const btnText = clean(btn.innerText || btn.textContent || '');
+              const aria = clean(btn.getAttribute?.('aria-label') || '');
+              const cls = String(btn.getAttribute?.('class') || '').toLowerCase();
+              const centerX = br.left + br.width / 2;
+              const centerY = br.top + br.height / 2;
+              const closeChar = btnText.length === 1 && ['x', 'X'].includes(btnText)
+                || btnText.length === 1 && [215, 10005, 10006, 10799].includes(btnText.charCodeAt(0));
+              const explicitClose = closeChar || /close|dismiss/i.test(aria) || /close|dismiss/i.test(cls);
+              const inCardTopRight =
+                centerX >= card.r.left + card.r.width * 0.60 &&
+                centerX <= card.r.right + 24 &&
+                centerY >= card.r.top - 24 &&
+                centerY <= card.r.top + card.r.height * 0.28;
+              return {
+                x: centerX,
+                y: centerY,
+                w: br.width,
+                h: br.height,
+                text: btnText,
+                aria,
+                explicitClose,
+                inCardTopRight,
+                small: br.width >= 12 && br.height >= 12 && br.width <= 80 && br.height <= 80,
+                hasSvg: btn.tagName.toLowerCase() === 'svg' || !!btn.querySelector?.('svg, path'),
+                cta: ctaRe.test(`${btnText} ${aria}`),
+              };
+            })
+            .filter(c => !c.cta && c.small && c.inCardTopRight && (c.explicitClose || c.hasSvg))
+            .sort((a, b) => {
+              if (a.explicitClose !== b.explicitClose) return Number(b.explicitClose) - Number(a.explicitClose);
+              return (a.w * a.h) - (b.w * b.h);
+            });
+          const close = closeCandidates[0];
+          if (!close) continue;
+          return {
+            x: Math.round(close.x),
+            y: Math.round(close.y),
+            kind: 'seedance',
+            text: card.text.slice(0, 180),
+            closeText: close.text,
+            closeAria: close.aria,
+            box: { x: Math.round(card.r.x), y: Math.round(card.r.y), w: Math.round(card.r.width), h: Math.round(card.r.height) },
+          };
+        }
+
         const chatClose = [...document.querySelectorAll('button, [role="button"], [aria-label]')]
           .filter(visible)
           .map(btn => {

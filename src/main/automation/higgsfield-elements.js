@@ -804,6 +804,240 @@ class HiggsfieldElements {
     return normalizedElements;
   }
 
+  async confirmExistingElements(expectedNames, options = {}) {
+    const page = this.automation.page;
+    const expectedByName = new Map();
+    for (const name of expectedNames || []) {
+      const item = {
+        original: String(name || '').trim().replace(/^@+/, ''),
+        normalized: this._normalizeName(name),
+      };
+      if (item.normalized && !expectedByName.has(item.normalized)) {
+        expectedByName.set(item.normalized, item);
+      }
+    }
+    const expected = [...expectedByName.values()];
+    const timeoutMs = Math.max(1000, options.timeoutMs || 60000);
+    const label = options.label || 'Element existence confirmation';
+    const startedAt = Date.now();
+    const foundByName = new Map();
+    const scrollPositions = new Set();
+    let attempts = 0;
+    let sawBottom = false;
+
+    try {
+      await this._openElementsModal();
+    } catch (e) {
+      this.log(`${label}: could not open Elements modal (${e.message})`);
+      return {
+        ok: false,
+        elements: [],
+        existing: [],
+        missing: expected.map(item => item.original),
+        attempts,
+        elapsedMs: Date.now() - startedAt,
+        scannedCount: 0,
+        reason: e.message,
+      };
+    }
+
+    await page.waitForTimeout(1000);
+    await this._scrollElementsModalList('top').catch(() => null);
+    this.log(`${label}: polling up to ${Math.round(timeoutMs / 1000)}s for ${expected.length} expected element(s)`);
+
+    try {
+      while (Date.now() - startedAt < timeoutMs) {
+        attempts++;
+        const visibleElements = await this._scrapeVisibleElementsFromOpenModal();
+        for (const element of visibleElements) {
+          const normalized = this._normalizeName(element.name);
+          if (!normalized || foundByName.has(normalized)) continue;
+          foundByName.set(normalized, element);
+        }
+
+        const foundSet = new Set(foundByName.keys());
+        const existing = expected.filter(item => foundSet.has(item.normalized)).map(item => item.original);
+        const missing = expected.filter(item => !foundSet.has(item.normalized)).map(item => item.original);
+        if (missing.length === 0) {
+          this.log(`${label}: confirmed ${existing.length}/${expected.length} element(s) after ${attempts} scan(s), ${scrollPositions.size || 1} scroll position(s)`);
+          break;
+        }
+
+        if (attempts === 1 || attempts % 5 === 0) {
+          this.log(`${label}: scanned ${foundByName.size} unique name(s), ${missing.length} missing after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+        }
+
+        const scroll = await this._scrollElementsModalList('next').catch(() => null);
+        if (scroll) {
+          scrollPositions.add(`${scroll.scrollTop}/${scroll.scrollHeight}`);
+          sawBottom = sawBottom || !!scroll.atBottom;
+        }
+        if (scroll?.atBottom) {
+          await page.waitForTimeout(1000);
+          await this._scrollElementsModalList('top').catch(() => null);
+        } else {
+          await page.waitForTimeout(1000);
+        }
+      }
+    } finally {
+      await this._scrollElementsModalList('top').catch(() => null);
+      await this._closeElementsModal();
+    }
+
+    const elements = [...foundByName.values()];
+    const foundSet = new Set(foundByName.keys());
+    const existing = expected.filter(item => foundSet.has(item.normalized)).map(item => item.original);
+    const missing = expected.filter(item => !foundSet.has(item.normalized)).map(item => item.original);
+    this._cache = elements;
+    this.log(`${label}: ${existing.length}/${expected.length} present, ${missing.length} missing after ${Math.round((Date.now() - startedAt) / 1000)}s; scanned ${elements.length} element name(s)`);
+    return {
+      ok: missing.length === 0,
+      elements,
+      existing,
+      missing,
+      attempts,
+      elapsedMs: Date.now() - startedAt,
+      scannedCount: elements.length,
+      scrollPositions: scrollPositions.size || (attempts > 0 ? 1 : 0),
+      sawBottom,
+    };
+  }
+
+  async _scrapeVisibleElementsFromOpenModal() {
+    const page = this.automation.page;
+    const rawElements = await page.evaluate(() => {
+      const results = [];
+      const seen = new Set();
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 20 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const addName = (name, category = 'unknown') => {
+        const trimmed = clean(name);
+        if (!trimmed || trimmed.length < 2 || trimmed.length > 90) return;
+        const key = trimmed.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        results.push({ name: trimmed, category });
+      };
+      const containers = [
+        ...document.querySelectorAll('[role="dialog"]'),
+        ...document.querySelectorAll('[data-state="open"]'),
+        ...document.querySelectorAll('[class*="modal"], [class*="overlay"], [class*="popover"], [class*="Dialog"], [class*="Sheet"]'),
+      ].filter(visible);
+      const searchContexts = containers.length > 0 ? containers : [document.body];
+      const skipExact = new Set([
+        'Create Element', 'Browse all elements', 'Add to Element', 'Uploads', 'Image Generations',
+        'Liked', 'Auto', 'Character', 'Location', 'Prop', 'Save', 'Cancel', 'All', 'Pinned',
+        'Characters', 'Locations', 'Props', 'Elements', 'X', 'Search',
+      ]);
+
+      for (const container of searchContexts) {
+        const nodes = container.querySelectorAll('button, [role="button"], div[tabindex], figure, article, li');
+        for (const node of nodes) {
+          if (!visible(node)) continue;
+          const text = clean(node.innerText || node.textContent || '');
+          if (!text || text === '+' || text.includes('Create new') || text.includes('New Element') || skipExact.has(text)) continue;
+          const hasMedia = !!node.querySelector('img, video, canvas, svg');
+          const lines = text.split('\n').map(line => clean(line)).filter(Boolean);
+          if (hasMedia && lines.length) {
+            for (const line of lines.slice(-3)) {
+              if (skipExact.has(line) || /upload|advanced settings|show subfolders|filter/i.test(line)) continue;
+              if (/^@?[A-Za-z0-9_-]{2,80}(?:\s+(Character|Location|Prop))?$/i.test(line)) addName(line);
+            }
+          }
+        }
+
+        for (const img of container.querySelectorAll('img')) {
+          if (!visible(img)) continue;
+          let parent = img.parentElement;
+          for (let depth = 0; depth < 5 && parent; depth++) {
+            const text = clean(parent.innerText || parent.textContent || '');
+            const lines = text.split('\n').map(line => clean(line)).filter(Boolean);
+            for (const line of lines) {
+              if (skipExact.has(line) || /create new|new element|upload|advanced settings|filter/i.test(line)) continue;
+              if (/^@?[A-Za-z0-9_-]{2,80}(?:\s+(Character|Location|Prop))?$/i.test(line)) addName(line);
+            }
+            parent = parent.parentElement;
+          }
+        }
+
+        const text = container.innerText || container.textContent || '';
+        for (const match of text.matchAll(/@([A-Za-z0-9_-]+?)(?:Character|Location|Prop|Use|\s|$)/g)) {
+          addName(match[1]);
+        }
+      }
+      return results;
+    }).catch(e => {
+      console.error('Element confirmation scrape failed:', e);
+      return [];
+    });
+
+    const normalizedSeen = new Set();
+    return rawElements
+      .map(e => {
+        const normalizedName = this._normalizeScrapedElementName(e.name);
+        return normalizedName ? { ...e, name: normalizedName, rawName: e.name } : null;
+      })
+      .filter(e => {
+        if (!e || [
+          'check eligibility',
+          'create element',
+          'browse all elements',
+          'add to element',
+          'new element',
+        ].includes(e.name)) return false;
+        if (normalizedSeen.has(e.name)) return false;
+        normalizedSeen.add(e.name);
+        return true;
+      });
+  }
+
+  async _scrollElementsModalList(action = 'next') {
+    const page = this.automation.page;
+    const state = await page.evaluate((scrollAction) => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        if (!el || el === document.body || el === document.documentElement) return false;
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 140 && r.height > 140 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const candidates = [...document.querySelectorAll('div, section, main, [role="dialog"], [data-radix-scroll-area-viewport]')]
+        .filter(el => visible(el) && el.scrollHeight > el.clientHeight + 40)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const score = (/(My Elements|All Pinned|Show subfolders elements|Check eligibility|New Element|Character|Location|Prop)/i.test(text) ? 10 : 0)
+            + (r.width > 450 && r.height > 250 ? 5 : 0)
+            + Math.min(5, Math.floor((el.scrollHeight - el.clientHeight) / 250));
+          return { el, r, score };
+        })
+        .filter(item => item.score >= 10)
+        .sort((a, b) => b.score - a.score || (b.r.width * b.r.height) - (a.r.width * a.r.height));
+      const target = candidates[0]?.el;
+      if (!target) return null;
+      if (scrollAction === 'top') {
+        target.scrollTop = 0;
+      } else {
+        const step = Math.max(180, Math.floor(target.clientHeight * 0.72));
+        target.scrollTop = Math.min(target.scrollHeight - target.clientHeight, target.scrollTop + step);
+      }
+      return {
+        scrollTop: Math.round(target.scrollTop),
+        clientHeight: Math.round(target.clientHeight),
+        scrollHeight: Math.round(target.scrollHeight),
+        atBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 8,
+      };
+    }, action).catch(() => null);
+    await page.waitForTimeout(500);
+    return state;
+  }
+
   // ───────────────────────────────────────────────────────────────────
   //  Category Map
   // ───────────────────────────────────────────────────────────────────

@@ -3231,7 +3231,36 @@ class CinemaStudioAutomation {
     // ── Step 1: Find the + button ─────────────────────────────────────
     this.log('[REF] Finding + button for reference picker...');
 
-    const plusResult = await page.evaluate(() => {
+    const badPlusCandidateKeys = new Set();
+    let pickerState = null;
+    let openedPlusCandidate = null;
+    const restorePlusCandidates = async () => {
+      await page.evaluate(() => {
+        document.querySelectorAll('[data-cs-btn-hidden]').forEach(el => {
+          el.style.removeProperty('pointer-events');
+          el.removeAttribute('data-cs-btn-hidden');
+        });
+      }).catch(() => {});
+    };
+
+    const readPostClickState = async () => page.evaluate(() => {
+      const popovers = document.querySelectorAll(
+        '[data-radix-popper-content-wrapper], [role="dialog"], [role="listbox"], ' +
+        '[class*="popover" i], [class*="modal" i], [class*="picker" i], ' +
+        '[class*="panel" i], [class*="dropdown" i], [class*="overlay" i]'
+      );
+      const popoverInfo = [...popovers].filter(p => p.getBoundingClientRect().width > 0).map(p => {
+        const r = p.getBoundingClientRect();
+        return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), text: (p.textContent || '').slice(0, 80) };
+      });
+      const tabs = [...document.querySelectorAll('[role="tab"]')].filter(t => t.getBoundingClientRect().width > 0).map(t => ({
+        text: (t.textContent || '').slice(0, 30), x: Math.round(t.getBoundingClientRect().x)
+      }));
+      return { popovers: popoverInfo.slice(0, 5), tabs: tabs.slice(0, 10) };
+    }).catch(e => ({ error: e.message }));
+
+    for (let round = 1; round <= 8; round++) {
+      const plusSearch = await page.evaluate((badKeys) => {
       // Clean up any leftover state from previous attempts
       document.querySelectorAll('[data-cs-btn-hidden]').forEach(el => {
         el.style.removeProperty('pointer-events');
@@ -3263,14 +3292,17 @@ class CinemaStudioAutomation {
       if (!tb) return { ok: false, reason: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
       const tbLeftEdge = tbRect.x + 15;
+      const candidateKey = (r) => `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`;
 
       // Find ALL small no-text SVG buttons to the left of the textbox
       // (the + button candidates from both toolbars)
       const allCandidates = [];
       for (const b of document.querySelectorAll('button')) {
         const r = b.getBoundingClientRect();
+        const key = candidateKey(r);
+        if (badKeys.includes(key)) continue;
         if (r.width > 0 && r.width <= 60 && r.height <= 60 &&
-            r.x <= tbLeftEdge && !b.textContent?.trim() && b.querySelector('svg') &&
+            r.x <= tbLeftEdge + 110 && r.x + r.width >= tbRect.x - 170 && !b.textContent?.trim() && b.querySelector('svg') &&
             r.y > window.innerHeight * 0.40) {
           // Determine ancestor proximity to the textbox
           let depth = 0;
@@ -3280,7 +3312,12 @@ class CinemaStudioAutomation {
             ancestor = ancestor.parentElement;
             depth++;
           }
-          allCandidates.push({ btn: b, depth, r });
+          const cx = r.x + r.width / 2;
+          const cy = r.y + r.height / 2;
+          const verticalDistance = Math.abs(cy - (tbRect.y + tbRect.height * 0.70));
+          const leftDistance = Math.abs(cx - Math.max(tbRect.x - 40, 0));
+          const score = (depth * 1000) + leftDistance + (verticalDistance * 0.35);
+          allCandidates.push({ btn: b, depth, r, key, score: Math.round(score) });
         }
       }
 
@@ -3289,7 +3326,7 @@ class CinemaStudioAutomation {
       }
 
       // The correct button has the SMALLEST ancestor depth with the textbox
-      allCandidates.sort((a, b) => a.depth - b.depth);
+      allCandidates.sort((a, b) => a.score - b.score);
       const correct = allCandidates[0];
 
       // Disable pointer-events on ALL other candidates so they can't intercept
@@ -3306,66 +3343,63 @@ class CinemaStudioAutomation {
         ok: true,
         x: Math.round(cx),
         y: Math.round(cy),
+        key: correct.key,
         w: Math.round(correct.r.width),
         depth: correct.depth,
+        score: correct.score,
         totalCandidates: allCandidates.length,
+        candidates: allCandidates.slice(0, 8).map(c => ({
+          key: c.key,
+          x: Math.round(c.r.x + c.r.width / 2),
+          y: Math.round(c.r.y + c.r.height / 2),
+          depth: c.depth,
+          score: c.score,
+        })),
         duplicatesDisabled,
       };
-    }).catch(e => ({ ok: false, reason: `evaluate error: ${e.message}` }));
+    }, [...badPlusCandidateKeys]).catch(e => ({ ok: false, reason: `evaluate error: ${e.message}` }));
 
-    this.log(`[REF] + button search: ${JSON.stringify(plusResult)}`);
+      this.log(`[REF] + button search round ${round}: ${JSON.stringify(plusSearch)}`);
 
-    if (!plusResult.ok) {
-      throw new Error(`HARD STOP: Could not find reference picker + button (${plusResult.reason})`);
-    }
+      if (!plusSearch.ok) {
+        await restorePlusCandidates();
+        if (badPlusCandidateKeys.size > 0) break;
+        throw new Error(`HARD STOP: Could not find reference picker + button (${plusSearch.reason})`);
+      }
 
     // ── Step 2: Click + button with real mouse (isTrusted) ────────────
-    await page.mouse.click(plusResult.x, plusResult.y);
-    this.log(`[REF] + button clicked at (${plusResult.x}, ${plusResult.y}) via real mouse (${plusResult.duplicatesDisabled.length} duplicates disabled)`);
-    await page.waitForTimeout(3000);
+      await page.mouse.click(plusSearch.x, plusSearch.y);
+      this.log(`[REF] Tried + candidate ${round} at (${plusSearch.x}, ${plusSearch.y}) depth=${plusSearch.depth} total=${plusSearch.totalCandidates} disabled=${plusSearch.duplicatesDisabled?.length || 0}`);
+      await page.waitForTimeout(3000);
 
-    // Restore pointer-events on disabled duplicates
-    await page.evaluate(() => {
-      document.querySelectorAll('[data-cs-btn-hidden]').forEach(el => {
-        el.style.removeProperty('pointer-events');
-        el.removeAttribute('data-cs-btn-hidden');
-      });
-    }).catch(() => {});
+      await restorePlusCandidates();
 
     // ── DIAGNOSTIC: What appeared after clicking + ? ──
-    const postClickState = await page.evaluate(() => {
-      const popovers = document.querySelectorAll(
-        '[data-radix-popper-content-wrapper], [role="dialog"], [role="listbox"], ' +
-        '[class*="popover" i], [class*="modal" i], [class*="picker" i], ' +
-        '[class*="panel" i], [class*="dropdown" i], [class*="overlay" i]'
-      );
-      const popoverInfo = [...popovers].filter(p => p.getBoundingClientRect().width > 0).map(p => {
-        const r = p.getBoundingClientRect();
-        return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), text: (p.textContent || '').slice(0, 80) };
-      });
-      const tabs = [...document.querySelectorAll('[role="tab"]')].filter(t => t.getBoundingClientRect().width > 0).map(t => ({
-        text: (t.textContent || '').slice(0, 30), x: Math.round(t.getBoundingClientRect().x)
-      }));
-      return { popovers: popoverInfo.slice(0, 5), tabs: tabs.slice(0, 10) };
-    }).catch(e => ({ error: e.message }));
-    this.log(`[REF] After + click: ${JSON.stringify(postClickState)}`);
+      const postClickState = await readPostClickState();
+      this.log(`[REF] After + candidate ${round}: ${JSON.stringify(postClickState)}`);
 
     // If no popup found after first click, retry once
-    const hasPopup = (postClickState.popovers?.length || 0) > 0 || (postClickState.tabs?.length || 0) > 0;
-    if (!hasPopup) {
-      this.log('[REF] No popup detected — retrying + click...');
-      await page.mouse.click(plusResult.x, plusResult.y);
-      await page.waitForTimeout(3000);
+      pickerState = await this._readReferencePickerState();
+      this.log(`[REF] Reference picker state after candidate ${round}: ${JSON.stringify(pickerState)}`);
+      if (pickerState.ok) {
+        openedPlusCandidate = plusSearch;
+        break;
+      }
+
+      badPlusCandidateKeys.add(plusSearch.key || `${plusSearch.x},${plusSearch.y}`);
+      await page.keyboard.press('Escape').catch(() => {});
+      await this._dismissOverlays().catch(() => {});
+      await page.waitForTimeout(900);
     }
 
     // ── Step 3: Click "Uploads" tab ───────────────────────────────────
-    const pickerState = await this._readReferencePickerState();
-    this.log(`[REF] Reference picker state: ${JSON.stringify(pickerState)}`);
-    if (!pickerState.ok) {
+    if (!pickerState?.ok) {
       detachUploadListener();
+      await restorePlusCandidates();
       await page.keyboard.press('Escape').catch(() => {});
-      throw new Error(`REFERENCE_PICKER_NOT_OPEN: ${pickerState.reason || 'picker proof failed'} (${JSON.stringify(pickerState)})`);
+      throw new Error(`REFERENCE_PICKER_NOT_OPEN: ${pickerState?.reason || 'no + candidate opened picker'} (tried=${JSON.stringify([...badPlusCandidateKeys])}, last=${JSON.stringify(pickerState)})`);
     }
+    this.log(`[REF] Reference picker opened by + candidate ${JSON.stringify(openedPlusCandidate)}`);
 
     let uploadsTabFound = false;
     for (const label of ['Uploads', 'Upload', 'uploads', 'UPLOADS']) {
