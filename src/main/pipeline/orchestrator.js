@@ -9527,6 +9527,41 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
 
         if (e.code === 'CINEMA_ELIGIBILITY_FAILED') {
+          let failedAssetsForGate = e.failedAssets || [];
+          if (cinematicVideoEngine === 'cinema-studio-3.5') {
+            let repairResult = null;
+            try {
+              repairResult = await this._repairCinemaElementEligibilityFailures(
+                projectId,
+                projectDir,
+                failedAssetsForGate,
+                videoAutomation,
+                { maxAttempts: 3 }
+              );
+            } catch (repairErr) {
+              this.log(`[CINEMATIC] ${clipId}: automated Cinema Studio element repair failed: ${repairErr.message}`, 'warn');
+              repairResult = {
+                ok: false,
+                unresolved: failedAssetsForGate,
+                repaired: [],
+              };
+            }
+
+            if (repairResult?.ok) {
+              if (clipAsset) db.resetAsset(clipAsset.id);
+              const repairedNames = (repairResult.repaired || []).map(item => `@${item.name}`).join(', ');
+              this.log(`[CINEMATIC] ${clipId}: Cinema Studio element eligibility repaired automatically${repairedNames ? ` (${repairedNames})` : ''}; retrying clip`);
+              i--;
+              continue;
+            }
+
+            failedAssetsForGate = repairResult?.unresolved?.length
+              ? repairResult.unresolved
+              : failedAssetsForGate;
+            const unresolvedNames = failedAssetsForGate.map(item => `@${item.name || 'unknown'}`).join(', ');
+            this.log(`[CINEMATIC] ${clipId}: automated Cinema Studio eligibility repair incomplete${unresolvedNames ? ` (${unresolvedNames})` : ''}; pausing for operator`, 'warn');
+          }
+
           if (clipAsset) {
             db.markAssetFailed(clipAsset.id, e.message);
             db.resetAsset(clipAsset.id);
@@ -9536,13 +9571,13 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             gate: 'cinema-eligibility-failed',
             clipId,
             clipLabel: label,
-            failedAssets: e.failedAssets || [],
+            failedAssets: failedAssetsForGate,
           });
           this.log(`[CINEMATIC] ${clipId}: Cinema Studio eligibility failed — pausing for human input`);
           await this.waitForApproval('cinema-eligibility-failed');
           if (this.cancelled) return;
           if (cinematicVideoEngine === 'cinema-studio-3.5') {
-            await this._repairCinemaElementEligibilityFailures(projectId, projectDir, e.failedAssets || [], videoAutomation);
+            await this._repairCinemaElementEligibilityFailures(projectId, projectDir, failedAssetsForGate, videoAutomation, { maxAttempts: 3 });
           }
           i--;
           continue;
@@ -10602,13 +10637,19 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     };
   }
 
-  async _repairCinemaElementEligibilityFailures(projectId, projectDir, failedAssets, videoAutomation) {
+  async _repairCinemaElementEligibilityFailures(projectId, projectDir, failedAssets, videoAutomation, opts = {}) {
     const elementFailures = [...new Map((failedAssets || [])
       .filter(a => (a.type || '').toLowerCase() === 'element' && a.name)
       .map(a => [String(a.name).replace(/^@/, '').toLowerCase(), a])).values()];
-    if (elementFailures.length === 0 || !videoAutomation) return;
+    if (elementFailures.length === 0 || !videoAutomation) {
+      return { ok: true, repaired: [], unresolved: [] };
+    }
 
     const names = elementFailures.map(a => a.name);
+    const maxAttempts = Math.max(1, Math.min(5, Number(opts.maxAttempts) || 3));
+    const repaired = [];
+    const unresolved = [];
+
     videoAutomation.invalidateElementEligibility?.(names);
 
     const { HiggsfieldElements } = require('../automation/higgsfield-elements');
@@ -10619,44 +10660,101 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     for (const failure of elementFailures) {
       const name = String(failure.name || '').replace(/^@/, '');
-      const status = String(failure.status || '').toLowerCase();
-      const visible = await videoAutomation.isElementVisibleInPicker(name).catch(err => ({
-        exists: true,
-        proof: { text: `visibility check failed: ${err.message}` },
-      }));
-
-      if (status.includes('not') && visible.exists) {
-        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} is still present after approval; delete it in Higgsfield before approving again. Proof: ${(visible.proof?.text || '').slice(0, 180)}`, 'warn');
-        continue;
-      }
-
-      if (visible.exists && !status.includes('not')) {
-        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} exists; leaving it in place and retrying eligibility.`);
-        continue;
-      }
-
+      const originalStatus = String(failure.status || '').toLowerCase();
       const spec = this._findCinemaElementRepairSpec(projectId, projectDir, name);
       if (!spec) {
-        this.log(`[CINEMATIC] [ELEMENT-REPAIR] No local portrait/grid spec found for @${name}; manual recreation is required.`, 'warn');
+        const reason = 'No local portrait/grid spec found';
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] ${reason} for @${name}; manual recreation is required.`, 'warn');
+        unresolved.push({ ...failure, name, status: failure.status || 'unresolved', reason });
+        continue;
+      }
+      if (!spec.gridPath) {
+        const reason = 'No local grid image found';
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] ${reason} for @${name}; refusing one-image repair.`, 'warn');
+        unresolved.push({ ...failure, name, status: failure.status || 'unresolved', reason });
         continue;
       }
 
-      this.log(`[CINEMATIC] [ELEMENT-REPAIR] Recreating deleted/missing @${name} from ${spec.unitKey || spec.characterId || 'local assets'}...`);
-      try {
-        elements.invalidateCache();
-        const result = await elements.createCharacterElement({
-          name: spec.name,
-          portraitPath: spec.portraitPath,
-          gridPath: spec.gridPath,
-          description: spec.description,
+      let finalStatus = originalStatus || 'unresolved';
+      let repairedThisElement = false;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        videoAutomation.invalidateElementEligibility?.(name);
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} repair attempt ${attempt}/${maxAttempts}`);
+
+        try {
+          const visible = await videoAutomation.isElementVisibleInPicker(name).catch(err => ({
+            exists: true,
+            proof: { text: `visibility check failed: ${err.message}` },
+          }));
+
+          if (visible.exists && attempt === 1 && !originalStatus.includes('not')) {
+            const quickCheck = await videoAutomation.checkElementEligibility(name).catch(err => ({
+              status: `check-error: ${err.message}`,
+              proof: null,
+            }));
+            finalStatus = String(quickCheck.status || 'unknown').toLowerCase();
+            if (quickCheck.status === 'eligible') {
+              this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} became eligible on re-check; no recreation needed.`);
+              repaired.push({ name, status: 'eligible', attempts: attempt - 1, recreated: false });
+              repairedThisElement = true;
+              break;
+            }
+          }
+
+          if (visible.exists) {
+            this.log(`[CINEMATIC] [ELEMENT-REPAIR] Deleting existing @${name} before recreation. Proof: ${(visible.proof?.text || '').slice(0, 180)}`);
+            await videoAutomation.deleteElementFromPicker(name);
+          } else {
+            this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} is absent; recreating from local assets.`);
+          }
+
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] Recreating @${name} from ${spec.unitKey || spec.characterId || 'local assets'}...`);
+          elements.invalidateCache();
+          const result = await elements.createCharacterElement({
+            name: spec.name,
+            portraitPath: spec.portraitPath,
+            gridPath: spec.gridPath,
+            description: spec.description,
+          });
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} ${result.created ? 'created' : 'already existed'}; checking eligibility.`);
+
+          videoAutomation.invalidateElementEligibility?.(name);
+          const check = await videoAutomation.checkElementEligibility(name);
+          finalStatus = String(check.status || 'unknown').toLowerCase();
+          if (check.status === 'eligible') {
+            this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} eligible after recreation attempt ${attempt}/${maxAttempts}.`);
+            repaired.push({ name, status: 'eligible', attempts: attempt, recreated: true });
+            repairedThisElement = true;
+            break;
+          }
+
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} still ${check.status || 'unknown'} after recreation attempt ${attempt}/${maxAttempts}.`, 'warn');
+        } catch (err) {
+          finalStatus = `repair-error: ${err.message}`;
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} repair attempt ${attempt}/${maxAttempts} failed: ${err.message}`, 'warn');
+        }
+      }
+
+      if (!repairedThisElement) {
+        unresolved.push({
+          ...failure,
+          name,
+          status: finalStatus,
+          reason: `not eligible after ${maxAttempts} repair attempt(s)`,
         });
-        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} ${result.created ? 'created' : 'already existed'}; retry will re-check Cinema Studio eligibility.`);
-      } catch (err) {
-        this.log(`[CINEMATIC] [ELEMENT-REPAIR] Failed to recreate @${name}: ${err.message}`, 'warn');
       }
     }
 
-    videoAutomation.invalidateElementEligibility?.(names);
+    const unresolvedNames = unresolved.map(item => item.name).filter(Boolean);
+    if (unresolvedNames.length > 0) {
+      videoAutomation.invalidateElementEligibility?.(unresolvedNames);
+    }
+    return {
+      ok: unresolved.length === 0,
+      repaired,
+      unresolved,
+    };
   }
 
   /**

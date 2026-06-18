@@ -71,6 +71,24 @@ class CinemaVideoAutomation extends KlingAutomation {
     return this._elementEligibilityCache.get(this._elementEligibilityCacheKey(name));
   }
 
+  _getElementEligibilityRecord(name) {
+    return this._elementEligibilityProof.get(this._elementEligibilityCacheKey(name)) || null;
+  }
+
+  _buildElementEligibilityFailure(name, status) {
+    const finalStatus = status === 'not-eligible' ? 'Not eligible' : status;
+    const proof = this._getElementEligibilityRecord(name);
+    const proofText = String(proof?.text || '');
+    return {
+      type: 'element',
+      name,
+      status: finalStatus,
+      proof: proof || null,
+      repairable: finalStatus === 'Not eligible',
+      mixedUseProof: /not eligible/i.test(proofText) && /\bUse\b/i.test(proofText),
+    };
+  }
+
   _rememberElementEligibility(name, status, proof = {}) {
     const normalized = String(name || '').trim().replace(/^@/, '');
     const finalStatus = String(status || '').toLowerCase();
@@ -2616,7 +2634,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
       if (cached === 'not-eligible') {
         this.log(`Element @${name} eligibility cache hit: not-eligible`);
-        failed.push({ type: 'element', name, status: 'Not eligible' });
+        failed.push(this._buildElementEligibilityFailure(name, 'not-eligible'));
         continue;
       }
 
@@ -2624,7 +2642,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (status === 'eligible') {
         this._lastClipElementEligibility.eligible.push(name);
       } else {
-        failed.push({ type: 'element', name, status: status === 'not-eligible' ? 'Not eligible' : status });
+        failed.push(this._buildElementEligibilityFailure(name, status));
       }
     }
     if (failed.length > 0) {
@@ -2690,6 +2708,17 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
     await this._closePickerAndReturnToComposer();
     return status;
+  }
+
+  async checkElementEligibility(name) {
+    const normalized = String(name || '').trim().replace(/^@/, '');
+    if (!normalized) return { status: 'missing', proof: null };
+    this.invalidateElementEligibility(normalized);
+    const status = await this._checkOneElementEligibility(normalized);
+    return {
+      status,
+      proof: this._getElementEligibilityRecord(normalized),
+    };
   }
 
   async _openElementsPickerViaAtButton() {
@@ -3332,6 +3361,214 @@ class CinemaVideoAutomation extends KlingAutomation {
         rect: best.rect,
       } : { status: 'unknown', text: '', source: 'not-found' };
     }, card || nameOrCard).catch(() => ({ status: 'unknown', text: '', source: 'snapshot-error' }));
+  }
+
+  async _findElementCardMenuButton(card) {
+    const page = this.automation.page;
+    return page.evaluate(({ name, target }) => {
+      const fullTarget = String(target || name || '').toLowerCase().replace(/^@/, '');
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
+      const tokensOf = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
+        return tokens;
+      };
+      const exactNameIn = (text) => tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const textOf = (el) => clean(el?.innerText || el?.textContent || '');
+      const cardCandidates = [...document.querySelectorAll('figure, [role="button"], button, div')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = textOf(el);
+          return { el, r, text };
+        })
+        .filter(o =>
+          o.r.width >= 80 && o.r.width <= 280
+          && o.r.height >= 70 && o.r.height <= 320
+          && exactNameIn(o.text)
+          && /Character|Check eligibility|Face\s*\/\s*IP|eligible|Use/i.test(o.text)
+        )
+        .sort((a, b) => {
+          const aCharacter = /\bCharacter\b/i.test(a.text) ? 1 : 0;
+          const bCharacter = /\bCharacter\b/i.test(b.text) ? 1 : 0;
+          if (aCharacter !== bCharacter) return bCharacter - aCharacter;
+          return (b.r.width * b.r.height) - (a.r.width * a.r.height);
+        });
+
+      const cardEl = cardCandidates[0]?.el || null;
+      if (!cardEl) return null;
+      const cr = cardEl.getBoundingClientRect();
+      const menuCandidates = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = textOf(el);
+          const aria = clean(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+          const tag = String(el.tagName || '').toLowerCase();
+          const role = el.getAttribute('role') || '';
+          const hasSvg = !!el.querySelector?.('svg') || tag === 'svg';
+          const cx = r.x + r.width / 2;
+          const cy = r.y + r.height / 2;
+          const inLowerRight = cx >= cr.x + cr.width * 0.62 && cy >= cr.y + cr.height * 0.45;
+          const small = r.width >= 14 && r.width <= 54 && r.height >= 14 && r.height <= 54;
+          const badLabel = /\b(Use|Check eligibility|Not eligible|Eligible|Character|View|Pin|Edit|Move to|Copy to|Share|Delete)\b/i.test(text);
+          const score = (inLowerRight ? 60 : 0)
+            + (small ? 35 : 0)
+            + ((/more|options|menu|ellipsis/i.test(`${text} ${aria}`) || !text || hasSvg) ? 30 : 0)
+            + ((tag === 'button' || role === 'button') ? 20 : 0)
+            - (badLabel ? 80 : 0);
+          return { x: Math.round(cx), y: Math.round(cy), text, aria, score, w: Math.round(r.width), h: Math.round(r.height) };
+        })
+        .filter(o => o.score >= 60)
+        .sort((a, b) => b.score - a.score);
+      if (menuCandidates[0]) return menuCandidates[0];
+      return {
+        x: Math.round(cr.x + cr.width - 22),
+        y: Math.round(cr.y + cr.height - 28),
+        text: 'fallback-lower-right',
+        score: 1,
+        fallback: true,
+      };
+    }, card).catch(() => null);
+  }
+
+  async _findOpenMenuDeleteItem() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 14 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const inMenu = (el) => {
+        for (let node = el; node; node = node.parentElement) {
+          const role = node.getAttribute?.('role') || '';
+          const cls = String(node.className || '');
+          const ds = String(node.getAttribute?.('data-radix-popper-content-wrapper') || '');
+          if (/menu/i.test(role) || /popover|dropdown|menu/i.test(cls) || ds) return true;
+        }
+        return false;
+      };
+      const items = [...document.querySelectorAll('button, [role="menuitem"], [role="option"], div, span')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const role = el.getAttribute('role') || '';
+          const tag = String(el.tagName || '').toLowerCase();
+          const score = (/^Delete$/i.test(text) ? 80 : 0)
+            + (inMenu(el) ? 40 : 0)
+            + ((role === 'menuitem' || tag === 'button') ? 20 : 0)
+            - (/Get Unlimited|Seedance|Generate/i.test(text) ? 100 : 0);
+          return {
+            text,
+            x: Math.round(r.x + r.width / 2),
+            y: Math.round(r.y + r.height / 2),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            score,
+          };
+        })
+        .filter(o => /^Delete$/i.test(o.text) && o.score >= 80)
+        .sort((a, b) => b.score - a.score || a.y - b.y);
+      return items[0] || null;
+    }).catch(() => null);
+  }
+
+  async _confirmElementDeleteIfNeeded() {
+    const page = this.automation.page;
+    const confirm = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 16 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"], [data-state="open"], div')]
+        .filter(visible)
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
+        .filter(o =>
+          o.r.width >= 240 && o.r.height >= 100
+          && /delete|remove|sure/i.test(o.text)
+          && !/View Pin Edit Move to Copy to Share Delete/i.test(o.text)
+        )
+        .sort((a, b) => (a.r.width * a.r.height) - (b.r.width * b.r.height));
+      for (const dialog of dialogs) {
+        const buttons = [...dialog.el.querySelectorAll('button, [role="button"]')]
+          .filter(visible)
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            const text = clean(el.innerText || el.textContent || '');
+            return { text, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: r.width, h: r.height };
+          })
+          .filter(b => /^(Delete|Confirm|Yes|Remove)$/i.test(b.text))
+          .sort((a, b) => b.y - a.y || b.x - a.x);
+        if (buttons[0]) return buttons[0];
+      }
+      return null;
+    }).catch(() => null);
+    if (!confirm) return false;
+    await page.mouse.click(confirm.x, confirm.y);
+    await page.waitForTimeout(1500);
+    return true;
+  }
+
+  async _waitForElementDeleted(name, timeoutMs = 45000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const remaining = timeoutMs - (Date.now() - start);
+      const card = await this._waitForElementCard(name, Math.min(12000, Math.max(3000, remaining))).catch(() => null);
+      if (!card) return true;
+      this.log(`Element @${String(name).replace(/^@/, '')} still visible after delete; waiting...`);
+      await this.automation.page.waitForTimeout(2500);
+    }
+    return false;
+  }
+
+  async deleteElementFromPicker(name) {
+    const normalized = String(name || '').trim().replace(/^@/, '');
+    if (!normalized) throw new Error('deleteElementFromPicker: element name required');
+    const page = this.automation.page;
+    this.invalidateElementEligibility(normalized);
+    await this._closePickerAndReturnToComposer().catch(() => {});
+    await this._ensureElementsPickerOpen();
+    const card = await this._waitForElementCard(normalized, 45000);
+    if (!card) {
+      this.log(`Element @${normalized} not visible for delete; treating as already absent`);
+      await this._closePickerAndReturnToComposer().catch(() => {});
+      return { deleted: false, alreadyMissing: true, proof: null };
+    }
+    const proof = await this._snapshotElementCardProof(card).catch(() => ({}));
+    const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
+    const menu = await this._findElementCardMenuButton(card);
+    if (!menu) throw new Error(`Could not find card-local menu button for @${normalized}`);
+    this.log(`Deleting element @${normalized} via card menu at (${menu.x}, ${menu.y})${proofText}`);
+    await page.mouse.click(menu.x, menu.y);
+    await page.waitForTimeout(900);
+    const deleteItem = await this._findOpenMenuDeleteItem();
+    if (!deleteItem) throw new Error(`Delete menu item not found for @${normalized}`);
+    await page.mouse.click(deleteItem.x, deleteItem.y);
+    await page.waitForTimeout(1000);
+    await this._confirmElementDeleteIfNeeded();
+    await page.waitForTimeout(2500);
+    await this._ensureElementsPickerOpen().catch(() => false);
+    const gone = await this._waitForElementDeleted(normalized, 45000);
+    await this._closePickerAndReturnToComposer().catch(() => {});
+    if (!gone) throw new Error(`Element @${normalized} was still visible after delete`);
+    this.invalidateElementEligibility(normalized);
+    return { deleted: true, alreadyMissing: false, proof };
   }
 
   async isElementVisibleInPicker(name) {

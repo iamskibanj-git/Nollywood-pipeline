@@ -23,6 +23,10 @@ Primary failure points:
 
 Default engineering posture: make small scoped changes, preserve existing gates, test with the cheapest duration/one-clip path first, and avoid bypassing recovery logic unless the user explicitly accepts the credit and quality risk.
 
+## Current Production Status
+
+2026-06-18 update: the prior bedtime handoff is closed. The current SCWOB production run ("She Chose Wealth Over Blood -- Abuja Changed Her | Nigerian AI Film") has been resumed and is in progress. Treat live terminal logs, SQLite, and project files as the source of truth for exact stage and asset counts. Do not treat the old "resume later" handoff as active. Keep Cinema Studio 3.5 safeguards active: do not spend new scene-image or video credits unless the existing Generate-click, recovery, eligibility, and pre-Generate gates prove it is safe.
+
 ## Architecture
 
 - **Main process** (Node.js): `src/main/main.js` — IPC handlers, Electron lifecycle
@@ -3936,6 +3940,11 @@ Cinema Studio video element eligibility no longer exposes stable `Eligible` / `N
 Check eligibility -> Face/IP checking -> small badge / Use state
 ```
 Use the card-local lifecycle only. If `Check eligibility` is visible, click it and wait through `Face/IP check` / `Face/IP checking`. The ready state is hover-revealed `Use` plus the small green bottom-left badge/logo on the tile. Do not run temporary typed `@character` diagnostics after eligibility; the UI can resolve for a human while Playwright misreads it. For actual video prompts, element attachment is proven by real prompt typing plus the composer reference tile-count gate before Generate. Do not apply this video-only eligibility check to Cinema Studio image generation.
+
+Update 2026-06-18 Cinema video not-eligible repair:
+- `Not eligible` remains the dominant status even when the hover proof also contains `Use`; `Use` can be a card action affordance and must not override an explicit failure label.
+- Cinema video pre-Generate setup now treats not-eligible elements as repairable before any human gate: clear stale eligibility cache, open the project Elements picker, exact-match the element card, use the card-local three-dot menu to delete it, recreate the character element from the local portrait + grid image pair, and run `Check eligibility` again.
+- The repair loop is bounded at 3 attempts per failed element and only exits as successful when the element re-check returns `eligible`. If a local portrait/grid pair is missing, or the element remains not eligible after the cap, the existing `cinema-eligibility-failed` human gate is still emitted with the unresolved names. No Generate click is allowed during this repair loop.
 
 Live no-Generate verification after the fix:
 ```text
