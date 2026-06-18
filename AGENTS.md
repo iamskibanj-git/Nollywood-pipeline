@@ -29,6 +29,8 @@ Default engineering posture: make small scoped changes, preserve existing gates,
 
 2026-06-18 element-repair safety note: live SCWOB video eligibility repair exposed that truncated Higgsfield element labels can make card-menu deletion ambiguous across sibling outfit elements. Destructive element repair must not delete directly from the grid card by truncated text. The safe flow is: hover the target card, open the card menu, click View, require the Element detail modal to show the exact full element name, require the grid card status to be Not eligible, then click Delete from the confirmed detail modal. If exact modal-name proof is unavailable, stop repair for that element instead of deleting.
 
+2026-06-18 follow-up: Higgsfield eligibility can flip from stale Not eligible to hover `Use`/eligible-visual after the failure list is built. Before deleting/recreating a visible element, repair code must re-check current eligibility. If the card now shows eligible/Use, mark it repaired and skip deletion; do not keep retrying destructive repair from the stale failure status.
+
 ## Architecture
 
 - **Main process** (Node.js): `src/main/main.js` — IPC handlers, Electron lifecycle

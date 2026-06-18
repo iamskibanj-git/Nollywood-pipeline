@@ -10690,14 +10690,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             proof: { text: `visibility check failed: ${err.message}` },
           }));
 
-          if (visible.exists && attempt === 1 && !originalStatus.includes('not')) {
+          if (visible.exists) {
             const quickCheck = await videoAutomation.checkElementEligibility(name).catch(err => ({
               status: `check-error: ${err.message}`,
               proof: null,
             }));
             finalStatus = String(quickCheck.status || 'unknown').toLowerCase();
             if (quickCheck.status === 'eligible') {
-              this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} became eligible on re-check; no recreation needed.`);
+              this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} became eligible on pre-delete re-check; no recreation needed.`);
               repaired.push({ name, status: 'eligible', attempts: attempt - 1, recreated: false });
               repairedThisElement = true;
               break;
@@ -10734,6 +10734,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} still ${check.status || 'unknown'} after recreation attempt ${attempt}/${maxAttempts}.`, 'warn');
         } catch (err) {
           finalStatus = `repair-error: ${err.message}`;
+          if (/Refusing to delete @[^:]+: card status is eligible(?:-visual)?/i.test(err.message || '')) {
+            this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} delete was refused because the card now appears eligible; treating as repaired.`);
+            repaired.push({ name, status: 'eligible', attempts: attempt - 1, recreated: false, deleteRefusedAsEligible: true });
+            repairedThisElement = true;
+            break;
+          }
           this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} repair attempt ${attempt}/${maxAttempts} failed: ${err.message}`, 'warn');
         }
       }
