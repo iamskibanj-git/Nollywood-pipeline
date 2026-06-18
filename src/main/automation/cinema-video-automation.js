@@ -2655,8 +2655,22 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
     let status = await this._waitForElementEligibility(card, 60000);
     if (status === 'check') {
-      const clicked = await this._clickElementCheckEligibility(card);
-      this.log(`Element ${card.name || `@${name}`} eligibility check ${clicked ? 'clicked' : 'click target not confirmed'} — waiting for Higgsfield content review`);
+      let clicked = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        clicked = await this._clickElementCheckEligibility(card);
+        if (clicked) {
+          this.log(`Element ${card.name || `@${name}`} eligibility check confirmed on attempt ${attempt} - waiting for Higgsfield content review`);
+          break;
+        }
+        this.log(`Element ${card.name || `@${name}`} eligibility check attempt ${attempt}/3 did not trigger content review`);
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        await page.waitForTimeout(1500);
+        await this._ensureElementsPickerOpen().catch(() => false);
+      }
+      if (!clicked) {
+        await this._closePickerAndReturnToComposer();
+        return 'check-click-failed';
+      }
       await page.waitForTimeout(3500);
       status = await this._waitForElementEligibility(card, 420000, { returnOnCheck: false, useFallbackStatus: false });
     }
@@ -3041,9 +3055,24 @@ class CinemaVideoAutomation extends KlingAutomation {
       for (const candidate of candidates) {
         const buttons = [...candidate.el.querySelectorAll('button, [role="button"], div, span')]
           .filter(visible)
-          .map(el => ({ el, r: el.getBoundingClientRect(), text: textOf(el) }))
+          .map(el => {
+            const r = el.getBoundingClientRect();
+            const text = textOf(el);
+            const tag = String(el.tagName || '').toLowerCase();
+            const role = el.getAttribute('role') || '';
+            const exact = /^check eligibility$/i.test(text);
+            const actionable = tag === 'button' || role === 'button';
+            const pillSized = r.width >= 70 && r.width <= 190 && r.height >= 24 && r.height <= 58;
+            const inLowerCard = r.y + r.height / 2 >= candidate.r.y + candidate.r.height * 0.35;
+            const score = (exact ? 50 : 0)
+              + (actionable ? 30 : 0)
+              + (pillSized ? 20 : 0)
+              + (inLowerCard ? 10 : 0)
+              - Math.abs((r.width * r.height) - 5000) / 1000;
+            return { el, r, text, tag, role, score };
+          })
           .filter(o => /^check eligibility$/i.test(o.text) || /check eligibility/i.test(o.text))
-          .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+          .sort((a, b) => b.score - a.score || (a.r.width * a.r.height) - (b.r.width * b.r.height));
         const button = buttons[0];
         if (!button) continue;
         button.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -3052,6 +3081,9 @@ class CinemaVideoAutomation extends KlingAutomation {
           x: Math.round(br.x + br.width / 2),
           y: Math.round(br.y + br.height / 2),
           text: button.text,
+          tag: button.tag,
+          role: button.role,
+          score: Math.round(button.score),
           cardText: candidate.text,
         };
       }
@@ -3074,47 +3106,15 @@ class CinemaVideoAutomation extends KlingAutomation {
     if (!button) return false;
 
     await page.mouse.click(button.x, button.y);
-    await page.waitForTimeout(1500);
-    const status = await this._readElementCardStatus(currentCard, { hoverMs: 800, useFallbackStatus: false });
-    if (status !== 'check' && status !== 'unknown') return true;
-
-    const domClicked = await page.evaluate(({ name, target, matchPrefix }) => {
-      const fullTarget = String(target || name || '').toLowerCase().replace(/^@/, '');
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
-      const tokensOf = (text) => {
-        const tokens = [];
-        const re = /@([a-z0-9_.-]+)/ig;
-        let match;
-        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
-        return tokens;
-      };
-      const exactNameIn = (text) => tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const s = getComputedStyle(el);
-        return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden'
-          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
-      };
-      const textOf = (el) => clean(el?.innerText || el?.textContent || '');
-      const cards = [...document.querySelectorAll('figure, [role="button"], button, div')]
-        .filter(visible)
-        .filter(el => {
-          const r = el.getBoundingClientRect();
-          return r.width >= 80 && r.width <= 280 && r.height >= 70 && r.height <= 320
-            && exactNameIn(textOf(el));
-        });
-      for (const cardEl of cards) {
-        const button = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
-          .filter(visible)
-          .find(el => /check eligibility/i.test(textOf(el)));
-        if (!button) continue;
-        button.click();
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await page.waitForTimeout(attempt === 0 ? 1200 : 1000);
+      currentCard = await this._reacquireElementCard(currentCard).catch(() => null) || currentCard;
+      const status = await this._readElementCardStatus(currentCard, { hoverMs: 800, useFallbackStatus: false });
+      if (status === 'checking' || status === 'eligible' || status === 'eligible-visual' || status === 'not-eligible') {
         return true;
       }
-      return false;
-    }, currentCard).catch(() => false);
-    return !!domClicked;
+    }
+    return false;
   }
 
   async _waitForElementEligibility(card, timeoutMs, { returnOnCheck = true, useFallbackStatus = true } = {}) {
