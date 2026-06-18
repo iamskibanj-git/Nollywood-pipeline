@@ -10557,6 +10557,68 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
   }
 
+  _getCinemaElementRepairAttemptRecord(projectId, elementName) {
+    if (!projectId || !elementName) return { attempts: 0 };
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+      const key = this._normalizeElementName(elementName);
+      return settings._cinemaElementRepairAttempts?.[key] || { attempts: 0 };
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not read Cinema Studio element repair attempts: ${e.message}`, 'warn');
+      return { attempts: 0 };
+    }
+  }
+
+  _persistCinemaElementRepairAttempt(projectId, elementName, record) {
+    if (!projectId || !elementName) return;
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+      const key = this._normalizeElementName(elementName);
+      settings._cinemaElementRepairAttempts = settings._cinemaElementRepairAttempts || {};
+      settings._cinemaElementRepairAttempts[key] = {
+        ...record,
+        name: key,
+        attempts: Math.max(0, Number(record?.attempts) || 0),
+        updatedAt: new Date().toISOString(),
+      };
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist Cinema Studio element repair attempt for @${elementName}: ${e.message}`, 'warn');
+    }
+  }
+
+  _incrementCinemaElementRepairAttempt(projectId, elementName, extra = {}) {
+    const current = this._getCinemaElementRepairAttemptRecord(projectId, elementName);
+    const next = {
+      ...current,
+      ...extra,
+      attempts: (Number(current.attempts) || 0) + 1,
+      lastReason: extra.lastReason || current.lastReason || 'repair-recreate',
+    };
+    this._persistCinemaElementRepairAttempt(projectId, elementName, next);
+    return next;
+  }
+
+  _clearCinemaElementRepairAttempts(projectId, elementNames = []) {
+    if (!projectId || !elementNames.length) return;
+    try {
+      const proj = db.getProject(projectId);
+      const settings = proj?.settings ? (typeof proj.settings === 'string' ? JSON.parse(proj.settings) : proj.settings) : {};
+      if (!settings._cinemaElementRepairAttempts) return;
+      for (const name of elementNames) {
+        delete settings._cinemaElementRepairAttempts[this._normalizeElementName(name)];
+      }
+      if (Object.keys(settings._cinemaElementRepairAttempts).length === 0) {
+        delete settings._cinemaElementRepairAttempts;
+      }
+      db.updateProject(projectId, { settings: JSON.stringify(settings) });
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not clear Cinema Studio element repair attempts: ${e.message}`, 'warn');
+    }
+  }
+
   _buildCharacterPortraitPrompt(charDescription) {
     const faceIpCaveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
     const desc = String(charDescription || '').trim();
@@ -10881,6 +10943,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       scenes: scenes.map(s => `ch${s.chapter}_sc${s.scene}`),
       detail: 'Pre-video Face/IP recast completed; affected scene images reset',
     });
+    this._clearCinemaElementRepairAttempts(projectId, elementNames);
     return {
       ok: true,
       characterId: spec.characterId,
@@ -11018,10 +11081,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
       let finalStatus = originalStatus || 'unresolved';
       let repairedThisElement = false;
+      let persistedAttempts = Math.max(0, Number(this._getCinemaElementRepairAttemptRecord(projectId, name).attempts) || 0);
 
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (persistedAttempts >= maxAttempts) {
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} already has ${persistedAttempts}/${maxAttempts} persisted repair attempt(s); skipping recreate loop and recasting.`);
+      }
+
+      for (let attempt = persistedAttempts + 1; attempt <= maxAttempts; attempt++) {
         videoAutomation.invalidateElementEligibility?.(name);
-        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} repair attempt ${attempt}/${maxAttempts}`);
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} repair attempt ${attempt}/${maxAttempts} (persisted cumulative)`);
 
         try {
           const visible = await videoAutomation.isElementVisibleInPicker(name).catch(err => ({
@@ -11038,10 +11106,19 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             if (quickCheck.status === 'eligible') {
               this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} became eligible on pre-delete re-check; no recreation needed.`);
               repaired.push({ name, status: 'eligible', attempts: attempt - 1, recreated: false });
+              this._clearCinemaElementRepairAttempts(projectId, [name]);
               repairedThisElement = true;
               break;
             }
           }
+
+          const persisted = this._incrementCinemaElementRepairAttempt(projectId, name, {
+            characterId: spec.characterId || null,
+            unitKey: spec.unitKey || null,
+            lastReason: visible.exists ? 'delete-recreate-not-eligible' : 'recreate-missing-element',
+          });
+          persistedAttempts = Math.max(persistedAttempts, Number(persisted.attempts) || attempt);
+          this.log(`[CINEMATIC] [ELEMENT-REPAIR] Persisted @${name} repair attempt ${persistedAttempts}/${maxAttempts}`);
 
           if (visible.exists) {
             this.log(`[CINEMATIC] [ELEMENT-REPAIR] Deleting existing not-eligible @${name} before recreation with View-modal name confirmation. Proof: ${(visible.proof?.text || '').slice(0, 180)}`);
@@ -11066,6 +11143,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           if (check.status === 'eligible') {
             this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} eligible after recreation attempt ${attempt}/${maxAttempts}.`);
             repaired.push({ name, status: 'eligible', attempts: attempt, recreated: true });
+            this._clearCinemaElementRepairAttempts(projectId, [name]);
             repairedThisElement = true;
             break;
           }
@@ -11076,6 +11154,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           if (/Refusing to delete @[^:]+: card status is eligible(?:-visual)?/i.test(err.message || '')) {
             this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} delete was refused because the card now appears eligible; treating as repaired.`);
             repaired.push({ name, status: 'eligible', attempts: attempt - 1, recreated: false, deleteRefusedAsEligible: true });
+            this._clearCinemaElementRepairAttempts(projectId, [name]);
             repairedThisElement = true;
             break;
           }
