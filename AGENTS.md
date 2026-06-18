@@ -3728,6 +3728,7 @@ Goal: keep the existing cinematic pipeline and add Cinema Studio 3.5 as a select
    Not eligible
    Check eligibility
    ```
+  If an element is not eligible and must be deleted/recreated, the card action menu is hover-only. First scroll/center the exact element card inside the modal, hover the image tile until the `Use` button/checkbox/three-dot controls render, then click the actual visible three-dot button on that tile. Do not use a guessed lower-right coordinate: bottom-row cards can place the popover offscreen or miss the menu, producing repeated `Delete menu item not found` failures.
 
 8. **Eligibility pause gate:** Add one pause gate if no existing gate fits:
    ```text

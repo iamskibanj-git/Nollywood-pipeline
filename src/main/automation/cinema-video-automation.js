@@ -2958,6 +2958,12 @@ class CinemaVideoAutomation extends KlingAutomation {
         cards.push({
           x: Math.round(r.x + r.width / 2),
           y: Math.round(r.y + r.height / 2),
+          rect: {
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          },
           text,
           checkX: Math.round(cr.x + cr.width / 2),
           checkY: Math.round(cr.y + cr.height / 2),
@@ -2994,6 +3000,105 @@ class CinemaVideoAutomation extends KlingAutomation {
       attempt++;
     }
     return null;
+  }
+
+  async _centerElementCardInPicker(name) {
+    const page = this.automation.page;
+    const centered = await page.evaluate((targetName) => {
+      const target = String(targetName || '').toLowerCase().replace(/^@/, '');
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
+      const tokensOf = (text) => {
+        const tokens = [];
+        const re = /@([a-z0-9_.-]+)/ig;
+        let match;
+        while ((match = re.exec(text || '')) !== null) tokens.push(normalize(match[1]));
+        return tokens;
+      };
+      const tokenMatchesTarget = (token) => {
+        if (!token) return false;
+        if (token === target) return true;
+        if (token.endsWith('...')) return target.startsWith(token.replace(/\.+$/g, ''));
+        return false;
+      };
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 20 && r.height > 20 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const textOf = (el) => clean(el.innerText || el.textContent || '');
+      const cards = [...document.querySelectorAll('figure, [role="button"], button, div')]
+        .filter(visible)
+        .map(el => ({ el, r: el.getBoundingClientRect(), text: textOf(el) }))
+        .filter(o =>
+          o.r.width >= 80 && o.r.width <= 280
+          && o.r.height >= 80 && o.r.height <= 320
+          && tokensOf(o.text).some(tokenMatchesTarget)
+          && /Character|Check eligibility|Face\s*\/\s*IP|eligible|Use/i.test(o.text)
+        )
+        .sort((a, b) => {
+          const aCharacter = /\bCharacter\b/i.test(a.text) ? 1 : 0;
+          const bCharacter = /\bCharacter\b/i.test(b.text) ? 1 : 0;
+          if (aCharacter !== bCharacter) return bCharacter - aCharacter;
+          return (b.r.width * b.r.height) - (a.r.width * a.r.height);
+        });
+      const card = cards[0];
+      if (!card) return null;
+
+      card.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      const scrollParent = (() => {
+        for (let node = card.el.parentElement; node; node = node.parentElement) {
+          const s = getComputedStyle(node);
+          if (/(auto|scroll)/i.test(`${s.overflowY} ${s.overflow}`) && node.scrollHeight > node.clientHeight + 20) {
+            return node;
+          }
+        }
+        return null;
+      })();
+      if (scrollParent) {
+        const r = card.el.getBoundingClientRect();
+        const desiredTop = Math.max(110, Math.floor(innerHeight * 0.28));
+        if (r.bottom > innerHeight - 140 || r.top < 120) {
+          scrollParent.scrollTop += r.top - desiredTop;
+        }
+      }
+
+      const after = card.el.getBoundingClientRect();
+      return {
+        before: {
+          x: Math.round(card.r.x),
+          y: Math.round(card.r.y),
+          w: Math.round(card.r.width),
+          h: Math.round(card.r.height),
+        },
+        after: {
+          x: Math.round(after.x),
+          y: Math.round(after.y),
+          w: Math.round(after.width),
+          h: Math.round(after.height),
+        },
+      };
+    }, name).catch(() => null);
+    await page.waitForTimeout(700);
+    return centered;
+  }
+
+  async _hoverElementCardControls(card) {
+    const page = this.automation.page;
+    if (!card) return;
+    const rect = card.rect || null;
+    await this._hoverPoint(card, 450).catch(() => {});
+    if (rect?.w && rect?.h) {
+      const menuHotspot = {
+        x: Math.round(rect.x + rect.w - 24),
+        y: Math.round(rect.y + rect.h - 34),
+      };
+      await page.mouse.move(menuHotspot.x, menuHotspot.y).catch(() => {});
+      await page.waitForTimeout(450);
+      await page.mouse.move(menuHotspot.x - 2, menuHotspot.y + 2).catch(() => {});
+      await page.waitForTimeout(450);
+    }
   }
 
   async _scrollElementPicker(action = 'next') {
@@ -3407,7 +3512,17 @@ class CinemaVideoAutomation extends KlingAutomation {
       const cardEl = cardCandidates[0]?.el || null;
       if (!cardEl) return null;
       const cr = cardEl.getBoundingClientRect();
-      const menuCandidates = [...cardEl.querySelectorAll('button, [role="button"], div, span')]
+      const candidateElements = [
+        ...cardEl.querySelectorAll('button, [role="button"], div, span, svg'),
+        ...document.querySelectorAll('button, [role="button"], div, span, svg'),
+      ];
+      const seen = new Set();
+      const menuCandidates = candidateElements
+        .filter(el => {
+          if (seen.has(el)) return false;
+          seen.add(el);
+          return true;
+        })
         .filter(visible)
         .map(el => {
           const r = el.getBoundingClientRect();
@@ -3418,26 +3533,25 @@ class CinemaVideoAutomation extends KlingAutomation {
           const hasSvg = !!el.querySelector?.('svg') || tag === 'svg';
           const cx = r.x + r.width / 2;
           const cy = r.y + r.height / 2;
+          const nearCard = cx >= cr.x + cr.width * 0.52
+            && cx <= cr.x + cr.width + 18
+            && cy >= cr.y + cr.height * 0.35
+            && cy <= cr.y + cr.height + 12;
           const inLowerRight = cx >= cr.x + cr.width * 0.62 && cy >= cr.y + cr.height * 0.45;
           const small = r.width >= 14 && r.width <= 54 && r.height >= 14 && r.height <= 54;
           const badLabel = /\b(Use|Check eligibility|Not eligible|Eligible|Character|View|Pin|Edit|Move to|Copy to|Share|Delete)\b/i.test(text);
-          const score = (inLowerRight ? 60 : 0)
+          const score = (nearCard ? 45 : 0)
+            + (inLowerRight ? 35 : 0)
             + (small ? 35 : 0)
             + ((/more|options|menu|ellipsis/i.test(`${text} ${aria}`) || !text || hasSvg) ? 30 : 0)
             + ((tag === 'button' || role === 'button') ? 20 : 0)
             - (badLabel ? 80 : 0);
           return { x: Math.round(cx), y: Math.round(cy), text, aria, score, w: Math.round(r.width), h: Math.round(r.height) };
         })
-        .filter(o => o.score >= 60)
-        .sort((a, b) => b.score - a.score);
+        .filter(o => o.score >= 80)
+        .sort((a, b) => b.score - a.score || b.x - a.x);
       if (menuCandidates[0]) return menuCandidates[0];
-      return {
-        x: Math.round(cr.x + cr.width - 22),
-        y: Math.round(cr.y + cr.height - 28),
-        text: 'fallback-lower-right',
-        score: 1,
-        fallback: true,
-      };
+      return null;
     }, card).catch(() => null);
   }
 
@@ -3550,10 +3664,14 @@ class CinemaVideoAutomation extends KlingAutomation {
       await this._closePickerAndReturnToComposer().catch(() => {});
       return { deleted: false, alreadyMissing: true, proof: null };
     }
-    const proof = await this._snapshotElementCardProof(card).catch(() => ({}));
+    await this._centerElementCardInPicker(normalized).catch(() => null);
+    const centeredCard = await this._findElementCard(normalized).catch(() => null) || card;
+    await this._hoverElementCardControls(centeredCard);
+    const proof = await this._snapshotElementCardProof(centeredCard).catch(() => ({}));
     const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
-    const menu = await this._findElementCardMenuButton(card);
-    if (!menu) throw new Error(`Could not find card-local menu button for @${normalized}`);
+    await this._hoverElementCardControls(centeredCard);
+    const menu = await this._findElementCardMenuButton(centeredCard);
+    if (!menu) throw new Error(`Could not find hover-revealed card menu button for @${normalized}`);
     this.log(`Deleting element @${normalized} via card menu at (${menu.x}, ${menu.y})${proofText}`);
     await page.mouse.click(menu.x, menu.y);
     await page.waitForTimeout(900);
