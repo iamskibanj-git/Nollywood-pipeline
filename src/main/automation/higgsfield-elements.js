@@ -1221,7 +1221,7 @@ class HiggsfieldElements {
   async _attachCurrentElementImage(page, filePath, index, total) {
     const before = await this._countCurrentElementPreviews(page);
     this.log(`Uploading element image ${index + 1}/${total}: ${filePath} (previews before=${before})`);
-    await this._openCurrentElementUploadPicker(page);
+    await this._openCurrentElementUploadPicker(page, { existingPreviewCount: before });
     await this._uploadIntoCurrentElementPicker(page, filePath);
     if (!(await this._waitForAddToElementEnabled(page, 45000))) {
       await this._selectFirstCurrentUploadTile(page);
@@ -1236,8 +1236,8 @@ class HiggsfieldElements {
     this.log(`Element image ${index + 1}/${total} attached; previews=${before + 1}+`);
   }
 
-  async _openCurrentElementUploadPicker(page) {
-    const findTarget = async () => page.evaluate(() => {
+  async _openCurrentElementUploadPicker(page, { existingPreviewCount = 0 } = {}) {
+    const findTarget = async () => page.evaluate(({ existingPreviewCount }) => {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -1265,6 +1265,17 @@ class HiggsfieldElements {
           const r = el.getBoundingClientRect();
           const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
           const lower = text.toLowerCase();
+          const mediaCount = el.querySelectorAll('img, video').length;
+          const hasMediaAncestor = !!el.closest('img, video') ||
+            !![...document.querySelectorAll('img, video')].find((media) => {
+              const mr = media.getBoundingClientRect();
+              return mr.width >= 80 &&
+                mr.height >= 80 &&
+                r.x >= mr.x - 12 &&
+                r.y >= mr.y - 12 &&
+                r.x + r.width <= mr.x + mr.width + 12 &&
+                r.y + r.height <= mr.y + mr.height + 12;
+            });
 
           let cx = r.x + r.width / 2;
           let cy = r.y + Math.min(58, r.height * 0.38);
@@ -1287,7 +1298,8 @@ class HiggsfieldElements {
               c.w >= 12 && c.h >= 12 &&
               c.x >= r.x - 2 && c.y >= r.y - 2 &&
               c.x + c.w <= r.x + r.width + 2 &&
-              c.y + c.h <= r.y + r.height + 2
+              c.y + c.h <= r.y + r.height + 2 &&
+              !(existingPreviewCount > 0 && mediaCount > 0)
             )
             .sort((a, b) => {
               const aSvg = a.tag === 'svg' ? 1 : 0;
@@ -1309,8 +1321,14 @@ class HiggsfieldElements {
           if (r.x > window.innerWidth * 0.42) score += 30;
           if (r.w > 250 && r.h > 180) score += 20;
           if (r.y < 120 || r.y > window.innerHeight - 140) score -= 80;
+          if (existingPreviewCount > 0) {
+            if (mediaCount > 0 || hasMediaAncestor) score -= 300;
+            if (r.w > 320 && r.h > 220) score -= 120;
+            if (r.w <= 220 && r.h <= 140) score += 80;
+            if (innerPlus && mediaCount === 0 && !hasMediaAncestor) score += 80;
+          }
 
-          return { text, cx, cy, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el), score, clickKind };
+          return { text, cx, cy, x: r.x, y: r.y, w: r.width, h: r.height, visible: visible(el), score, clickKind, mediaCount, hasMediaAncestor };
         })
         .filter((c) =>
           c.visible &&
@@ -1319,10 +1337,16 @@ class HiggsfieldElements {
           c.y > 80 &&
           c.y < window.innerHeight - 80 &&
           c.w >= 80 &&
-          c.h >= 70
+          c.h >= 70 &&
+          !(existingPreviewCount > 0 && (c.mediaCount > 0 || c.hasMediaAncestor))
         )
-        .sort((a, b) => b.score - a.score || (b.w * b.h) - (a.w * a.h))[0] || null;
-    });
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          const areaA = a.w * a.h;
+          const areaB = b.w * b.h;
+          return existingPreviewCount > 0 ? areaA - areaB : areaB - areaA;
+        })[0] || null;
+    }, { existingPreviewCount });
 
     let target = null;
     const started = Date.now();
@@ -1336,7 +1360,7 @@ class HiggsfieldElements {
     }
     if (!target) throw new Error('Upload media tile not found in element form');
 
-    this.log(`Element upload tile target: "${target.text || '(no text)'}" ${Math.round(target.w)}x${Math.round(target.h)} at (${Math.round(target.cx)}, ${Math.round(target.cy)}), click=${target.clickKind}, score=${target.score}`);
+    this.log(`Element upload tile target: "${target.text || '(no text)'}" ${Math.round(target.w)}x${Math.round(target.h)} at (${Math.round(target.cx)}, ${Math.round(target.cy)}), click=${target.clickKind}, score=${target.score}, existingPreviews=${existingPreviewCount}`);
     for (let attempt = 1; attempt <= 3; attempt++) {
       await page.mouse.click(target.cx, target.cy);
       const opened = await page.waitForFunction(() => {
