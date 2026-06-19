@@ -3812,7 +3812,11 @@ class CinemaStudioAutomation {
         /VideoGenerations/i,
         /Liked/i,
       ].reduce((count, pattern) => count + (pattern.test(String(text || '').replace(/\s+/g, '')) ? 1 : 0), 0);
-      const roots = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
+      const roots = [...document.querySelectorAll(
+        '[role="dialog"], [role="listbox"], [data-radix-popper-content-wrapper], ' +
+        '[class*="modal" i], [class*="picker" i], [class*="popover" i], ' +
+        '[class*="panel" i], [class*="dropdown" i], [class*="overlay" i]'
+      )]
         .filter(visible)
         .map((el) => {
           const r = el.getBoundingClientRect();
@@ -3847,6 +3851,15 @@ class CinemaStudioAutomation {
         .sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x);
       const tab = tabs[0];
       if (!tab) {
+        const rootTextCompact = String(root.text || '').replace(/\s+/g, '');
+        if (/Uploads?/i.test(rootTextCompact) && /Upload(media|images?)/i.test(rootTextCompact)) {
+          return {
+            found: true,
+            alreadyActive: true,
+            reason: 'uploads tab appears active in reference picker',
+            root: { x: Math.round(root.r.x), y: Math.round(root.r.y), w: Math.round(root.r.width), h: Math.round(root.r.height), text: root.text.slice(0, 160) },
+          };
+        }
         return {
           found: false,
           reason: 'uploads tab not found inside reference picker',
