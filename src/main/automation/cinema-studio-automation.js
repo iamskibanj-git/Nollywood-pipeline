@@ -3550,7 +3550,33 @@ class CinemaStudioAutomation {
         .filter(Boolean);
     }).catch(() => []);
 
+    const waitForUploadProofSignal = async (timeoutMs) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (uploadProof.responses.length > 0 || uploadProof.batchOk || uploadProof.putOk || uploadProof.finalizeOk) return true;
+        await page.waitForTimeout(250);
+      }
+      return false;
+    };
+    let uploadStarted = false;
+    const hiddenPrimaryResult = await this._uploadReferenceViaHiddenImageInput(localPath).catch((hiddenError) => ({
+      ok: false,
+      reason: hiddenError.message,
+    }));
+    if (hiddenPrimaryResult.ok) {
+      this.log(`[REF] Hidden file input primary accepted file: ${JSON.stringify(hiddenPrimaryResult)}`);
+      if (await waitForUploadProofSignal(12000)) {
+        uploadStarted = true;
+        this.log('[REF] Hidden file input primary produced backend upload proof');
+      } else {
+        this.log('[REF] Hidden file input primary produced no backend proof yet; trying guarded visible upload click', 'warn');
+      }
+    } else {
+      this.log(`[REF] Hidden file input primary unavailable: ${hiddenPrimaryResult.reason}`, 'warn');
+    }
+
     // ── Step 4: Upload via fileChooser ─────────────────────────────────
+    if (!uploadStarted) {
     try {
       const [fileChooser] = await Promise.all([
         page.waitForEvent('filechooser', { timeout: 20000 }),
@@ -3565,20 +3591,15 @@ class CinemaStudioAutomation {
               }
             } catch (_) {}
           }
-          this.log('[REF] No Upload Images button found via getByText — trying evaluate fallback...');
+          this.log('[REF] No Upload Images button found via getByText — trying strict evaluate fallback...');
           const evalResult = await page.evaluate(() => {
-            for (const el of document.querySelectorAll('button, div, label, span, a, input[type="file"]')) {
-              const t = (el.textContent?.trim() || '');
+            const uploadButtonText = /^(?:\+\s*)?Upload Images?$|^Choose File$|^Browse$/i;
+            for (const el of document.querySelectorAll('button, label, a, [role="button"]')) {
+              const t = (el.textContent?.trim() || '').replace(/\s+/g, ' ');
               const r = el.getBoundingClientRect();
-              if (r.width > 0 && r.height > 0) {
-                if (el.tagName === 'INPUT' && el.type === 'file') {
-                  el.click();
-                  return { clicked: 'file-input' };
-                }
-                if (t && /upload/i.test(t) && !/^uploads?$/i.test(t) && r.width < 300) {
-                  el.click();
-                  return { clicked: t.slice(0, 40) };
-                }
+              if (r.width > 0 && r.height > 0 && r.width < 300 && uploadButtonText.test(t)) {
+                el.click();
+                return { clicked: t.slice(0, 40) };
               }
             }
             return { clicked: false };
@@ -3616,6 +3637,7 @@ class CinemaStudioAutomation {
         throw new Error(`HARD STOP: Upload failed — ${e.message.split('\n')[0]}; hidden input fallback: ${fallbackResult.reason}`);
       }
       this.log(`[REF] Hidden file input fallback accepted file: ${JSON.stringify(fallbackResult)}`);
+    }
     }
 
     // ── Step 5: Wait for upload to process ────────────────────────────

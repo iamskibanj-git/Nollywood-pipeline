@@ -7463,10 +7463,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
    *
    * Idempotent on resume — skip scenes whose scene_image_cinematic asset already exists.
    */
-  async _runCinematicSceneImageStage(projectId, projectDir) {
+  async _runCinematicSceneImageStage(projectId, projectDir, options = {}) {
     const fs = require('fs');
     const path = require('path');
     const { CinemaStudioAutomation } = require('../automation/cinema-studio-automation');
+    const recastSceneRowIds = new Set((options.recastSceneRowIds || [])
+      .map(id => Number(id))
+      .filter(id => Number.isFinite(id)));
+    const recastSceneMode = recastSceneRowIds.size > 0;
+    const recastCharacterId = options.recastCharacterId || null;
 
     // ── HARD GATE: project must exist before scenes can run ──
     // The project is created during _runCinematicElementSetup (element stage).
@@ -7515,16 +7520,50 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
 
     const script = this.state.script;
-    const allScenes = [];
+    const allScriptScenes = [];
     for (const ch of (script.chapters || [])) {
       for (const sc of (ch.scenes || [])) {
-        allScenes.push({ chapter: ch.chapter_number, scene: sc });
+        allScriptScenes.push({ chapter: ch.chapter_number, scene: sc });
       }
     }
 
     const existingScenes = db.getAssets(projectId, { type: 'scene_image_cinematic' });
+    const targetSceneRowsByKey = new Map();
+    if (recastSceneMode) {
+      const targetRows = existingScenes.filter(a => recastSceneRowIds.has(Number(a.id)));
+      const foundIds = new Set(targetRows.map(a => Number(a.id)));
+      const missingIds = [...recastSceneRowIds].filter(id => !foundIds.has(id));
+      if (missingIds.length > 0) {
+        throw new Error(`[FACE-IP-RECAST] Targeted scene regeneration missing DB row id(s): ${missingIds.join(', ')}`);
+      }
+      for (const row of targetRows) {
+        const key = `${row.chapter}_${row.scene}`;
+        if (row.status === 'archived') {
+          throw new Error(`[FACE-IP-RECAST] Targeted recast scene row ${row.id} (${key}) is archived`);
+        }
+        if (recastCharacterId && String(row.error_message || '') !== `face-ip-recast:${recastCharacterId}`) {
+          throw new Error(`[FACE-IP-RECAST] Targeted scene row ${row.id} (${key}) is not tagged face-ip-recast:${recastCharacterId}`);
+        }
+        if (targetSceneRowsByKey.has(key)) {
+          throw new Error(`[FACE-IP-RECAST] Multiple targeted recast scene rows for ${key}`);
+        }
+        targetSceneRowsByKey.set(key, row);
+      }
+    }
+    let allScenes = recastSceneMode
+      ? allScriptScenes.filter(({ chapter, scene }) => targetSceneRowsByKey.has(`${chapter}_${scene.scene_number}`))
+      : allScriptScenes;
+    if (recastSceneMode) {
+      if (allScenes.length !== targetSceneRowsByKey.size) {
+        const scriptKeys = new Set(allScriptScenes.map(s => `${s.chapter}_${s.scene.scene_number}`));
+        const missingScriptScenes = [...targetSceneRowsByKey.keys()].filter(key => !scriptKeys.has(key));
+        throw new Error(`[FACE-IP-RECAST] Targeted recast scene row(s) not present in script: ${missingScriptScenes.join(', ')}`);
+      }
+      this.log(`[FACE-IP-RECAST] Scene regeneration scope locked to ${allScenes.length} DB row id(s): ${[...recastSceneRowIds].join(', ')}`);
+    }
     const existingByKey = {};
     for (const a of existingScenes) {
+      if (recastSceneMode && !recastSceneRowIds.has(Number(a.id))) continue;
       if (a.status === 'done' && a.file_path && fs.existsSync(a.file_path)) {
         existingByKey[`${a.chapter}_${a.scene}`] = a.file_path;
       }
@@ -7533,28 +7572,32 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     // If the app was closed at the manual scene-image gate and the operator
     // completed files on disk before resuming, recover those files immediately
     // instead of spending credits to regenerate them.
-    let recoveredSceneFiles = 0;
-    for (const { chapter, scene } of allScenes) {
-      const key = `${chapter}_${scene.scene_number}`;
-      if (existingByKey[key]) continue;
-      const expectedPath = path.join(sceneDir, `ch${String(chapter).padStart(2, '0')}_sc${String(scene.scene_number).padStart(2, '0')}_cinematic.png`);
-      if (!fs.existsSync(expectedPath)) continue;
+    if (recastSceneMode) {
+      this.log('[FACE-IP-RECAST] Skipping disk scene-image recovery for targeted recast rows; replacement images must be newly generated.');
+    } else {
+      let recoveredSceneFiles = 0;
+      for (const { chapter, scene } of allScenes) {
+        const key = `${chapter}_${scene.scene_number}`;
+        if (existingByKey[key]) continue;
+        const expectedPath = path.join(sceneDir, `ch${String(chapter).padStart(2, '0')}_sc${String(scene.scene_number).padStart(2, '0')}_cinematic.png`);
+        if (!fs.existsSync(expectedPath)) continue;
 
-      let asset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
-        .find(a => a.chapter === chapter && a.scene === scene.scene_number);
-      if (!asset) {
-        db.insertExpectedAssets(projectId, [{ type: 'scene_image_cinematic', chapter, scene: scene.scene_number }]);
-        asset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
-          .find(a => a.chapter === chapter && a.scene === scene.scene_number);
+        let asset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .find(a => a.status !== 'archived' && a.chapter === chapter && a.scene === scene.scene_number);
+        if (!asset) {
+          db.insertExpectedAssets(projectId, [{ type: 'scene_image_cinematic', chapter, scene: scene.scene_number }]);
+          asset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+            .find(a => a.status !== 'archived' && a.chapter === chapter && a.scene === scene.scene_number);
+        }
+        if (asset) {
+          db.markAssetDone(asset.id, expectedPath, { model: 'cinematic-cameras-disk-recovered', sourceGenId: null });
+          existingByKey[key] = expectedPath;
+          recoveredSceneFiles++;
+        }
       }
-      if (asset) {
-        db.markAssetDone(asset.id, expectedPath, { model: 'cinematic-cameras-disk-recovered', sourceGenId: null });
-        existingByKey[key] = expectedPath;
-        recoveredSceneFiles++;
+      if (recoveredSceneFiles > 0) {
+        this.log(`[CINEMATIC] Recovered ${recoveredSceneFiles} scene image(s) already present on disk`);
       }
-    }
-    if (recoveredSceneFiles > 0) {
-      this.log(`[CINEMATIC] Recovered ${recoveredSceneFiles} scene image(s) already present on disk`);
     }
 
     // ── STALE ASSET CLEANUP ──
@@ -7562,7 +7605,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     // current script. These accumulate from previous runs with different scripts
     // or from duplicate insertExpectedAssets calls on restart. Without cleanup,
     // verifyStageComplete() sees them as pending and blocks the pipeline.
-    const validKeys = new Set(allScenes.map(s => `${s.chapter}_${s.scene.scene_number}`));
+    const validKeys = new Set(allScriptScenes.map(s => `${s.chapter}_${s.scene.scene_number}`));
     const staleAssets = existingScenes.filter(a => a.status !== 'archived' && !validKeys.has(`${a.chapter}_${a.scene}`));
     if (staleAssets.length > 0) {
       this.log(`[CINEMATIC] Cleaning up ${staleAssets.length} stale scene_image_cinematic assets (not in current script)`);
@@ -7574,8 +7617,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     // ── DEDUP: remove duplicate pending assets for the same chapter_scene ──
     // Each restart of the scene loop calls insertExpectedAssets for pending scenes,
     // creating duplicate rows. Keep only one asset per chapter+scene (prefer done > generating > pending).
+    const targetKeys = new Set(targetSceneRowsByKey.keys());
     const freshAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' })
-      .filter(a => a.status !== 'archived'); // archived rows are not duplicates — they're history
+      .filter(a => a.status !== 'archived')
+      .filter(a => !recastSceneMode || !targetKeys.has(`${a.chapter}_${a.scene}`)); // archived rows are history; recast targets are exact-id scoped below
     const seenKeys = {};
     const dupeIds = [];
     // Sort so 'done' comes first, then 'generating', then 'pending'
@@ -7743,14 +7788,38 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
       const outputPath = path.join(sceneDir, `ch${String(chapter).padStart(2, '0')}_sc${String(scene.scene_number).padStart(2, '0')}_cinematic.png`);
 
-      // Insert asset row (with dedup — only if no row exists for this chapter+scene)
-      const existingAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
-        .find(a => a.chapter === chapter && a.scene === scene.scene_number);
-      if (!existingAsset) {
-        db.insertExpectedAssets(projectId, [{ type: 'scene_image_cinematic', chapter, scene: scene.scene_number }]);
+      let sceneAsset = null;
+      if (recastSceneMode) {
+        const targetRow = targetSceneRowsByKey.get(key);
+        if (!targetRow) {
+          this.log(`[FACE-IP-RECAST] Skipping non-target scene Ch${chapter} Sc${scene.scene_number} during targeted recast regen.`);
+          continue;
+        }
+        sceneAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .find(a => Number(a.id) === Number(targetRow.id));
+        if (!sceneAsset || sceneAsset.status === 'archived') {
+          throw new Error(`[FACE-IP-RECAST] Targeted recast scene row ${targetRow.id} for Ch${chapter} Sc${scene.scene_number} is no longer active`);
+        }
+        const conflictingRows = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .filter(a =>
+            a.status !== 'archived' &&
+            Number(a.id) !== Number(sceneAsset.id) &&
+            Number(a.chapter) === Number(chapter) &&
+            Number(a.scene) === Number(scene.scene_number)
+          );
+        if (conflictingRows.length > 0) {
+          throw new Error(`[FACE-IP-RECAST] Targeted recast scene Ch${chapter} Sc${scene.scene_number} has active non-target row(s): ${conflictingRows.map(a => `${a.id}:${a.status}`).join(', ')}`);
+        }
+      } else {
+        // Insert asset row (with dedup — only if no active row exists for this chapter+scene)
+        const existingAsset = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .find(a => a.status !== 'archived' && a.chapter === chapter && a.scene === scene.scene_number);
+        if (!existingAsset) {
+          db.insertExpectedAssets(projectId, [{ type: 'scene_image_cinematic', chapter, scene: scene.scene_number }]);
+        }
+        sceneAsset = existingAsset || db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .find(a => a.status !== 'archived' && a.chapter === chapter && a.scene === scene.scene_number);
       }
-      const sceneAsset = existingAsset || db.getAssets(projectId, { type: 'scene_image_cinematic' })
-        .find(a => a.chapter === chapter && a.scene === scene.scene_number);
 
       // ── HARVEST-FIRST: Check if this scene already exists on the project page ──
       // Before spending credits on a new generation, scan the Higgsfield project's
@@ -8241,7 +8310,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const finalSceneAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
     const missingScenes = [];
     for (const { chapter, scene } of allScenes) {
-      const asset = finalSceneAssets.find(a => a.chapter === chapter && a.scene === scene.scene_number);
+      const key = `${chapter}_${scene.scene_number}`;
+      const targetRow = targetSceneRowsByKey.get(key);
+      const asset = recastSceneMode
+        ? finalSceneAssets.find(a => Number(a.id) === Number(targetRow?.id))
+        : finalSceneAssets.find(a => a.status !== 'archived' && a.chapter === chapter && a.scene === scene.scene_number);
       if (!asset || asset.status !== 'done' || !asset.file_path || !fs.existsSync(asset.file_path)) {
         const _fbHintClean = (scene.location_element_hint || '').toLowerCase().replace(/[^a-z0-9_]/g, '_');
         const locInfo = _locMap[_fbHintClean] || _locMap[scene.location_element_hint] || null;
@@ -8272,7 +8345,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           this.log(`[CINEMATIC] WARN: auto-recovery reset failed: ${resetErr.message} — retry pass will still proceed`, 'warn');
         }
         await new Promise(r => setTimeout(r, delayMs));
-        return await this._runCinematicSceneImageStage(projectId, projectDir);
+        return await this._runCinematicSceneImageStage(projectId, projectDir, options);
       }
       throw new Error(`[CINEMATIC] Scene image automation exhausted ${maxRecoveryCycles} recovery cycle(s); ${missingScenes.length} scene image(s) still missing. No human scene-image gate emitted.`);
 
@@ -11167,6 +11240,35 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     return this._normalizeRecastSceneRefs(state?.scenes || []);
   }
 
+  _getFaceIpRecastSceneRows(projectId, characterId, scenes) {
+    const sceneRefs = this._normalizeRecastSceneRefs(scenes);
+    const recastMarker = `face-ip-recast:${characterId}`;
+    const sceneAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
+    const rows = [];
+    const failures = [];
+
+    for (const sceneRef of sceneRefs) {
+      const taggedRows = sceneAssets
+        .filter(a =>
+          a.status !== 'archived' &&
+          Number(a.chapter) === Number(sceneRef.chapter) &&
+          Number(a.scene) === Number(sceneRef.scene) &&
+          String(a.error_message || '') === recastMarker
+        )
+        .sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+      if (taggedRows.length !== 1) {
+        failures.push(`ch${sceneRef.chapter}_sc${sceneRef.scene} has ${taggedRows.length} active recast-tagged replacement row(s)`);
+        continue;
+      }
+      rows.push(taggedRows[0]);
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`[FACE-IP-RECAST] Could not prove exact recast scene row scope: ${failures.join('; ')}`);
+    }
+    return rows;
+  }
+
   _assertFaceIpRecastSceneDbProof(projectId, characterId, scenes, phase) {
     const fs = require('fs');
     const sceneRefs = this._normalizeRecastSceneRefs(scenes);
@@ -11537,7 +11639,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     if (scenes.length > 0 && !regenProof) {
       this.log(`[FACE-IP-RECAST] Regenerating ${scenes.length} affected scene image(s) before returning to video generation.`);
-      await this._runCinematicSceneImageStage(projectId, projectDir);
+      const recastSceneRows = this._getFaceIpRecastSceneRows(projectId, spec.characterId, scenes);
+      await this._runCinematicSceneImageStage(projectId, projectDir, {
+        reason: 'face-ip-recast',
+        recastCharacterId: spec.characterId,
+        recastSceneRowIds: recastSceneRows.map(row => row.id),
+      });
       this.verifyStageComplete('scene_image_cinematic', 'Scene Images (cinematic)');
       regenProof = this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'regenerated');
       db.updateProjectStage(projectId, 'scenes-done');
