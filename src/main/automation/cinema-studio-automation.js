@@ -2514,7 +2514,7 @@ class CinemaStudioAutomation {
    * Flow:
    *   1. Click the + button (reference picker) next to the prompt textbox
    *   2. Click "Uploads" tab in the picker popup
-   *   3. Upload the local location image via Playwright fileChooser
+   *   3. Upload the local location image through the hidden image file input
    *   4. Wait for upload to finish (thumbnail appears in picker)
    *   5. Click the uploaded image tile to select it as reference
    *   6. Wait for the + button to transform into a thumbnail (reference loaded)
@@ -3001,9 +3001,9 @@ class CinemaStudioAutomation {
             w: Math.round(r.width),
             h: Math.round(r.height),
             text: text.slice(0, 120),
-            hasUploadTab: /\bUploads?\b/i.test(text),
-            hasUploadControl: /Upload (media|images?)|Drag & drop|click to upload/i.test(text),
-            hasReferenceSignal: /Image Generations|Uploads?|References?|Add to prompt box|Upload media/i.test(text),
+            hasUploadTab: /Uploads?/i.test(text.replace(/\s+/g, '')),
+            hasUploadControl: /Upload(media|images?)|Drag&drop|clicktoupload/i.test(text.replace(/\s+/g, '')),
+            hasReferenceSignal: /ImageGenerations|VideoGenerations|Uploads?|Elements|Liked|Addtopromptbox|Uploadmedia/i.test(text.replace(/\s+/g, '')),
             nearComposer,
           };
         });
@@ -3013,18 +3013,37 @@ class CinemaStudioAutomation {
           const r = t.getBoundingClientRect();
           return { text: norm(t.textContent || '').slice(0, 40), x: Math.round(r.x), y: Math.round(r.y) };
         });
-      const bodyText = norm(document.body?.innerText || '');
-      const hasPickerText = /Image Generations|Uploads?|Upload media|Add to prompt box|Drag & drop|click to upload/i.test(bodyText);
-      const realPickerPanels = panels.filter((p) =>
-        p.hasReferenceSignal &&
-        (p.nearComposer || p.hasUploadControl || p.hasUploadTab || p.w >= 240)
-      );
-      const hasVisiblePicker = realPickerPanels.length > 0 || hasPickerText;
+      const pickerTabCount = (text) => [
+        /Uploads?/i,
+        /Elements/i,
+        /ImageGenerations/i,
+        /VideoGenerations/i,
+        /Liked/i,
+      ].reduce((count, pattern) => count + (pattern.test(String(text || '').replace(/\s+/g, '')) ? 1 : 0), 0);
+      const realPickerPanels = panels
+        .map((p) => ({ ...p, pickerTabCount: pickerTabCount(p.text) }))
+        .filter((p) =>
+          p.w >= 360 &&
+          p.h >= 240 &&
+          p.pickerTabCount >= 3 &&
+          !/Describe (your|the)? ?scene/i.test(p.text) &&
+          !/\bGENERATE\b/i.test(p.text)
+        );
+      const hasPickerText = realPickerPanels.length > 0;
+      const hasVisiblePicker = realPickerPanels.length > 0;
       const hasVisibleComposer = !!textbox && textbox.w > 1 && textbox.h > 1;
       return {
         ok: hasVisiblePicker,
         textbox,
         panels: panels.slice(0, 6),
+        realPickerPanels: realPickerPanels.slice(0, 3).map(p => ({
+          x: p.x,
+          y: p.y,
+          w: p.w,
+          h: p.h,
+          pickerTabCount: p.pickerTabCount,
+          text: p.text,
+        })),
         tabs: tabs.slice(0, 10),
         hasPickerText,
         composerOk: hasVisibleComposer,
@@ -3249,18 +3268,20 @@ class CinemaStudioAutomation {
     const maxAttempts = 3;
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      await this._dismissOverlays();
       try {
         await this._attachLocationReferenceViaUpload(locationImagePath);
         return;
       } catch (e) {
         lastError = e;
         const msg = e?.message || String(e);
-        const retryable = /REFERENCE_PICKER_NOT_OPEN|REFERENCE_COMPOSER_LOST|START_FRAME_UPLOAD_NOT_ATTACHED|START_FRAME_UPLOAD_NOT_SELECTABLE|reference thumbnail not confirmed/i.test(msg);
+        const retryable = /REFERENCE_PICKER_NOT_OPEN|REFERENCE_PICKER_TAB_NOT_FOUND|REFERENCE_COMPOSER_LOST|START_FRAME_UPLOAD_INPUT_UNAVAILABLE|START_FRAME_UPLOAD_NOT_SETTLED|START_FRAME_UPLOAD_NOT_ATTACHED|START_FRAME_UPLOAD_NOT_SELECTABLE|reference thumbnail not confirmed/i.test(msg);
         if (!retryable || attempt >= maxAttempts) break;
         this.log(`[REF] Reference attach attempt ${attempt}/${maxAttempts} drifted (${msg.split('\n')[0]}) - resetting composer and retrying`, 'warn');
-        await page.keyboard.press('Escape').catch(() => {});
-        await this._dismissOverlays().catch(() => {});
+        const openPickerDrift = /REFERENCE_PICKER_NOT_OPEN|REFERENCE_PICKER_TAB_NOT_FOUND/i.test(msg);
+        if (!openPickerDrift) {
+          await page.keyboard.press('Escape').catch(() => {});
+          await this._dismissOverlays().catch(() => {});
+        }
         await page.waitForTimeout(2000);
         await this._scrollToolbarIntoView().catch(() => {});
       }
@@ -3278,7 +3299,7 @@ class CinemaStudioAutomation {
     // Steps:
     //   1. Click + button → opens reference picker
     //   2. Click "Uploads" tab
-    //   3. Click "Upload Images" → fileChooser → set local file
+    //   3. Set the hidden image file input after the Uploads picker is proven open
     //   4. Click the newly uploaded tile (first tile)
     //   5. Click textbox to dismiss picker
     //   6. Verify thumbnail on + button
@@ -3329,11 +3350,11 @@ class CinemaStudioAutomation {
       try { page.off('response', onUploadResponse); } catch (_) {}
     };
 
-    // REFERENCE IMAGE UPLOAD — + button click → Uploads tab → fileChooser
+    // REFERENCE IMAGE UPLOAD — + button click → Uploads tab → hidden image input
     //
     // The + button (reference picker) renders when Cinematic Cameras model
-    // is properly selected.  We click it with page.mouse.click() for
-    // isTrusted events (Radix UI requires this).
+    // is properly selected.  We mark the exact bottom References button,
+    // verify its tooltip, then click that same marked button.
     //
     // DUAL TOOLBAR: Cinema Studio renders two overlapping toolbars (active
     // and inactive model). Both have identical + buttons at nearly the same
@@ -3355,6 +3376,9 @@ class CinemaStudioAutomation {
           el.style.removeProperty('pointer-events');
           el.removeAttribute('data-cs-btn-hidden');
         });
+        document.querySelectorAll('[data-cs-reference-plus-target]').forEach(el => {
+          el.removeAttribute('data-cs-reference-plus-target');
+        });
       }).catch(() => {});
     };
 
@@ -3374,12 +3398,21 @@ class CinemaStudioAutomation {
       return { popovers: popoverInfo.slice(0, 5), tabs: tabs.slice(0, 10) };
     }).catch(e => ({ error: e.message }));
 
-    for (let round = 1; round <= 8; round++) {
+    pickerState = await this._readReferencePickerState();
+    if (pickerState.ok) {
+      openedPlusCandidate = { alreadyOpen: true };
+      this.log(`[REF] Reference picker already open before + click: ${JSON.stringify(pickerState)}`);
+    }
+
+    for (let round = 1; round <= 8 && !pickerState?.ok; round++) {
       const plusSearch = await page.evaluate((badKeys) => {
       // Clean up any leftover state from previous attempts
       document.querySelectorAll('[data-cs-btn-hidden]').forEach(el => {
         el.style.removeProperty('pointer-events');
         el.removeAttribute('data-cs-btn-hidden');
+      });
+      document.querySelectorAll('[data-cs-reference-plus-target]').forEach(el => {
+        el.removeAttribute('data-cs-reference-plus-target');
       });
 
       const findVisibleComposer = () => {
@@ -3406,19 +3439,147 @@ class CinemaStudioAutomation {
       const tb = findVisibleComposer();
       if (!tb) return { ok: false, reason: 'no textbox' };
       const tbRect = tb.getBoundingClientRect();
-      const tbLeftEdge = tbRect.x + 15;
       const candidateKey = (r) => `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`;
+      const openUploadPicker = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const compactText = text.replace(/\s+/g, '');
+          return { r, text, compactText };
+        })
+        .find(({ r, compactText }) => r.width > 250 && r.height > 180 && /Uploads?/i.test(compactText) && /Uploadmedia/i.test(compactText));
+      if (openUploadPicker) {
+        return {
+          ok: false,
+          reason: 'reference picker already open before composer + click',
+          picker: {
+            x: Math.round(openUploadPicker.r.x),
+            y: Math.round(openUploadPicker.r.y),
+            w: Math.round(openUploadPicker.r.width),
+            h: Math.round(openUploadPicker.r.height),
+          },
+        };
+      }
+      const inComposerPanel = (el) => {
+        const ownRect = el.getBoundingClientRect();
+        const ownCx = ownRect.x + ownRect.width / 2;
+        const ownCy = ownRect.y + ownRect.height / 2;
+        if (
+          ownCx >= tbRect.x - 120 &&
+          ownCx <= tbRect.x + 150 &&
+          ownCy >= tbRect.bottom - 6 &&
+          ownCy <= tbRect.bottom + 90
+        ) {
+          return true;
+        }
+        for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (
+            r.width > 420 && r.height > 70 &&
+            r.y > window.innerHeight * 0.50 &&
+            /Describe (your|the)? ?scene/i.test(text) &&
+            /Cinema Studio 3\.5/i.test(text) &&
+            /\bGENERATE\b/i.test(text)
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+      const insideUploadPickerCard = (el) => {
+        for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+          const r = node.getBoundingClientRect();
+          const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          const compactText = text.replace(/\s+/g, '');
+          if (r.width > 120 && r.height > 70 && /Uploadmedia/i.test(compactText)) return true;
+          if (r.width > 250 && r.height > 180 && /Uploads?/i.test(text.replace(/\s+/g, '')) && /\bCheck eligibility\b/i.test(text)) return true;
+        }
+        return false;
+      };
 
-      // Find ALL small no-text SVG buttons to the left of the textbox
-      // (the + button candidates from both toolbars)
+      // The reference picker is the composer + immediately to the left of @.
+      // Never target generic Upload/Search/toolbar buttons elsewhere on the page.
       const allCandidates = [];
-      for (const b of document.querySelectorAll('button')) {
-        const r = b.getBoundingClientRect();
-        const key = candidateKey(r);
-        if (badKeys.includes(key)) continue;
-        if (r.width > 0 && r.width <= 60 && r.height <= 60 &&
-            r.x <= tbLeftEdge + 110 && r.x + r.width >= tbRect.x - 170 && !b.textContent?.trim() && b.querySelector('svg') &&
-            r.y > window.innerHeight * 0.40) {
+      const rejectedCandidates = [];
+      const controls = [...document.querySelectorAll('button, [role="button"]')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const label = [
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+            text,
+          ].join(' ').replace(/\s+/g, ' ').trim();
+          return {
+            el,
+            r,
+            text,
+            label,
+            cx: r.x + r.width / 2,
+            cy: r.y + r.height / 2,
+            hasIcon: !!el.querySelector('svg, path'),
+          };
+        })
+        .filter(({ el, r }) =>
+          r.width > 0 && r.width <= 72 &&
+          r.height > 0 && r.height <= 72 &&
+          r.y > window.innerHeight * 0.40 &&
+          !insideUploadPickerCard(el)
+        );
+      const atAnchors = controls
+        .filter((c) => {
+          if (
+            !inComposerPanel(c.el) ||
+            c.cx < tbRect.x - 40 ||
+            c.cx > tbRect.x + 160 ||
+            c.cy < tbRect.bottom - 10 ||
+            c.cy > tbRect.bottom + 95
+          ) {
+            return false;
+          }
+          if (c.text === '@') return true;
+          if (c.text || !c.hasIcon) return false;
+          return controls.some((left) => {
+            const distanceLeftOfAnchor = c.cx - left.cx;
+            return left !== c &&
+              inComposerPanel(left.el) &&
+              Math.abs(left.cy - c.cy) <= 10 &&
+              distanceLeftOfAnchor >= 18 &&
+              distanceLeftOfAnchor <= 58 &&
+              (left.text === '+' || (!left.text && left.hasIcon));
+          });
+        })
+        .sort((a, b) => Math.abs(a.cy - (tbRect.bottom + 25)) - Math.abs(b.cy - (tbRect.bottom + 25)) || a.cx - b.cx);
+
+      for (const atAnchor of atAnchors) {
+        for (const c of controls) {
+          const b = c.el;
+          const r = c.r;
+          const key = candidateKey(r);
+          if (badKeys.includes(key)) continue;
+          if (b === atAnchor.el) continue;
+          if (Math.abs(c.cy - atAnchor.cy) > 10) continue;
+          const distanceLeftOfAt = atAnchor.cx - c.cx;
+          if (distanceLeftOfAt < 18 || distanceLeftOfAt > 58) continue;
+          if (c.cx < tbRect.x - 80 || c.cx > tbRect.x + 100) continue;
+          const looksLikePlus = c.text === '+' || (!c.text && c.hasIcon) || /\b(add|reference)\b/i.test(c.label);
+          if (!looksLikePlus) {
+            rejectedCandidates.push({ key, reason: 'not-plus-left-of-at', text: c.text, label: c.label.slice(0, 80), x: Math.round(r.x), y: Math.round(r.y) });
+            continue;
+          }
+          if (/upload|share|filter|view|generate|image|video/i.test(c.label)) {
+            rejectedCandidates.push({ key, reason: 'forbidden-label', text: c.text, label: c.label.slice(0, 80), x: Math.round(r.x), y: Math.round(r.y) });
+            continue;
+          }
+          if (insideUploadPickerCard(b)) {
+            rejectedCandidates.push({ key, reason: 'inside-upload-picker-card', x: Math.round(r.x), y: Math.round(r.y) });
+            continue;
+          }
+          if (!inComposerPanel(b)) {
+            rejectedCandidates.push({ key, reason: 'outside-composer-panel', x: Math.round(r.x), y: Math.round(r.y) });
+            continue;
+          }
           // Determine ancestor proximity to the textbox
           let depth = 0;
           let ancestor = b.parentElement;
@@ -3430,23 +3591,48 @@ class CinemaStudioAutomation {
           const cx = r.x + r.width / 2;
           const cy = r.y + r.height / 2;
           const verticalDistance = Math.abs(cy - (tbRect.y + tbRect.height * 0.70));
-          const leftDistance = Math.abs(cx - Math.max(tbRect.x - 40, 0));
-          const score = (depth * 1000) + leftDistance + (verticalDistance * 0.35);
-          allCandidates.push({ btn: b, depth, r, key, score: Math.round(score) });
+          const atDistance = Math.abs((atAnchor.cx - cx) - 31);
+          const score = (depth * 1000) + atDistance + (verticalDistance * 0.35);
+          allCandidates.push({
+            btn: b,
+            depth,
+            r,
+            key,
+            score: Math.round(score),
+            anchor: { x: Math.round(atAnchor.cx), y: Math.round(atAnchor.cy), text: atAnchor.text },
+          });
         }
       }
 
       if (allCandidates.length === 0) {
-        return { ok: false, reason: 'no + button candidates found', tbX: Math.round(tbRect.x), tbY: Math.round(tbRect.y) };
+        return {
+          ok: false,
+          reason: 'no composer + button candidates found',
+          tbX: Math.round(tbRect.x),
+          tbY: Math.round(tbRect.y),
+          atAnchors: atAnchors.slice(0, 6).map(a => ({ x: Math.round(a.cx), y: Math.round(a.cy), text: a.text, label: a.label.slice(0, 80) })),
+          rejectedCandidates: rejectedCandidates.slice(0, 8),
+        };
       }
 
-      // The correct button has the SMALLEST ancestor depth with the textbox
+      // The correct button has the SMALLEST ancestor depth with the textbox.
+      // Dedupe first: Higgsfield can expose the same visual button through
+      // multiple matching nodes/anchors, and disabling a duplicate by rect can
+      // disable the actual target.
       allCandidates.sort((a, b) => a.score - b.score);
-      const correct = allCandidates[0];
+      const uniqueCandidates = [];
+      const seenCandidateKeys = new Set();
+      for (const c of allCandidates) {
+        if (seenCandidateKeys.has(c.key)) continue;
+        seenCandidateKeys.add(c.key);
+        uniqueCandidates.push(c);
+      }
+      const correct = uniqueCandidates[0];
 
       // Disable pointer-events on ALL other candidates so they can't intercept
       const duplicatesDisabled = [];
-      for (const c of allCandidates.slice(1)) {
+      for (const c of uniqueCandidates.slice(1)) {
+        if (c.btn === correct.btn || c.key === correct.key) continue;
         c.btn.style.setProperty('pointer-events', 'none', 'important');
         c.btn.setAttribute('data-cs-btn-hidden', 'true');
         duplicatesDisabled.push({ x: Math.round(c.r.x), y: Math.round(c.r.y), depth: c.depth });
@@ -3454,6 +3640,7 @@ class CinemaStudioAutomation {
 
       const cx = correct.r.x + correct.r.width / 2;
       const cy = correct.r.y + correct.r.height / 2;
+      correct.btn.setAttribute('data-cs-reference-plus-target', 'true');
       return {
         ok: true,
         x: Math.round(cx),
@@ -3462,8 +3649,9 @@ class CinemaStudioAutomation {
         w: Math.round(correct.r.width),
         depth: correct.depth,
         score: correct.score,
-        totalCandidates: allCandidates.length,
-        candidates: allCandidates.slice(0, 8).map(c => ({
+        totalCandidates: uniqueCandidates.length,
+        duplicateCandidateCount: allCandidates.length - uniqueCandidates.length,
+        candidates: uniqueCandidates.slice(0, 8).map(c => ({
           key: c.key,
           x: Math.round(c.r.x + c.r.width / 2),
           y: Math.round(c.r.y + c.r.height / 2),
@@ -3483,8 +3671,102 @@ class CinemaStudioAutomation {
       }
 
     // ── Step 2: Click + button with real mouse (isTrusted) ────────────
-      await page.mouse.click(plusSearch.x, plusSearch.y);
-      this.log(`[REF] Tried + candidate ${round} at (${plusSearch.x}, ${plusSearch.y}) depth=${plusSearch.depth} total=${plusSearch.totalCandidates} disabled=${plusSearch.duplicatesDisabled?.length || 0}`);
+      const tooltipProof = await page.evaluate((targetKey) => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const target = document.querySelector('[data-cs-reference-plus-target="true"]');
+        const targetRect = target?.getBoundingClientRect?.();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
+            && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+        };
+        const tooltips = [...document.querySelectorAll('[role="tooltip"], [role="dialog"], [data-radix-popper-content-wrapper], [class*="tooltip" i], [class*="popover" i]')]
+          .filter(visible)
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            return {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+              text: clean(el.innerText || el.textContent || ''),
+            };
+          })
+          .filter((t) => t.w <= 180 && t.h <= 80);
+        const referenceTooltip = tooltips.find((t) => /^References\b/i.test(t.text));
+        return {
+          ok: !!referenceTooltip,
+          targetKey,
+          target: targetRect ? {
+            x: Math.round(targetRect.x),
+            y: Math.round(targetRect.y),
+            w: Math.round(targetRect.width),
+            h: Math.round(targetRect.height),
+          } : null,
+          tooltips,
+          referenceTooltip: referenceTooltip || null,
+        };
+      }, plusSearch.key).catch(error => ({ ok: false, error: error.message || String(error) }));
+      this.log(`[REF] References + tooltip proof round ${round}: ${JSON.stringify(tooltipProof)}`);
+      if (!tooltipProof.ok) {
+        this.log(`[REF] References tooltip not visible for marked + candidate; proceeding with marker/position proof only`, 'warn');
+      }
+
+      const clickResult = await page.evaluate(({ x, y }) => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const top = document.elementFromPoint(x, y);
+        const btn = top?.closest?.('button,[role="button"]') || null;
+        if (!btn) return { ok: false, reason: 'no button under reference + coordinate', topTag: top?.tagName || '' };
+        const r = btn.getBoundingClientRect();
+        if (!r.width || !r.height) {
+          return { ok: false, reason: 'topmost reference + button has empty rect', topTag: top?.tagName || '' };
+        }
+        const opts = {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: x,
+          clientY: y,
+          button: 0,
+          buttons: 1,
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+        };
+        btn.dispatchEvent(new PointerEvent('pointerover', opts));
+        btn.dispatchEvent(new PointerEvent('pointerenter', opts));
+        btn.dispatchEvent(new MouseEvent('mouseover', opts));
+        btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+        btn.dispatchEvent(new MouseEvent('mousedown', opts));
+        btn.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 }));
+        btn.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+        btn.click();
+        return {
+          ok: true,
+          topTag: top?.tagName || '',
+          topText: clean(top?.textContent || '').slice(0, 60),
+          topButtonText: clean(btn.textContent || '').slice(0, 60),
+          rect: {
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          },
+        };
+      }, { x: plusSearch.x, y: plusSearch.y }).catch(error => ({
+        ok: false,
+        reason: error.message || String(error),
+      }));
+      if (!clickResult.ok) {
+        this.log(`[REF] References + click failed round ${round}: ${JSON.stringify(clickResult)}`, 'warn');
+        badPlusCandidateKeys.add(plusSearch.key || `${plusSearch.x},${plusSearch.y}`);
+        await restorePlusCandidates();
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(500);
+        continue;
+      }
+      this.log(`[REF] Tried References + candidate ${round} at (${plusSearch.x}, ${plusSearch.y}) depth=${plusSearch.depth} total=${plusSearch.totalCandidates} disabled=${plusSearch.duplicatesDisabled?.length || 0} click=${JSON.stringify(clickResult)}`);
       await page.waitForTimeout(3000);
 
       await restorePlusCandidates();
@@ -3511,37 +3793,80 @@ class CinemaStudioAutomation {
     if (!pickerState?.ok) {
       detachUploadListener();
       await restorePlusCandidates();
-      await page.keyboard.press('Escape').catch(() => {});
       throw new Error(`REFERENCE_PICKER_NOT_OPEN: ${pickerState?.reason || 'no + candidate opened picker'} (tried=${JSON.stringify([...badPlusCandidateKeys])}, last=${JSON.stringify(pickerState)})`);
     }
     this.log(`[REF] Reference picker opened by + candidate ${JSON.stringify(openedPlusCandidate)}`);
 
-    let uploadsTabFound = false;
-    for (const label of ['Uploads', 'Upload', 'uploads', 'UPLOADS']) {
-      try {
-        const tab = page.getByText(label, { exact: true }).first();
-        if (await tab.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await tab.click({ timeout: 3000 });
-          this.log(`[REF] Tab "${label}" clicked`);
-          uploadsTabFound = true;
-          break;
-        }
-      } catch (_) {}
-    }
-    if (!uploadsTabFound) {
-      const tabClickResult = await page.evaluate(() => {
-        for (const el of document.querySelectorAll('[role="tab"], button, div, span, a')) {
-          const t = (el.textContent?.trim() || '').toLowerCase();
+    const tabClickResult = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+      };
+      const pickerTabCount = (text) => [
+        /Uploads?/i,
+        /Elements/i,
+        /ImageGenerations/i,
+        /VideoGenerations/i,
+        /Liked/i,
+      ].reduce((count, pattern) => count + (pattern.test(String(text || '').replace(/\s+/g, '')) ? 1 : 0), 0);
+      const roots = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
+        .filter(visible)
+        .map((el) => {
           const r = el.getBoundingClientRect();
-          if (r.width > 0 && (t === 'uploads' || t === 'upload') && r.width < 200) {
-            el.click();
-            return { found: true, text: el.textContent?.trim(), x: Math.round(r.x), y: Math.round(r.y) };
-          }
-        }
-        return { found: false };
-      }).catch(() => ({ found: false }));
-      this.log(`[REF] Uploads tab fallback: ${JSON.stringify(tabClickResult)}`);
+          const text = clean(el.innerText || el.textContent || '');
+          return { el, r, text, pickerTabCount: pickerTabCount(text) };
+        })
+        .filter(({ r, text, pickerTabCount }) =>
+          r.width >= 360 &&
+          r.height >= 240 &&
+          pickerTabCount >= 3 &&
+          !/Describe (your|the)? ?scene/i.test(text) &&
+          !/\bGENERATE\b/i.test(text) &&
+          !/\b(Filter|View|Share)\b.*\bUpload\b/i.test(text)
+        )
+        .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+      const root = roots[0];
+      if (!root) return { found: false, reason: 'no reference picker root' };
+
+      const tabs = [...root.el.querySelectorAll('[role="tab"], button, [role="button"], div, span, a')]
+        .filter(visible)
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          return { el, r, text: clean(el.innerText || el.textContent || '') };
+        })
+        .filter(({ r, text }) =>
+          r.width > 20 &&
+          r.width < 220 &&
+          r.height > 10 &&
+          r.height < 80 &&
+          /^Uploads?$/i.test(text)
+        )
+        .sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x);
+      const tab = tabs[0];
+      if (!tab) {
+        return {
+          found: false,
+          reason: 'uploads tab not found inside reference picker',
+          root: { x: Math.round(root.r.x), y: Math.round(root.r.y), w: Math.round(root.r.width), h: Math.round(root.r.height), text: root.text.slice(0, 160) },
+        };
+      }
+      tab.el.click();
+      return {
+        found: true,
+        text: tab.text,
+        x: Math.round(tab.r.x),
+        y: Math.round(tab.r.y),
+        root: { x: Math.round(root.r.x), y: Math.round(root.r.y), w: Math.round(root.r.width), h: Math.round(root.r.height) },
+      };
+    }).catch((error) => ({ found: false, reason: error.message || 'evaluate failed' }));
+    if (!tabClickResult.found) {
+      detachUploadListener();
+      throw new Error(`REFERENCE_PICKER_TAB_NOT_FOUND: ${JSON.stringify(tabClickResult)}`);
     }
+    this.log(`[REF] Uploads tab clicked in reference picker: ${JSON.stringify(tabClickResult)}`);
     await page.waitForTimeout(1500);
 
     const preUploadImageSrcs = await page.evaluate(() => {
@@ -3550,94 +3875,17 @@ class CinemaStudioAutomation {
         .filter(Boolean);
     }).catch(() => []);
 
-    const waitForUploadProofSignal = async (timeoutMs) => {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        if (uploadProof.responses.length > 0 || uploadProof.batchOk || uploadProof.putOk || uploadProof.finalizeOk) return true;
-        await page.waitForTimeout(250);
-      }
-      return false;
-    };
-    let uploadStarted = false;
     const hiddenPrimaryResult = await this._uploadReferenceViaHiddenImageInput(localPath).catch((hiddenError) => ({
       ok: false,
       reason: hiddenError.message,
     }));
     if (hiddenPrimaryResult.ok) {
       this.log(`[REF] Hidden file input primary accepted file: ${JSON.stringify(hiddenPrimaryResult)}`);
-      if (await waitForUploadProofSignal(12000)) {
-        uploadStarted = true;
-        this.log('[REF] Hidden file input primary produced backend upload proof');
-      } else {
-        this.log('[REF] Hidden file input primary produced no backend proof yet; trying guarded visible upload click', 'warn');
-      }
+      this.log('[REF] Hidden file input accepted; waiting for backend proof and uploaded tile (native file chooser disabled)');
     } else {
       this.log(`[REF] Hidden file input primary unavailable: ${hiddenPrimaryResult.reason}`, 'warn');
-    }
-
-    // ── Step 4: Upload via fileChooser ─────────────────────────────────
-    if (!uploadStarted) {
-    try {
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent('filechooser', { timeout: 20000 }),
-        (async () => {
-          for (const label of ['Upload Images', '+ Upload Images', 'Upload Image', 'Upload images']) {
-            try {
-              const btn = page.getByText(label, { exact: true }).first();
-              if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
-                await btn.click({ timeout: 3000 });
-                this.log(`[REF] Clicked "${label}"`);
-                return;
-              }
-            } catch (_) {}
-          }
-          this.log('[REF] No Upload Images button found via getByText — trying strict evaluate fallback...');
-          const evalResult = await page.evaluate(() => {
-            const uploadButtonText = /^(?:\+\s*)?Upload Images?$|^Choose File$|^Browse$/i;
-            for (const el of document.querySelectorAll('button, label, a, [role="button"]')) {
-              const t = (el.textContent?.trim() || '').replace(/\s+/g, ' ');
-              const r = el.getBoundingClientRect();
-              if (r.width > 0 && r.height > 0 && r.width < 300 && uploadButtonText.test(t)) {
-                el.click();
-                return { clicked: t.slice(0, 40) };
-              }
-            }
-            return { clicked: false };
-          });
-          this.log(`[REF] Upload evaluate fallback: ${JSON.stringify(evalResult)}`);
-        })(),
-      ]);
-      await fileChooser.setFiles(localPath);
-      this.log('[REF] File uploaded via fileChooser');
-    } catch (e) {
-      // ── DIAGNOSTIC: What's on screen when filechooser failed? ──
-      const failState = await page.evaluate(() => {
-        const allText = [];
-        for (const el of document.querySelectorAll('button, [role="tab"], label, span, a, h1, h2, h3')) {
-          const t = el.textContent?.trim();
-          const r = el.getBoundingClientRect();
-          if (t && r.width > 0 && r.height > 0 && t.length < 50) {
-            allText.push({ text: t.slice(0, 40), tag: el.tagName, x: Math.round(r.x), y: Math.round(r.y) });
-          }
-        }
-        const fileInputs = [...document.querySelectorAll('input[type="file"]')].map(i => ({
-          name: i.name, accept: i.accept, visible: i.getBoundingClientRect().width > 0,
-        }));
-        return { visibleElements: allText.slice(0, 20), fileInputs };
-      }).catch(() => ({ error: 'evaluate failed' }));
-      this.log(`[REF] Upload FAILED — page state: ${JSON.stringify(failState)}`);
-
-      const fallbackResult = await this._uploadReferenceViaHiddenImageInput(localPath).catch((fallbackError) => ({
-        ok: false,
-        reason: fallbackError.message,
-      }));
-      if (!fallbackResult.ok) {
-        await page.keyboard.press('Escape').catch(() => {});
-        detachUploadListener();
-        throw new Error(`HARD STOP: Upload failed — ${e.message.split('\n')[0]}; hidden input fallback: ${fallbackResult.reason}`);
-      }
-      this.log(`[REF] Hidden file input fallback accepted file: ${JSON.stringify(fallbackResult)}`);
-    }
+      detachUploadListener();
+      throw new Error(`START_FRAME_UPLOAD_INPUT_UNAVAILABLE: ${hiddenPrimaryResult.reason}`);
     }
 
     // ── Step 5: Wait for upload to process ────────────────────────────
@@ -3738,6 +3986,20 @@ class CinemaStudioAutomation {
   // ═══════════════════════════════════════════════════════════
   async _uploadReferenceViaHiddenImageInput(localPath) {
     const page = this._ensurePageAlive();
+    const pickerProof = await page.evaluate(() => {
+      const roots = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), text, compactText: text.replace(/\s+/g, '') };
+        })
+        .filter(({ w, h, compactText }) => w > 250 && h > 180 && /Uploads?/i.test(compactText) && /Uploadmedia/i.test(compactText));
+      return roots[0] ? { ok: true, root: { ...roots[0], text: roots[0].text.slice(0, 120) } } : { ok: false };
+    }).catch((error) => ({ ok: false, error: error.message }));
+    if (!pickerProof.ok) {
+      return { ok: false, reason: `Uploads picker not visible before hidden input set (${JSON.stringify(pickerProof)})` };
+    }
+
     const inputs = page.locator('input[type="file"]');
     const count = await inputs.count().catch(() => 0);
     const attempts = [];
@@ -3765,11 +4027,27 @@ class CinemaStudioAutomation {
     const before = new Set(preUploadImageSrcs || []);
 
     const tile = await page.evaluate((beforeList) => {
-      const beforeSrcs = new Set(beforeList || []);
-      const images = [...document.querySelectorAll('img')]
+      const beforeCounts = new Map();
+      for (const src of beforeList || []) {
+        beforeCounts.set(src, (beforeCounts.get(src) || 0) + 1);
+      }
+      const pickerRoots = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
+        .map((el) => ({ el, r: el.getBoundingClientRect(), text: el.textContent || '' }))
+        .filter(({ r, text }) => {
+          const compactText = String(text || '').replace(/\s+/g, '');
+          return r.width > 250 && r.height > 200 && /Uploads?/i.test(compactText) && /Uploadmedia/i.test(compactText);
+        })
+        .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+      const root = pickerRoots[0]?.el || document;
+      const seenCounts = new Map();
+      const imageNodes = [...root.querySelectorAll('img')];
+      const images = imageNodes
         .map((img) => {
           const r = img.getBoundingClientRect();
           const src = img.currentSrc || img.src || '';
+          const seenCount = (seenCounts.get(src) || 0) + 1;
+          seenCounts.set(src, seenCount);
+          const beforeCount = beforeCounts.get(src) || 0;
           return {
             src,
             cx: r.x + r.width / 2,
@@ -3778,7 +4056,7 @@ class CinemaStudioAutomation {
             y: r.y,
             w: r.width,
             h: r.height,
-            isNew: !!src && !beforeSrcs.has(src),
+            isNew: !!src && seenCount > beforeCount,
           };
         })
         .filter((img) =>
@@ -3791,10 +4069,39 @@ class CinemaStudioAutomation {
         )
         .sort((a, b) => a.y - b.y || a.x - b.x);
 
-      const chosen = images[0];
-      if (!chosen) return { ok: false, reason: 'no new uploaded image tile found' };
+      let chosen = images[0];
+      let selectionMode = 'new-upload-card';
+      if (!chosen) {
+        const fallbackImages = imageNodes
+          .map((img) => {
+            const r = img.getBoundingClientRect();
+            const src = img.currentSrc || img.src || '';
+            return {
+              src,
+              cx: r.x + r.width / 2,
+              cy: r.y + r.height / 2,
+              x: r.x,
+              y: r.y,
+              w: r.width,
+              h: r.height,
+            };
+          })
+          .filter((img) =>
+            !!img.src &&
+            img.w >= 60 &&
+            img.h >= 60 &&
+            img.x > 300 &&
+            img.y > 50 &&
+            img.y < window.innerHeight * 0.85
+          )
+          .sort((a, b) => a.y - b.y || a.x - b.x);
+        chosen = fallbackImages[0];
+        selectionMode = 'visible-upload-tile-fallback';
+      }
+      if (!chosen) return { ok: false, reason: 'no selectable uploaded image tile found' };
       return {
         ok: true,
+        selectionMode,
         cx: Math.round(chosen.cx),
         cy: Math.round(chosen.cy),
         x: Math.round(chosen.x),

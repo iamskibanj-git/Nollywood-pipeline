@@ -1680,11 +1680,8 @@ class CinemaVideoAutomation extends KlingAutomation {
     await this._clickPickerTab('Uploads');
     const beforeAfterOpen = new Set([...(beforeSrcs || []), ...(await this._visiblePickerImageSrcs())]);
 
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser', { timeout: 20000 }),
-      this._clickUploadMediaControl(),
-    ]);
-    await chooser.setFiles(localPath);
+    const hiddenUpload = await this._uploadPickerFileViaHiddenImageInput(localPath);
+    this.log(`[CINEMA-VIDEO] Hidden file input accepted start frame: ${JSON.stringify(hiddenUpload)}`);
 
     const card = await this._waitForNewUploadCard(beforeAfterOpen, 180000);
     const status = await this._waitForSceneEligibility(card, 420000);
@@ -1706,12 +1703,52 @@ class CinemaVideoAutomation extends KlingAutomation {
     this.log(`Start frame uploaded and eligible (${Math.round(card.waitMs / 1000)}s upload/eligibility window)`);
   }
 
+  async _uploadPickerFileViaHiddenImageInput(localPath) {
+    const page = this.automation.page;
+    const pickerProof = await page.evaluate(() => {
+      const roots = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const compactText = text.replace(/\s+/g, '');
+          return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), text, compactText };
+        })
+        .filter(({ w, h, compactText }) => w > 250 && h > 180 && /Uploads?/i.test(compactText) && /Uploadmedia/i.test(compactText));
+      return roots[0] ? { ok: true, root: { ...roots[0], text: roots[0].text.slice(0, 120) } } : { ok: false };
+    }).catch((error) => ({ ok: false, error: error.message }));
+    if (!pickerProof.ok) {
+      throw new Error(`[PRE-GEN] Uploads picker not visible before hidden input set (${JSON.stringify(pickerProof)})`);
+    }
+
+    const inputs = page.locator('input[type="file"]');
+    const count = await inputs.count().catch(() => 0);
+    const attempts = [];
+
+    for (let i = count - 1; i >= 0; i--) {
+      const input = inputs.nth(i);
+      const accept = await input.getAttribute('accept').catch(() => '');
+      const isImageInput = !accept ||
+        /image/i.test(accept) ||
+        /\.(jpg|jpeg|png|webp|heic|heif)/i.test(accept) ||
+        /image\/(jpeg|jpg|png|webp|heic|heif)/i.test(accept);
+      attempts.push({ index: i, accept: accept || '', image: isImageInput });
+      if (!isImageInput) continue;
+
+      await input.setInputFiles(localPath);
+      await page.waitForTimeout(2000);
+      return { ok: true, index: i, accept: accept || '', attempts };
+    }
+
+    throw new Error(`[PRE-GEN] No image file input found in Uploads picker (${JSON.stringify(attempts)})`);
+  }
+
   async _openSceneUploadPicker() {
     const page = this.automation.page;
     await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
     const pickerAlreadyOpen = async () => page.evaluate(() => {
       const body = document.body?.innerText || '';
-      return /\bUploads\b/i.test(body) && /\bUpload media\b/i.test(body);
+      const compactBody = body.replace(/\s+/g, '');
+      return /Uploads/i.test(compactBody) && /Uploadmedia/i.test(compactBody);
     }).catch(() => false);
 
     if (await pickerAlreadyOpen()) return;
@@ -2067,77 +2104,6 @@ class CinemaVideoAutomation extends KlingAutomation {
       return;
     }
     throw new Error(`${tabName} tab not found in picker`);
-  }
-
-  async _clickUploadMediaControl() {
-    const page = this.automation.page;
-    const plusTarget = await page.evaluate(() => {
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const s = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
-          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
-      };
-      const uploadCards = [...document.querySelectorAll('button, [role="button"], div, label')]
-        .filter(visible)
-        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || '') }))
-        .filter(o => /Upload media/i.test(o.text) && o.r.width > 120 && o.r.height > 80)
-        .sort((a, b) => (a.r.y - b.r.y) || (a.r.x - b.r.x));
-
-      for (const card of uploadCards) {
-        const controls = [...card.el.querySelectorAll('button, [role="button"], div, span')]
-          .filter(visible)
-          .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || ''), aria: clean(el.getAttribute('aria-label') || '') }))
-          .filter(o => {
-            const cx = o.r.x + o.r.width / 2;
-            const cy = o.r.y + o.r.height / 2;
-            return cx >= card.r.left && cx <= card.r.right && cy >= card.r.top && cy <= card.r.bottom
-              && o.r.width >= 24 && o.r.width <= 72 && o.r.height >= 24 && o.r.height <= 72
-              && (o.text === '+' || /upload|add/i.test(o.aria) || !!o.el.querySelector('svg, path'));
-          })
-          .sort((a, b) => {
-            const ay = a.r.y + a.r.height / 2;
-            const by = b.r.y + b.r.height / 2;
-            const targetY = card.r.y + card.r.height * 0.35;
-            return Math.abs(ay - targetY) - Math.abs(by - targetY);
-          });
-        const target = controls[0];
-        const r = target?.r || card.r;
-        return {
-          x: Math.round(r.x + r.width / 2),
-          y: Math.round(r.y + r.height / 2),
-          text: target ? (target.text || target.aria || 'inner-plus') : card.text,
-          card: { x: Math.round(card.r.x), y: Math.round(card.r.y), w: Math.round(card.r.width), h: Math.round(card.r.height) },
-        };
-      }
-      return null;
-    }).catch(() => null);
-    if (plusTarget) {
-      this.log(`[CINEMA-VIDEO] Clicking Upload media plus control: ${JSON.stringify(plusTarget)}`);
-      await page.mouse.click(plusTarget.x, plusTarget.y);
-      return;
-    }
-
-    const upload = await page.evaluate(() => {
-      const candidates = [];
-      for (const el of document.querySelectorAll('button, div, label')) {
-        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        const r = el.getBoundingClientRect();
-        if (
-          r.width > 120 && r.width < 280
-          && r.height > 80 && r.height < 150
-          && /^Upload media\b/i.test(text)
-        ) {
-          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text });
-        }
-      }
-      candidates.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-      const c = candidates[0];
-      return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), text: c.text } : null;
-    });
-    if (!upload) throw new Error('Upload media control not found');
-    await page.mouse.click(upload.x, upload.y);
   }
 
   async _visiblePickerImageSrcs() {
@@ -2804,7 +2770,8 @@ class CinemaVideoAutomation extends KlingAutomation {
             /\bAll Pinned\b/i.test(text) ||
             /\bShow subfolders elements\b/i.test(text)
           );
-        const hasPickerTabs = /\b(Uploads|Image Generations|Video Generations)\b/i.test(text);
+        const compactText = text.replace(/\s+/g, '');
+        const hasPickerTabs = /Uploads|ImageGenerations|VideoGenerations/i.test(compactText);
         if (hasElementsSignals || (hasPickerTabs && /\bMy Elements\b/i.test(text))) return true;
       }
       return false;
@@ -3118,7 +3085,8 @@ class CinemaVideoAutomation extends KlingAutomation {
         .map(el => {
           const r = el.getBoundingClientRect();
           const text = clean(el.innerText || el.textContent || '');
-          const score = (/(Uploads|Image Generations|Video Generations|Elements|Liked)/i.test(text) ? 5 : 0)
+          const compactText = text.replace(/\s+/g, '');
+          const score = (/(Uploads|ImageGenerations|VideoGenerations|Elements|Liked)/i.test(compactText) ? 5 : 0)
             + (/Check eligibility|Face\s*\/\s*IP\s*check(?:ing)?|Checking content|Character|\bUse\b/i.test(text) ? 5 : 0)
             + (r.width > 600 && r.height > 300 ? 3 : 0)
             + Math.min(4, Math.floor((el.scrollHeight - el.clientHeight) / 300));
@@ -3163,8 +3131,9 @@ class CinemaVideoAutomation extends KlingAutomation {
           const r = node.getBoundingClientRect();
           if (r.width < 450 || r.height < 240) continue;
           const text = clean(node.innerText || node.textContent || '');
+          const compactText = text.replace(/\s+/g, '');
           if (/\bMy Elements\b/i.test(text) && /\bShow subfolders elements\b/i.test(text)) return true;
-          if (/\bUploads\b/i.test(text) && /\bElements\b/i.test(text) && /\bImage Generations\b/i.test(text)) return true;
+          if (/Uploads/i.test(compactText) && /Elements/i.test(compactText) && /ImageGenerations/i.test(compactText)) return true;
         }
         return false;
       };
