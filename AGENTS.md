@@ -3954,6 +3954,11 @@ Update 2026-06-18 Cinema video not-eligible repair:
 - The repair loop is bounded at 3 attempts per failed element and only exits as successful when the element re-check returns `eligible`. If a local portrait/grid pair is missing, or the element remains not eligible after the cap, the existing `cinema-eligibility-failed` human gate is still emitted with the unresolved names. No Generate click is allowed during this repair loop.
 - On restart, a persisted `cinema-eligibility-failed` gate is reconstructible and should be cleared by the generic resume path. The video stage must re-run eligibility and automated repair rather than re-entering the old human wait before the repair code can execute.
 
+Update 2026-06-18 Face/IP recast hardening:
+- The first automatic Face/IP recast must do more than append the no-public-figure caveat. It now rewrites/persists the character physical description with stronger permanent differentiators: scars, asymmetry, distinctive facial geometry, hairline/beard shape, and respectful/culturally plausible facial or tribal marks when appropriate.
+- A recast that reaches eligibility re-check and still fails is persisted as `failed`, not resumable `eligibility-pending`. Restart must not keep recreating the same character elements from the same rejected portrait/grid set.
+- If one outfit element recast fails for a character, sibling outfit elements for that character are marked unresolved in the same repair pass instead of starting another delete/recreate loop from the same failed assets.
+
 Live no-Generate verification after the fix:
 ```text
 start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached

@@ -11157,7 +11157,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this.log(`[FACE-IP-RECAST] Starting pre-video recast for ${spec.characterId} after @${failedElementName} stayed not eligible. Elements: ${elementNames.map(n => '@' + n).join(', ')}`);
 
     const existingRecastState = this._getCinemaFaceIpRecastState(projectId, spec.characterId);
-    const resumableStatuses = new Set(['elements-pending', 'eligibility-pending', 'scene-reset-pending', 'scene-regen-pending', 'scene-regenerated']);
+    const resumableStatuses = new Set(['elements-pending', 'scene-reset-pending', 'scene-regen-pending', 'scene-regenerated']);
     const recoveredAssets = this._recoverFaceIpRecastAssetPaths(projectDir, character);
     const inferredInterruptedRecast = !existingRecastState &&
       recoveredAssets.ready &&
@@ -11225,14 +11225,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         this.log(`[FACE-IP-RECAST] Claude physical-description rewrite failed: ${err.message}; applying deterministic caveat`, 'warn');
         return null;
       });
-      const caveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
       if (!newPhysical) newPhysical = oldPhysical;
-      if (!/well-known|famous|celebrity|public figure/i.test(newPhysical)) newPhysical = `${newPhysical}. ${caveat}`;
+      newPhysical = this._applyFaceIpRecastVisualDifferentiators(character, newPhysical);
       character.physical_description = newPhysical;
       if (character.full_prompt_description) {
-        character.full_prompt_description = /well-known|famous|celebrity|public figure/i.test(character.full_prompt_description)
-          ? character.full_prompt_description
-          : `${character.full_prompt_description}. ${caveat}`;
+        character.full_prompt_description = this._applyFaceIpRecastVisualDifferentiators(character, character.full_prompt_description);
       }
       this._saveScriptState(projectId);
       db.logEvent(projectId, 'face_ip_recast_description', {
@@ -11272,6 +11269,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
     const stillFailed = eligibility.filter(item => item.status !== 'eligible');
     if (stillFailed.length > 0) {
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        status: 'failed',
+        reason: 'face-ip-recast-eligibility-failed',
+        failedElementName,
+        elementNames,
+        unresolved: stillFailed,
+        assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+      });
       return {
         ok: false,
         reason: `Face/IP recast completed but ${stillFailed.map(item => '@' + item.name + '=' + item.status).join(', ')} remain ineligible`,
@@ -11456,6 +11461,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const repaired = [];
     const unresolved = [];
     const recastCharacters = new Set();
+    const failedRecastCharacters = new Set();
 
     videoAutomation.invalidateElementEligibility?.(names);
 
@@ -11484,6 +11490,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       if (spec.characterId && recastCharacters.has(spec.characterId)) {
         this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} belongs to already-recast ${spec.characterId}; treating as repaired for this pass.`);
         repaired.push({ name, status: 'eligible', attempts: 0, recreated: true, recast: true, characterId: spec.characterId });
+        continue;
+      }
+      if (spec.characterId && failedRecastCharacters.has(spec.characterId)) {
+        const reason = `Face/IP recast already failed for ${spec.characterId} in this repair pass`;
+        this.log(`[CINEMATIC] [ELEMENT-REPAIR] @${name} belongs to ${spec.characterId}; ${reason}.`, 'warn');
+        unresolved.push({
+          ...failure,
+          name,
+          status: failure.status || 'unresolved',
+          reason,
+          recastRequired: true,
+        });
         continue;
       }
 
@@ -11592,6 +11610,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           repairedThisElement = true;
         } else {
           const reason = recast?.reason || `not eligible after ${maxAttempts} repair attempt(s)`;
+          if (spec.characterId) failedRecastCharacters.add(spec.characterId);
           this.log(`[CINEMATIC] [ELEMENT-REPAIR] Face/IP recast could not complete for @${name}: ${reason}`, recast?.blocked ? 'error' : 'warn');
           unresolved.push({
             ...failure,
@@ -13499,6 +13518,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const sourceField = options.sourceField || 'full_prompt_description';
     const originalDescription = char[sourceField] || char.full_prompt_description || char.physical_description || char.description_label || '';
     const rejectionLabel = options.reason === 'face-ip-recast' ? 'Face/IP not eligible' : 'restricted content';
+    const faceIpRules = options.reason === 'face-ip-recast'
+      ? `
+FACE/IP RECAST REQUIREMENTS:
+- Treat this as a first automatic recast: make the face unmistakably original, not just lightly reworded
+- Add 2-4 concrete permanent identifiers that are culturally plausible and story-appropriate, such as subtle facial scars, asymmetry, a distinctive jaw/nose/cheekbone combination, a unique hairline/beard shape, or respectful relevant tribal marks
+- If tribal marks are used, make them subtle, dignified, and regionally plausible for the character; do not use them as caricature
+- Keep these identifiers compatible with all outfits because they will be used for master and outfit portraits
+`
+      : '';
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
@@ -13511,11 +13539,12 @@ RULES:
 - Change distinctive facial features enough that they don't match any real person
 - Keep the same ethnicity, approximate age, gender, and body type
 - Keep the same wardrobe/clothing description (this is important for visual continuity)
-- Make features more distinctive/unique/fictional (e.g., unusual eye color, specific scar patterns, distinctive hairstyle)
+- Make features more distinctive/unique/fictional (e.g., specific scar patterns, subtle tribal marks, facial asymmetry, distinctive hairstyle or beard shape)
 - Do NOT use any celebrity names or references to real people
 - Include this caveat naturally or verbatim: "This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure."
 - Output ONLY the rewritten description text, nothing else — no explanation, no preamble
 - Match the same format and clothing scope as the original description
+${faceIpRules}
 
 ORIGINAL DESCRIPTION:
 ${originalDescription}
@@ -13533,6 +13562,29 @@ REWRITTEN DESCRIPTION:`,
     }
 
     return newDesc;
+  }
+
+  _applyFaceIpRecastVisualDifferentiators(char, description) {
+    const base = String(description || '').trim();
+    const fallback = char?.description_label || char?.name || 'Original fictional character';
+    const caveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
+    const markers = [
+      'an original face design with a subtly uneven cheekbone line',
+      'a small healed scar near one eyebrow',
+      'faint, dignified facial marks that are culturally plausible for the character',
+      'a distinctive nose bridge, jaw shape, and hairline combination that does not resemble any public figure',
+    ];
+
+    const hasCaveat = /well-known|famous|celebrity|public figure/i.test(base);
+    const hasStrongMarker = /scar|tribal mark|facial mark|asymmetr|uneven|distinctive (?:nose|jaw|cheekbone|hairline|beard)|healed mark/i.test(base);
+    const parts = [base || fallback];
+    if (!hasStrongMarker) {
+      parts.push(`Permanent Face/IP-safe identifiers: ${markers.join('; ')}.`);
+    }
+    if (!hasCaveat) {
+      parts.push(caveat);
+    }
+    return parts.join('. ').replace(/\.\s*\./g, '.').trim();
   }
 
   /**
