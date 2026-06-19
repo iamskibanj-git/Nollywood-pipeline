@@ -1097,7 +1097,15 @@ function resetStuckAssets() {
   );
   if (stuck.length === 0) return 0;
 
-  db.run(`UPDATE project_assets SET status = 'pending', error_message = 'Reset after app shutdown/crash' WHERE status = 'generating'`);
+  db.run(`
+    UPDATE project_assets
+    SET status = 'pending',
+        error_message = CASE
+          WHEN error_message LIKE 'face-ip-recast:%' THEN error_message
+          ELSE 'Reset after app shutdown/crash'
+        END
+    WHERE status = 'generating'
+  `);
   save();
   console.log(`[DB] Reset ${stuck.length} stuck 'generating' assets to 'pending'`);
   return stuck.length;

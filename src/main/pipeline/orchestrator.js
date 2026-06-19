@@ -11262,6 +11262,52 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     return this._normalizeRecastSceneRefs(state?.scenes || []);
   }
 
+  _getPersistedFaceIpRecastSceneRowIds(characterId, state = null) {
+    const recastState = state || this._getCinemaFaceIpRecastState(this.state?.project?.id, characterId);
+    const recastMarker = `face-ip-recast:${characterId}`;
+    const rowIdsByScene = new Map();
+    for (const sceneProof of recastState?.resetProof?.scenes || []) {
+      const chapter = Number(sceneProof?.chapter);
+      const scene = Number(sceneProof?.scene);
+      if (!chapter || !scene) continue;
+      const key = `${chapter}_${scene}`;
+      if (!rowIdsByScene.has(key)) rowIdsByScene.set(key, new Set());
+      for (const row of sceneProof?.activeRows || []) {
+        if (!row?.id) continue;
+        if (String(row.recastMarker || '') !== recastMarker) continue;
+        rowIdsByScene.get(key).add(Number(row.id));
+      }
+    }
+    return rowIdsByScene;
+  }
+
+  _restoreFaceIpRecastSceneMarkersFromState(projectId, characterId, scenes, state = null) {
+    const sceneRefs = this._normalizeRecastSceneRefs(scenes);
+    if (sceneRefs.length === 0) return 0;
+    const rowIdsByScene = this._getPersistedFaceIpRecastSceneRowIds(characterId, state);
+    if (rowIdsByScene.size === 0) return 0;
+    const recastMarker = `face-ip-recast:${characterId}`;
+    const sceneAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
+    const sceneKeys = new Set(sceneRefs.map(s => `${Number(s.chapter)}_${Number(s.scene)}`));
+    let restored = 0;
+
+    for (const asset of sceneAssets) {
+      if (asset.status === 'archived') continue;
+      const key = `${Number(asset.chapter)}_${Number(asset.scene)}`;
+      if (!sceneKeys.has(key)) continue;
+      if (!rowIdsByScene.get(key)?.has(Number(asset.id))) continue;
+      if (String(asset.error_message || '') === recastMarker) continue;
+      if (asset.status === 'done' && asset.file_path) continue;
+      db.markSceneImageRecastPending(asset.id, characterId);
+      restored++;
+    }
+
+    if (restored > 0) {
+      this.log(`[FACE-IP-RECAST] Restored ${restored} recast scene marker(s) for ${characterId} from persisted reset proof.`);
+    }
+    return restored;
+  }
+
   _getPendingFaceIpRecastSceneJobs(projectId) {
     const fs = require('fs');
     const settings = this._getProjectSettings(projectId);
@@ -11287,8 +11333,13 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
     for (const characterId of characterIds) {
       const state = recastStates[characterId] || {};
-      const taggedRows = taggedRowsByCharacter.get(characterId) || [];
+      let taggedRows = taggedRowsByCharacter.get(characterId) || [];
       const stateScenes = this._normalizeRecastSceneRefs(state.scenes || []);
+      if (stateScenes.length > 0 && this._restoreFaceIpRecastSceneMarkersFromState(projectId, characterId, stateScenes, state) > 0) {
+        const recastMarker = `face-ip-recast:${characterId}`;
+        taggedRows = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+          .filter(asset => asset.status !== 'archived' && String(asset.error_message || '') === recastMarker);
+      }
       const taggedScenes = this._normalizeRecastSceneRefs(taggedRows.map(row => ({
         chapter: row.chapter,
         scene: row.scene,
@@ -11465,6 +11516,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   _getFaceIpRecastSceneRows(projectId, characterId, scenes) {
     const sceneRefs = this._normalizeRecastSceneRefs(scenes);
     const recastMarker = `face-ip-recast:${characterId}`;
+    const recastState = this._getCinemaFaceIpRecastState(projectId, characterId);
+    this._restoreFaceIpRecastSceneMarkersFromState(projectId, characterId, sceneRefs, recastState);
     const sceneAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
     const rows = [];
     const failures = [];
@@ -11494,6 +11547,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   _assertFaceIpRecastSceneDbProof(projectId, characterId, scenes, phase) {
     const fs = require('fs');
     const sceneRefs = this._normalizeRecastSceneRefs(scenes);
+    const recastState = this._getCinemaFaceIpRecastState(projectId, characterId);
+    if (phase === 'reset') {
+      this._restoreFaceIpRecastSceneMarkersFromState(projectId, characterId, sceneRefs, recastState);
+    }
     const sceneAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
     const failures = [];
     const sceneProof = [];
