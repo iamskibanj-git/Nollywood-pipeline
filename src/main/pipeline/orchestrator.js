@@ -3870,11 +3870,18 @@ class PipelineOrchestrator {
    *
    * Returns the generated grid's file path.
    */
-  async _generateCharacterGrid(character, portraitPath, outputPath, portraitCdnUrl = '', { onGenClicked } = {}) {
+  async _generateCharacterGrid(character, portraitPath, outputPath, portraitCdnUrl = '', { onGenClicked, outfitId } = {}) {
+    const identityLock = this._getCharacterIdentityLock(character);
+    const identityClause = identityLock
+      ? ` Permanent identity lock: ${identityLock}. Preserve these exact facial markers, natural skin tone, head shape, scars/marks, and body build in every panel. Do not redesign the face; only rotate the same person for the reference sheet${outfitId ? ` in outfit ${outfitId}` : ''}.`
+      : '';
     const prompt = `Create a professional character reference sheet for the attached portrait. Match the current appearance. Plain background. Arrange into four vertical columns, each representing one viewing angle. Each column contains a full-body view on top and a matching close-up portrait directly beneath it. Columns (left → right): Column 1: front view (full body character, front portrait below). Column 2: left profile (full body character facing left, with portrait facing left below). Column 3: right profile (full body character facing right, with portrait facing right below). Column 4: back view (full body character, back of head portrait below). Maintain even spacing and framing around the character portraits. Clean silhouette, consistent alignment, and clean panel separation. Photorealistic, DSLR, muted tones. No text. Single thin borders.`;
+    const lockedPrompt = identityClause
+      ? prompt.replace('Match the current appearance.', `Match the current appearance.${identityClause}`)
+      : prompt;
     return await this._withSessionRetry(
       () => this.automation.generateImage({
-        prompt,
+        prompt: lockedPrompt,
         outputPath,
         references: [portraitPath],
         aspectRatio: '16:9',
@@ -4269,7 +4276,13 @@ class PipelineOrchestrator {
         }
 
         const portraitAspect = this.state.aspectRatio || '9:16';
-        const outfitPrompt = this._buildCharacterPortraitPrompt(`${char.physical_description}. Wearing: ${outfit.description}`);
+        const outfitPromptDescription = this._buildIdentityLockedCharacterDescription(char, {
+          outfitDescription: outfit.description,
+          sameReferencePerson: true,
+        });
+        const outfitPrompt = this._buildCharacterPortraitPrompt(outfitPromptDescription, {
+          identityLock: this._getCharacterIdentityLock(char),
+        });
 
         this.log(`[CINEMATIC] Generating outfit portrait: ${outfitKey} (${outfit.context || '?'})`);
 
@@ -4364,6 +4377,7 @@ class PipelineOrchestrator {
           this.log(`[CINEMATIC] Generating grid for ${unitKey} (${char.description_label || '?'}${outfitId ? ' / ' + outfitId : ''})${attempt > 1 ? ` [retry ${attempt}/${MAX_GRID_ATTEMPTS}]` : ''}`);
           const genMeta = await this._generateCharacterGrid(char, portraitFilePath, gridPath, portraitCdnUrl, {
             onGenClicked: (creditCost) => db.markAssetGenClicked(gridAsset.id, creditCost),
+            outfitId,
           });
           if (genMeta?.cdnUrl) db.markAssetCdnUrl(gridAsset.id, genMeta.cdnUrl);
 
@@ -4652,9 +4666,11 @@ class PipelineOrchestrator {
       // Build description for element
       let description;
       if (outfit) {
-        description = `${char.physical_description || ''}. Wearing: ${outfit.description || ''}`;
+        description = this._buildIdentityLockedCharacterDescription(char, {
+          outfitDescription: outfit.description || '',
+        });
       } else {
-        description = char.full_prompt_description || char.physical_description || char.description_label;
+        description = this._buildIdentityLockedCharacterDescription(char);
       }
 
       this.log(`[CINEMATIC] @${elementName} (base: ${baseName}${outfitId ? ', outfit: ' + outfitId : ''}) → ${char.description_label} (${unitKey})`);
@@ -6728,7 +6744,7 @@ YOUR TASK:
 
 SPATIAL CONTEXT: This is a Nigerian production. All vehicles are LEFT-HAND DRIVE (steering wheel on the LEFT side). If the location is a vehicle interior, the driver sits on the LEFT behind the steering wheel, the passenger on the RIGHT.
 
-RULES:
+${rewriteRules}
 - NEVER use "frame-left", "frame-center", "frame-right" — these produce flat, lineup compositions.
 - ALWAYS reference objects/areas visible in the image (e.g., "behind the grill", "leaning on the counter", "standing in the doorway", "approaching from the street").
 - In vehicle scenes, use the steering wheel position to determine driver vs passenger seating.
@@ -10702,12 +10718,168 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
   }
 
-  _buildCharacterPortraitPrompt(charDescription) {
+  _sanitizeFaceIpRecastDescription(description) {
+    return String(description || '')
+      .replace(/\bdeep\s+blue-black\s+skin(?:\s+that\s+holds[^.]*?(?:light|lighting))?/gi, 'natural very dark brown Nigerian skin with warm undertones')
+      .replace(/\bblue-black\b/gi, 'very dark brown')
+      .replace(/\balmost\s+silver\s+in\s+certain\s+light\b/gi, 'natural under studio light')
+      .replace(/\bsilver\s+undertones?\b/gi, 'warm undertones')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/\s+\./g, '.')
+      .trim();
+  }
+
+  _normalizeIdentityLockText(text) {
+    return String(text || '')
+      .replace(/This is a fictional original person[^.]*\./gi, '')
+      .replace(/\bmust not resemble any well-known[^.]*\./gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/\.\s*\./g, '.')
+      .replace(/\s+;/g, ';')
+      .trim()
+      .replace(/\.+$/, '');
+  }
+
+  _getCharacterIdentityLock(char) {
+    return this._normalizeIdentityLockText(char?.identity_lock || char?.face_ip_identity_lock || '');
+  }
+
+  _isFaceIpRecastEligibilityFailure(state) {
+    return !!state
+      && String(state.status || '').toLowerCase() === 'failed'
+      && /face-ip-recast-eligibility-failed/i.test(String(state.reason || ''));
+  }
+
+  _extractHardPersonaAnchors(char, oldDescription = '') {
+    const text = [
+      char?.name,
+      char?.description_label,
+      char?.role,
+      oldDescription,
+      char?.physical_description,
+      char?.full_prompt_description,
+    ].filter(Boolean).join(' ');
+    const lower = text.toLowerCase();
+
+    let gender = 'person';
+    if (/\b(woman|female|mother|wife|aunt|sister|daughter|madam|mrs|miss|queen|princess|widow)\b/i.test(lower)) {
+      gender = 'woman';
+    } else if (/\b(man|male|father|husband|uncle|brother|son|chief|king|barrister|mr\.?|pastor|prince|widower)\b/i.test(lower)) {
+      gender = 'man';
+    }
+
+    const ageMatch = text.match(/\b\d{2}-year-old\b/i)
+      || text.match(/\b(?:early|mid|late)\s+\d0s\b/i)
+      || text.match(/\b(?:young|middle-aged|elderly|older)\b/i);
+    const ethnicityMatch = text.match(/\b(Yoruba|Igbo|Hausa|Fulani|Edo|Ijaw|Ibibio|Efik|Tiv|Nupe|Kanuri|Urhobo|Itsekiri|Nigerian)\b/i);
+    const heightMatch = text.match(/\b[4-7]'\d{1,2}"\b/);
+    const buildMatch = text.match(/\b(?:commanding|solid|broad-shouldered|broad shouldered|stocky|heavyset|slender|lean|athletic|average|tall|short|medium)[^,.]*(?:build|frame|body|physique|shoulders)\b/i);
+    const role = String(char?.description_label || char?.name || char?.id || 'story character')
+      .split(/[—-]/)[0]
+      .trim();
+
+    return {
+      role,
+      gender,
+      genderNoun: gender === 'woman' ? 'woman' : (gender === 'man' ? 'man' : 'person'),
+      pronouns: gender === 'woman' ? 'she/her' : (gender === 'man' ? 'he/him' : 'they/them'),
+      agePhrase: ageMatch ? ageMatch[0] : 'middle-aged',
+      ethnicity: ethnicityMatch ? ethnicityMatch[0] : 'Nigerian',
+      bodyType: [heightMatch?.[0], buildMatch?.[0]].filter(Boolean).join(', ') || 'a believable film-drama build',
+      outfitSummary: (char?.outfits || [])
+        .map(o => `${o.outfit_id || '?'}: ${[o.context, o.description].filter(Boolean).join(' - ')}`)
+        .filter(Boolean)
+        .join('\n'),
+    };
+  }
+
+  _buildHardPersonaFallbackDescription(char, oldDescription = '') {
+    const anchors = this._extractHardPersonaAnchors(char, oldDescription);
+    const genderFeatures = anchors.gender === 'woman'
+      ? 'a neat low natural hairstyle, a softly squared chin, full cheeks, and calm but piercing eyes'
+      : (anchors.gender === 'man'
+        ? 'short natural hair with a gently receding hairline, a rounded chin, full cheeks, and a neatly trimmed moustache with a short boxed beard'
+        : 'short natural hair, a softly squared chin, full cheeks, and calm but piercing eyes');
+    return `${anchors.agePhrase} ${anchors.ethnicity} ${anchors.genderNoun} with ${anchors.bodyType} and natural dark-brown Nigerian skin with warm undertones. This is a completely new original persona for ${anchors.role}, not a variation of the previous face. The face has ${genderFeatures}, a broad soft nose bridge, one tiny healed mark below the right cheekbone, and two faint dignified vertical facial marks near the left temple. The old face, skull shape, eyes, jaw, nose, complexion wording, scars, facial marks, hairline, and identity lock must not be preserved. This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.`;
+  }
+
+  _buildFaceIpIdentityLock(char, description) {
+    const desc = this._sanitizeFaceIpRecastDescription(
+      description || char?.physical_description || char?.full_prompt_description || char?.description_label || ''
+    );
+    const sentences = desc
+      .split(/(?<=[.!?])\s+/)
+      .map(s => this._normalizeIdentityLockText(s))
+      .filter(Boolean);
+    const phrases = [];
+    const add = (value) => {
+      const phrase = this._normalizeIdentityLockText(value).replace(/^His\s+/i, '').replace(/^Her\s+/i, '');
+      if (!phrase || phrases.some(p => p.toLowerCase() === phrase.toLowerCase())) return;
+      phrases.push(phrase.length > 110 ? `${phrase.slice(0, 107).trim()}...` : phrase);
+    };
+
+    const prioritized = [
+      /\b\d{1,2}-year-old[^,.]*\b(?:man|woman)\b/i,
+      /\bnatural very dark brown[^,.]*skin[^,.]*/i,
+      /\b(?:clean-shaved|bald|shaved)[^,.]*(?:head|skull|smoothness)[^,.]*/i,
+      /\b(?:broad|distinctly|flattened)[^,.]*(?:crown|temples|skull)[^,.]*/i,
+      /\b(?:asymmetr|left brow|right brow|brow ridge)[^,.]*/i,
+      /\b(?:amber-brown|golden)[^,.]*(?:eyes|ring)[^,.]*/i,
+      /\b(?:scar|scars|facial marks|tribal marks|egba-style)[^,.]*/i,
+      /\b(?:wide-jawed|square-chinned|cheekbones|nose bridge|bulbous tip)[^,.]*/i,
+    ];
+    for (const pattern of prioritized) {
+      const match = desc.match(pattern);
+      if (match) add(match[0]);
+    }
+
+    for (const sentence of sentences) {
+      if (phrases.length >= 7) break;
+      if (/(scar|facial marks?|tribal marks?|egba|asymmetr|brow|crown|clean-shaved|amber|jaw|cheekbone|nose|hands|build)/i.test(sentence)) {
+        add(sentence);
+      }
+    }
+
+    if (phrases.length < 4) {
+      add(char?.description_label || char?.name || 'original fictional character');
+      add('natural dark-brown Nigerian skin tone, not painted or blue-toned');
+      add('distinctive asymmetric brow, fixed scars or facial marks, and a consistent head shape');
+      add('same exact face and body build in every outfit');
+    }
+
+    add('same exact face/person in every outfit; only wardrobe changes');
+    return phrases.slice(0, 8).join('; ');
+  }
+
+  _buildIdentityLockedCharacterDescription(char, options = {}) {
+    const identityLock = this._getCharacterIdentityLock(char);
+    const physical = this._sanitizeFaceIpRecastDescription(
+      char?.physical_description || char?.full_prompt_description || char?.description_label || ''
+    );
+    const parts = [];
+    if (identityLock) {
+      parts.push(`Permanent identity lock (same in every outfit): ${identityLock}.`);
+    }
+    if (physical) parts.push(physical);
+    if (options.outfitDescription) {
+      parts.push(`Wearing: ${options.outfitDescription}`);
+    }
+    if (identityLock && options.sameReferencePerson) {
+      parts.push('Use the attached reference as the same person; preserve the identity lock exactly. Only clothing changes.');
+    }
+    return parts.join(' ').replace(/\s{2,}/g, ' ').trim();
+  }
+
+  _buildCharacterPortraitPrompt(charDescription, options = {}) {
     const faceIpCaveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
     const desc = String(charDescription || '').trim();
     const caveatAlreadyPresent = /must not resemble any well-known|fictional original person/i.test(desc);
     const safeDescription = caveatAlreadyPresent ? desc : `${desc}. ${faceIpCaveat}`;
-    return `Photorealistic cinematic portrait, studio-quality lighting. ${safeDescription}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
+    const identityLock = this._normalizeIdentityLockText(options.identityLock || '');
+    const identityPrefix = identityLock && !/Permanent identity lock/i.test(safeDescription)
+      ? `Permanent identity lock (same exact face in every outfit): ${identityLock}. `
+      : '';
+    return `Photorealistic cinematic portrait, studio-quality lighting. ${identityPrefix}${safeDescription}. Standing in a natural pose, looking directly at camera. Clean background with soft bokeh. Hyper-detailed, 8K quality.`;
   }
 
   _hasCinematicVideoGenerationStarted(projectId) {
@@ -11109,11 +11281,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const asset = db.getAssets(projectId, { type: 'portrait' })
       .find(a => a.character_id === character.id && a.status !== 'archived');
     if (!asset) throw new Error(`No pending portrait asset found for recast character ${character.id}`);
-    const desc = character.full_prompt_description
-      || (character.physical_description
-        ? `${character.physical_description}. ${(character.outfits && character.outfits[0]) ? character.outfits[0].description : ''}`
-        : character.description_label);
-    const prompt = this._buildCharacterPortraitPrompt(desc);
+    const desc = this._buildIdentityLockedCharacterDescription(character, {
+      outfitDescription: (character.outfits && character.outfits[0]) ? character.outfits[0].description : '',
+    });
+    const prompt = this._buildCharacterPortraitPrompt(desc, {
+      identityLock: this._getCharacterIdentityLock(character),
+    });
     db.markAssetGenerating(asset.id, prompt);
     const genMeta = await this._withSessionRetry(
       () => this.automation.generateImage({
@@ -11157,6 +11330,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this.log(`[FACE-IP-RECAST] Starting pre-video recast for ${spec.characterId} after @${failedElementName} stayed not eligible. Elements: ${elementNames.map(n => '@' + n).join(', ')}`);
 
     const existingRecastState = this._getCinemaFaceIpRecastState(projectId, spec.characterId);
+    const hardPersonaRecast = this._isFaceIpRecastEligibilityFailure(existingRecastState);
+    const recastMode = hardPersonaRecast ? 'hard-persona' : 'soft-face-ip';
+    const hardPersonaAttempt = hardPersonaRecast
+      ? Math.max(1, (Number(existingRecastState?.hardPersonaAttempt) || 0) + 1)
+      : (Number(existingRecastState?.hardPersonaAttempt) || 0);
+    const recastStateMeta = {
+      recastMode,
+      ...(hardPersonaRecast ? { hardPersonaAttempt } : {}),
+    };
+    if (hardPersonaRecast) {
+      this.log(`[FACE-IP-RECAST] Previous recast for ${spec.characterId} failed eligibility; escalating to hard-persona recast attempt ${hardPersonaAttempt}.`);
+    }
     const resumableStatuses = new Set(['elements-pending', 'scene-reset-pending', 'scene-regen-pending', 'scene-regenerated']);
     const recoveredAssets = this._recoverFaceIpRecastAssetPaths(projectDir, character);
     const inferredInterruptedRecast = !existingRecastState &&
@@ -11172,6 +11357,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       const keepSceneState = ['scene-reset-pending', 'scene-regen-pending', 'scene-regenerated'].includes(existingRecastState.status);
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
         ...existingRecastState,
+        ...recastStateMeta,
         status: keepSceneState ? existingRecastState.status : 'elements-pending',
         failedElementName,
         elementNames,
@@ -11181,6 +11367,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       this.log(`[FACE-IP-RECAST] Recovered ${spec.characterId} recast assets from interrupted archive state - skipping delete/archive/regeneration and recreating elements.`);
       this._adoptRecoveredFaceIpRecastAssets(projectId, character, recoveredAssets.assetPaths);
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...recastStateMeta,
         status: 'elements-pending',
         reason: 'face-ip-recast-interrupted-recovery',
         failedElementName,
@@ -11189,6 +11376,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       });
     } else {
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...recastStateMeta,
         status: 'delete-pending',
         reason: 'face-ip-recast',
         failedElementName,
@@ -11211,6 +11399,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       }
 
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...recastStateMeta,
         status: 'assets-pending',
         reason: 'face-ip-recast',
         failedElementName,
@@ -11218,31 +11407,50 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       });
 
       const oldPhysical = character.physical_description || character.full_prompt_description || character.description_label || '';
+      if (hardPersonaRecast) {
+        delete character.identity_lock;
+        delete character.face_ip_identity_lock;
+      }
       let newPhysical = await this._rewriteCharacterDescription(character, {
         reason: 'face-ip-recast',
         sourceField: 'physical_description',
+        personaMode: recastMode,
       }).catch(err => {
         this.log(`[FACE-IP-RECAST] Claude physical-description rewrite failed: ${err.message}; applying deterministic caveat`, 'warn');
         return null;
       });
-      if (!newPhysical) newPhysical = oldPhysical;
+      if (!newPhysical) {
+        newPhysical = hardPersonaRecast
+          ? this._buildHardPersonaFallbackDescription(character, oldPhysical)
+          : oldPhysical;
+      }
       newPhysical = this._applyFaceIpRecastVisualDifferentiators(character, newPhysical);
       character.physical_description = newPhysical;
-      if (character.full_prompt_description) {
+      character.identity_lock = this._buildFaceIpIdentityLock(character, newPhysical);
+      if (hardPersonaRecast) {
+        character.full_prompt_description = newPhysical;
+      } else if (character.full_prompt_description) {
         character.full_prompt_description = this._applyFaceIpRecastVisualDifferentiators(character, character.full_prompt_description);
       }
       this._saveScriptState(projectId);
-      db.logEvent(projectId, 'face_ip_recast_description', {
+      db.logEvent(projectId, hardPersonaRecast ? 'face_ip_hard_persona_recast_description' : 'face_ip_recast_description', {
         characterId: spec.characterId,
         failedElementName,
-        detail: `Updated physical_description for Face/IP recast: ${oldPhysical.slice(0, 120)} -> ${newPhysical.slice(0, 120)}`,
+        detail: `Updated physical_description for ${recastMode} recast: ${oldPhysical.slice(0, 120)} -> ${newPhysical.slice(0, 120)}`,
       });
+      db.logEvent(projectId, 'face_ip_recast_identity_lock', {
+        characterId: spec.characterId,
+        failedElementName,
+        detail: `${recastMode} identity lock: ${character.identity_lock.slice(0, 240)}`,
+      });
+      this.log(`[FACE-IP-RECAST] Identity lock for ${spec.characterId} (${recastMode}): ${character.identity_lock}`);
 
       this._clearCinematicElementStateForRecast(projectId, elementNames);
       this._archiveCharacterVisualAssetsForRecast(projectId, projectDir, spec.characterId);
       await this._regenerateMasterPortraitForRecast(projectId, projectDir, character);
       const assetPaths = this._buildFaceIpRecastAssetPaths(projectDir, character);
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...recastStateMeta,
         status: 'elements-pending',
         reason: 'face-ip-recast',
         failedElementName,
@@ -11254,6 +11462,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this._clearCinematicElementStateForRecast(projectId, elementNames);
     await this._runCinematicElementSetup(projectId, projectDir);
     this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+      ...recastStateMeta,
       status: 'eligibility-pending',
       reason: 'face-ip-recast',
       failedElementName,
@@ -11270,6 +11479,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const stillFailed = eligibility.filter(item => item.status !== 'eligible');
     if (stillFailed.length > 0) {
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...recastStateMeta,
         status: 'failed',
         reason: 'face-ip-recast-eligibility-failed',
         failedElementName,
@@ -11279,7 +11489,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       });
       return {
         ok: false,
-        reason: `Face/IP recast completed but ${stillFailed.map(item => '@' + item.name + '=' + item.status).join(', ')} remain ineligible`,
+        reason: `${recastMode} Face/IP recast completed but ${stillFailed.map(item => '@' + item.name + '=' + item.status).join(', ')} remain ineligible`,
         unresolved: stillFailed,
       };
     }
@@ -11300,6 +11510,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         this.log(`[FACE-IP-RECAST] Resuming ${spec.characterId} from recast-tagged scene rows; skipping scene archive reset.`);
       } else {
         this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+          ...recastStateMeta,
           status: 'scene-reset-pending',
           reason: 'face-ip-recast',
           failedElementName,
@@ -11312,6 +11523,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           ? this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'reset')
           : null;
         this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+          ...recastStateMeta,
           status: 'scene-regen-pending',
           reason: 'face-ip-recast',
           failedElementName,
@@ -11330,6 +11542,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       regenProof = this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'regenerated');
       db.updateProjectStage(projectId, 'scenes-done');
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...recastStateMeta,
         status: 'scene-regenerated',
         reason: 'face-ip-recast',
         failedElementName,
@@ -11344,10 +11557,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       characterId: spec.characterId,
       elementNames,
       scenes: scenes.map(s => `ch${s.chapter}_sc${s.scene}`),
-      detail: 'Pre-video Face/IP recast completed; affected scene images reset',
+      detail: `Pre-video ${recastMode} Face/IP recast completed; affected scene images reset`,
     });
     this._clearCinemaElementRepairAttempts(projectId, elementNames);
     this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+      ...recastStateMeta,
       status: 'complete',
       reason: 'face-ip-recast',
       failedElementName,
@@ -11429,9 +11643,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         return hint && cleanName.includes(hint);
       });
     const outfit = character?.outfits?.find(o => String(o.outfit_id || '').toLowerCase() === outfitId);
-    const description = outfit
-      ? `${character?.physical_description || ''}. Wearing: ${outfit.description || ''}`
-      : (character?.full_prompt_description || character?.physical_description || character?.description_label || cleanName);
+    const description = character
+      ? this._buildIdentityLockedCharacterDescription(character, {
+        outfitDescription: outfit?.description || '',
+      })
+      : cleanName;
 
     if (!portraitPath || !fs.existsSync(portraitPath) || !inProject(portraitPath)) return null;
     const gridPath = gridAsset?.file_path && fs.existsSync(gridAsset.file_path) && inProject(gridAsset.file_path)
@@ -13517,8 +13733,24 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     const client = new Anthropic({ apiKey });
     const sourceField = options.sourceField || 'full_prompt_description';
     const originalDescription = char[sourceField] || char.full_prompt_description || char.physical_description || char.description_label || '';
-    const rejectionLabel = options.reason === 'face-ip-recast' ? 'Face/IP not eligible' : 'restricted content';
-    const faceIpRules = options.reason === 'face-ip-recast'
+    const hardPersonaMode = options.personaMode === 'hard-persona';
+    const hardAnchors = hardPersonaMode ? this._extractHardPersonaAnchors(char, originalDescription) : null;
+    const rejectionLabel = hardPersonaMode
+      ? 'Face/IP not eligible after a prior automatic recast'
+      : (options.reason === 'face-ip-recast' ? 'Face/IP not eligible' : 'restricted content');
+    const faceIpRules = hardPersonaMode
+      ? `
+HARD PERSONA RECAST REQUIREMENTS:
+- Create an entirely new fictional person for the same story role; do not make a stronger variant of the previous face
+- Preserve only story-safe anchors: same gender/pronouns (${hardAnchors.pronouns}), same broad age (${hardAnchors.agePhrase}), same ethnicity/nationality (${hardAnchors.ethnicity}), same broad body type (${hardAnchors.bodyType}), same role/name, and compatibility with all existing outfits
+- Do NOT preserve the previous face, skull/head shape, eyes, jaw, nose, complexion wording, scars, facial marks, hairline, beard, or identity lock
+- Add 3-5 fresh concrete permanent identifiers that are culturally plausible and story-appropriate, such as a different face shape, different nose/jaw/cheekbone combination, subtle facial marks, new hairline/beard/hair shape, and a small healed mark
+- If tribal/facial marks are used, keep them subtle, dignified, and regionally plausible; do not use them as caricature
+- Do not include outfit descriptions in the permanent physical description; outfits are listed only as compatibility context
+- Outfit compatibility:
+${hardAnchors.outfitSummary || 'No outfit summary available'}
+`
+      : (options.reason === 'face-ip-recast'
       ? `
 FACE/IP RECAST REQUIREMENTS:
 - Treat this as a first automatic recast: make the face unmistakably original, not just lightly reworded
@@ -13526,24 +13758,38 @@ FACE/IP RECAST REQUIREMENTS:
 - If tribal marks are used, make them subtle, dignified, and regionally plausible for the character; do not use them as caricature
 - Keep these identifiers compatible with all outfits because they will be used for master and outfit portraits
 `
-      : '';
-
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      messages: [{
-        role: 'user',
-        content: `An AI image generator rejected this character description as "${rejectionLabel}" (it likely resembles a real or public person too closely). Rewrite the physical description to be more fictional and stylized while keeping the character believable for a Nollywood drama.
-
-RULES:
+      : '');
+    const rewriteIntro = hardPersonaMode
+      ? 'The previous automatic Face/IP recast still failed eligibility. Create a completely new physical description for this character: believable for a Nollywood drama, but not a variant of the old face.'
+      : `An AI image generator rejected this character description as "${rejectionLabel}" (it likely resembles a real or public person too closely). Rewrite the physical description to be more fictional and stylized while keeping the character believable for a Nollywood drama.`;
+    const rewriteRules = hardPersonaMode
+      ? `RULES:
+- Preserve only story-safe anchors: same gender/pronouns, same story role/name/id, broad age range, ethnicity/nationality, body type, and compatibility with existing outfits
+- Make the face an entirely new persona, not a stronger variant of the old one
+- Do NOT preserve old facial traits, old scars/marks, old eye/jaw/nose/head-shape wording, old hairline/beard, old complexion phrasing, or old identity lock
+- Do NOT use any celebrity names or references to real people
+- Include this caveat naturally or verbatim: "This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure."
+- Output ONLY the rewritten permanent physical description text, nothing else - no explanation, no preamble
+- Do not include outfit descriptions in the permanent physical description`
+      : `RULES:
 - Change distinctive facial features enough that they don't match any real person
 - Keep the same ethnicity, approximate age, gender, and body type
 - Keep the same wardrobe/clothing description (this is important for visual continuity)
 - Make features more distinctive/unique/fictional (e.g., specific scar patterns, subtle tribal marks, facial asymmetry, distinctive hairstyle or beard shape)
 - Do NOT use any celebrity names or references to real people
 - Include this caveat naturally or verbatim: "This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure."
+- Output ONLY the rewritten description text, nothing else - no explanation, no preamble
+- Match the same format and clothing scope as the original description`;
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: `${rewriteIntro}
+
+${rewriteRules}
 - Output ONLY the rewritten description text, nothing else — no explanation, no preamble
-- Match the same format and clothing scope as the original description
 ${faceIpRules}
 
 ORIGINAL DESCRIPTION:
@@ -13565,10 +13811,11 @@ REWRITTEN DESCRIPTION:`,
   }
 
   _applyFaceIpRecastVisualDifferentiators(char, description) {
-    const base = String(description || '').trim();
+    const base = this._sanitizeFaceIpRecastDescription(description);
     const fallback = char?.description_label || char?.name || 'Original fictional character';
     const caveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
     const markers = [
+      'natural dark-brown Nigerian skin tone, not painted blue or silver-toned',
       'an original face design with a subtly uneven cheekbone line',
       'a small healed scar near one eyebrow',
       'faint, dignified facial marks that are culturally plausible for the character',
