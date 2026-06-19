@@ -2954,6 +2954,7 @@ class CinemaVideoAutomation extends KlingAutomation {
           : /check eligibility/i.test(text) ? 'check'
           : /\beligible\b/i.test(text) ? 'eligible'
           : /\bUse\b/i.test(text) ? 'eligible-visual'
+          : /\bCharacter\b/i.test(text) ? 'eligible-visual'
           : 'unknown';
         cards.push({
           x: Math.round(r.x + r.width / 2),
@@ -3369,7 +3370,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       };
       const exactNameIn = (text) => !fullTarget || tokensOf(text).some(token => token === fullTarget || (token.endsWith('...') && fullTarget.startsWith(token.replace(/\.+$/g, ''))));
       const checkingRe = /face\s*\/\s*ip\s*check(?:ing)?|checking content|checking/i;
-      const statusSignalRe = /face\s*\/\s*ip\s*check(?:ing)?|eligible|eligibility|checking|check eligibility|\bUse\b/i;
+      const statusSignalRe = /face\s*\/\s*ip\s*check(?:ing)?|eligible|eligibility|checking|check eligibility|\bUse\b|Character/i;
       const pointEls = [
         document.elementFromPoint(x, y),
         checkX && checkY ? document.elementFromPoint(checkX, checkY) : null,
@@ -3402,7 +3403,10 @@ class CinemaVideoAutomation extends KlingAutomation {
             && exactNameIn(text)
             && statusSignalRe.test(text);
         });
-        cardEl = matches[0] || pointEls[0];
+        cardEl = matches[0] || null;
+      }
+      if (!cardEl) {
+        return allowFallback && fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
       }
       const text = textOf(cardEl);
       const hasUse = /\bUse\b/i.test(text);
@@ -3435,6 +3439,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (/check eligibility/i.test(text)) return 'check';
       if (/\beligible\b/i.test(text)) return 'eligible';
       if (hasUse && hasReadyBadge) return 'eligible-visual';
+      if (/\bCharacter\b/i.test(text) && exactNameIn(text)) return 'eligible-visual';
       return allowFallback && fallbackStatus && fallbackStatus !== 'unknown' ? fallbackStatus : 'unknown';
     }, { ...card, allowFallback: useFallbackStatus }).catch(() => 'unknown');
   }
@@ -3503,6 +3508,7 @@ class CinemaVideoAutomation extends KlingAutomation {
               : /check eligibility/i.test(text) ? 'check'
                 : /\beligible\b/i.test(text) ? 'eligible'
                   : hasUse && hasReadyBadge ? 'eligible-visual'
+                  : matches && /\bCharacter\b/i.test(text) ? 'eligible-visual'
                   : 'unknown';
           const score = (matches ? 10 : 0)
             + (status !== 'unknown' ? 8 : 0)
