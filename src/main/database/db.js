@@ -78,6 +78,19 @@ async function init(filepath) {
  * Uses atomic write (write to temp file, then rename) to prevent
  * corruption if the process dies mid-write.
  */
+function sleepSync(ms) {
+  if (ms <= 0) return;
+
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch (_) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      // Fallback only; Atomics.wait is available in the Electron main process.
+    }
+  }
+}
+
 function save() {
   if (!db || !dbPath) return;
   const data = db.export();
@@ -87,7 +100,33 @@ function save() {
   // rename() is atomic on all major OS filesystems (NTFS, ext4, APFS).
   const tmpPath = dbPath + '.tmp';
   fs.writeFileSync(tmpPath, buffer);
-  fs.renameSync(tmpPath, dbPath);
+
+  // Windows can transiently deny replacing the SQLite file if another process
+  // has just opened it for monitoring/backup. Keep the atomic rename, but wait
+  // out short-lived locks instead of surfacing them as pipeline failures.
+  const retryableCodes = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY']);
+  let lastErr = null;
+  const maxAttempts = 16;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      fs.renameSync(tmpPath, dbPath);
+      if (attempt > 1) {
+        console.warn(`[DB] save rename recovered after ${attempt} attempts`);
+      }
+      return;
+    } catch (err) {
+      lastErr = err;
+      const canRetry = retryableCodes.has(err && err.code) && fs.existsSync(tmpPath);
+      if (!canRetry || attempt === maxAttempts) break;
+
+      const delayMs = Math.min(500, 25 * Math.pow(2, Math.min(attempt - 1, 5)));
+      sleepSync(delayMs);
+    }
+  }
+
+  console.error(`[DB] Failed to replace database after ${maxAttempts} attempts: ${lastErr && lastErr.message}`);
+  throw lastErr;
 }
 
 // ── Backup System ──
