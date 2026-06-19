@@ -4011,6 +4011,11 @@ Update 2026-06-18 Face/IP recast hardening:
 - A recast that reaches eligibility re-check and still fails is persisted as `failed`, not resumable `eligibility-pending`. Restart must not keep recreating the same character elements from the same rejected portrait/grid set.
 - If one outfit element recast fails for a character, sibling outfit elements for that character are marked unresolved in the same repair pass instead of starting another delete/recreate loop from the same failed assets.
 
+Update 2026-06-19 Face/IP recast resume gap:
+- Live SCWOB restart after a partial Barrister Tunde recast proved a missing stage boundary: the project resumed at `scenes-done`, entered video, skipped four missing recast scene images, and began pre-Generate setup even though DB rows `face-ip-recast:character_4` were still pending. No video Generate proof existed (`gen_clicked_at/source/file/cdn` all zero), so the app was stopped and the video boundary was patched.
+- Before cinematic video setup now runs, the orchestrator checks persisted `_cinemaFaceIpRecasts` plus active `scene_image_cinematic.error_message = face-ip-recast:<characterId>` rows. If video has not started, it regenerates the exact tagged scene rows, proves DB reset/regeneration, clears stale pre-video clip metadata only for clips tied to those scenes, marks the recast complete, then continues. If any video proof already exists, automatic recast is blocked and human review is required.
+- `_runCinematicVideoStage()` also fail-closes if any active recast-tagged scene row lacks a ready local image. Recast scenes must never be silently skipped when assembling the clip list.
+
 Live no-Generate verification after the fix:
 ```text
 start-frame dry-run: waited through Checking content..., selected settled tile, thumbnail attached
