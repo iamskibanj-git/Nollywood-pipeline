@@ -3775,21 +3775,18 @@ class CinemaStudioAutomation {
       const postClickState = await readPostClickState();
       this.log(`[REF] After + candidate ${round}: ${JSON.stringify(postClickState)}`);
 
-    // If no popup found after first click, retry once
-      pickerState = await this._readReferencePickerState();
-      this.log(`[REF] Reference picker state after candidate ${round}: ${JSON.stringify(pickerState)}`);
-      if (pickerState.ok) {
-        openedPlusCandidate = plusSearch;
-        break;
+      pickerState = await this._readReferencePickerState()
+        .catch(error => ({ ok: false, reason: error.message || String(error) }));
+      this.log(`[REF] Reference picker state after candidate ${round} (diagnostic only): ${JSON.stringify(pickerState)}`);
+      openedPlusCandidate = plusSearch;
+      if (!pickerState?.ok) {
+        pickerState = { ok: true, assumedAfterPlusClick: true, diagnostic: pickerState };
       }
-
-      badPlusCandidateKeys.add(plusSearch.key || `${plusSearch.x},${plusSearch.y}`);
-      await page.keyboard.press('Escape').catch(() => {});
-      await this._dismissOverlays().catch(() => {});
-      await page.waitForTimeout(900);
+      break;
     }
 
-    // ── Step 3: Click "Uploads" tab ───────────────────────────────────
+    // Step 3: the + picker opens on Uploads. Do not prove/click modal tabs here;
+    // set the hidden image input directly, then prove upload + attachment.
     if (!pickerState?.ok) {
       detachUploadListener();
       await restorePlusCandidates();
@@ -3797,90 +3794,7 @@ class CinemaStudioAutomation {
     }
     this.log(`[REF] Reference picker opened by + candidate ${JSON.stringify(openedPlusCandidate)}`);
 
-    const tabClickResult = await page.evaluate(() => {
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const s = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'
-          && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
-      };
-      const pickerTabCount = (text) => [
-        /Uploads?/i,
-        /Elements/i,
-        /ImageGenerations/i,
-        /VideoGenerations/i,
-        /Liked/i,
-      ].reduce((count, pattern) => count + (pattern.test(String(text || '').replace(/\s+/g, '')) ? 1 : 0), 0);
-      const roots = [...document.querySelectorAll(
-        '[role="dialog"], [role="listbox"], [data-radix-popper-content-wrapper], ' +
-        '[class*="modal" i], [class*="picker" i], [class*="popover" i], ' +
-        '[class*="panel" i], [class*="dropdown" i], [class*="overlay" i]'
-      )]
-        .filter(visible)
-        .map((el) => {
-          const r = el.getBoundingClientRect();
-          const text = clean(el.innerText || el.textContent || '');
-          return { el, r, text, pickerTabCount: pickerTabCount(text) };
-        })
-        .filter(({ r, text, pickerTabCount }) =>
-          r.width >= 360 &&
-          r.height >= 240 &&
-          pickerTabCount >= 3 &&
-          !/Describe (your|the)? ?scene/i.test(text) &&
-          !/\bGENERATE\b/i.test(text) &&
-          !/\b(Filter|View|Share)\b.*\bUpload\b/i.test(text)
-        )
-        .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
-      const root = roots[0];
-      if (!root) return { found: false, reason: 'no reference picker root' };
-
-      const tabs = [...root.el.querySelectorAll('[role="tab"], button, [role="button"], div, span, a')]
-        .filter(visible)
-        .map((el) => {
-          const r = el.getBoundingClientRect();
-          return { el, r, text: clean(el.innerText || el.textContent || '') };
-        })
-        .filter(({ r, text }) =>
-          r.width > 20 &&
-          r.width < 220 &&
-          r.height > 10 &&
-          r.height < 80 &&
-          /^Uploads?$/i.test(text)
-        )
-        .sort((a, b) => a.r.y - b.r.y || a.r.x - b.r.x);
-      const tab = tabs[0];
-      if (!tab) {
-        const rootTextCompact = String(root.text || '').replace(/\s+/g, '');
-        if (/Uploads?/i.test(rootTextCompact) && /Upload(media|images?)/i.test(rootTextCompact)) {
-          return {
-            found: true,
-            alreadyActive: true,
-            reason: 'uploads tab appears active in reference picker',
-            root: { x: Math.round(root.r.x), y: Math.round(root.r.y), w: Math.round(root.r.width), h: Math.round(root.r.height), text: root.text.slice(0, 160) },
-          };
-        }
-        return {
-          found: false,
-          reason: 'uploads tab not found inside reference picker',
-          root: { x: Math.round(root.r.x), y: Math.round(root.r.y), w: Math.round(root.r.width), h: Math.round(root.r.height), text: root.text.slice(0, 160) },
-        };
-      }
-      tab.el.click();
-      return {
-        found: true,
-        text: tab.text,
-        x: Math.round(tab.r.x),
-        y: Math.round(tab.r.y),
-        root: { x: Math.round(root.r.x), y: Math.round(root.r.y), w: Math.round(root.r.width), h: Math.round(root.r.height) },
-      };
-    }).catch((error) => ({ found: false, reason: error.message || 'evaluate failed' }));
-    if (!tabClickResult.found) {
-      detachUploadListener();
-      throw new Error(`REFERENCE_PICKER_TAB_NOT_FOUND: ${JSON.stringify(tabClickResult)}`);
-    }
-    this.log(`[REF] Uploads tab clicked in reference picker: ${JSON.stringify(tabClickResult)}`);
-    await page.waitForTimeout(1500);
+    this.log('[REF] Skipping modal/tab root proof after +; proceeding directly to hidden file input upload');
 
     const preUploadImageSrcs = await page.evaluate(() => {
       return [...document.querySelectorAll('img')]
@@ -3999,23 +3913,15 @@ class CinemaStudioAutomation {
   // ═══════════════════════════════════════════════════════════
   async _uploadReferenceViaHiddenImageInput(localPath) {
     const page = this._ensurePageAlive();
-    const pickerProof = await page.evaluate(() => {
-      const roots = [...document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper], [class*="modal" i], [class*="picker" i], [class*="popover" i], [class*="panel" i]')]
-        .map((el) => {
-          const r = el.getBoundingClientRect();
-          const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-          return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), text, compactText: text.replace(/\s+/g, '') };
-        })
-        .filter(({ w, h, compactText }) => w > 250 && h > 180 && /Uploads?/i.test(compactText) && /Uploadmedia/i.test(compactText));
-      return roots[0] ? { ok: true, root: { ...roots[0], text: roots[0].text.slice(0, 120) } } : { ok: false };
-    }).catch((error) => ({ ok: false, error: error.message }));
-    if (!pickerProof.ok) {
-      return { ok: false, reason: `Uploads picker not visible before hidden input set (${JSON.stringify(pickerProof)})` };
-    }
-
     const inputs = page.locator('input[type="file"]');
-    const count = await inputs.count().catch(() => 0);
     const attempts = [];
+
+    let count = 0;
+    for (let waitRound = 0; waitRound < 10; waitRound++) {
+      count = await inputs.count().catch(() => 0);
+      if (count > 0) break;
+      await page.waitForTimeout(500);
+    }
 
     for (let i = count - 1; i >= 0; i--) {
       const input = inputs.nth(i);
