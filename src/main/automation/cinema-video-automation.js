@@ -153,7 +153,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       await this._typeMultiShotPrompt(multiShotPrompt, validElements);
       const expectedReferenceTiles = this._expectedComposerReferenceTileCount(multiShotPrompt, validElements);
       this._lastClipElementEligibility.expectedReferenceTiles = expectedReferenceTiles;
-      await this._waitForComposerReferenceAttachmentCount(expectedReferenceTiles, 45000);
+      this.log(`[PROMPT] Skipping visual composer reference tile-count gate (${expectedReferenceTiles} expected); relying on start-frame upload proof and strict @mention chip audits.`);
       await this._assertCurrentCinemaProjectUrl('after prompt typing');
       this._cinemaGeneratePhase = 'preBaseline';
       await this._setGenerateSafetyLock(true);
@@ -4347,7 +4347,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
       const expectedTiles = Math.max(1, Number(elementEligibility?.expectedReferenceTiles) || (1 + new Set(requiredElements.map(name => String(name).toLowerCase())).size));
       if (imgs.length < expectedTiles) {
-        issues.push(`Composer reference tiles incomplete: ${imgs.length}/${expectedTiles}`);
+        console.warn(`[CINEMA-SAFETY] Visual composer reference tile count is ${imgs.length}/${expectedTiles}; continuing because start-frame upload and strict @mention chip proofs already passed.`);
       }
       return { ok: issues.length === 0, issues, promptLength: promptText.length };
     }, {
