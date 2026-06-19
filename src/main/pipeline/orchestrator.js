@@ -10640,6 +10640,68 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
   }
 
+  _getProjectSettings(projectId) {
+    const rawSettings = db.getProject(projectId)?.settings;
+    return rawSettings ? (typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings) : {};
+  }
+
+  _updateProjectSettings(projectId, updater) {
+    const settings = this._getProjectSettings(projectId);
+    const next = updater(settings) || settings;
+    db.updateProject(projectId, { settings: JSON.stringify(next) });
+    return next;
+  }
+
+  _getCinemaFaceIpRecastState(projectId, characterId) {
+    if (!projectId || !characterId) return null;
+    try {
+      const settings = this._getProjectSettings(projectId);
+      return settings._cinemaFaceIpRecasts?.[characterId] || null;
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not read Face/IP recast state for ${characterId}: ${e.message}`, 'warn');
+      return null;
+    }
+  }
+
+  _persistCinemaFaceIpRecastState(projectId, characterId, patch = {}) {
+    if (!projectId || !characterId) return null;
+    try {
+      let saved = null;
+      this._updateProjectSettings(projectId, (settings) => {
+        settings._cinemaFaceIpRecasts = settings._cinemaFaceIpRecasts || {};
+        const current = settings._cinemaFaceIpRecasts[characterId] || {};
+        saved = {
+          ...current,
+          ...patch,
+          characterId,
+          updatedAt: new Date().toISOString(),
+        };
+        settings._cinemaFaceIpRecasts[characterId] = saved;
+        return settings;
+      });
+      return saved;
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist Face/IP recast state for ${characterId}: ${e.message}`, 'warn');
+      return null;
+    }
+  }
+
+  _clearCinemaFaceIpRecastState(projectId, characterId) {
+    if (!projectId || !characterId) return;
+    try {
+      this._updateProjectSettings(projectId, (settings) => {
+        if (!settings._cinemaFaceIpRecasts) return settings;
+        delete settings._cinemaFaceIpRecasts[characterId];
+        if (Object.keys(settings._cinemaFaceIpRecasts).length === 0) {
+          delete settings._cinemaFaceIpRecasts;
+        }
+        return settings;
+      });
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not clear Face/IP recast state for ${characterId}: ${e.message}`, 'warn');
+    }
+  }
+
   _buildCharacterPortraitPrompt(charDescription) {
     const faceIpCaveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
     const desc = String(charDescription || '').trim();
@@ -10737,6 +10799,114 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     fs.renameSync(filePath, archivePath);
     this.log(`[FACE-IP-RECAST] Archived ${label}: ${filePath} -> ${archivePath}`);
     return archivePath;
+  }
+
+  _restoreLatestFaceIpArchiveToPath(filePath, label) {
+    const fs = require('fs');
+    const path = require('path');
+    if (!filePath) return false;
+    if (fs.existsSync(filePath)) return true;
+    const dir = path.dirname(filePath);
+    const archiveDir = path.join(dir, '.archive');
+    if (!fs.existsSync(archiveDir)) return false;
+    const ext = path.extname(filePath);
+    const base = path.basename(filePath, ext);
+    const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^${escapedBase}_faceip_recast_\\d+${ext.replace('.', '\\.')}$`, 'i');
+    const candidates = fs.readdirSync(archiveDir)
+      .filter(name => pattern.test(name))
+      .map(name => {
+        const fullPath = path.join(archiveDir, name);
+        return { fullPath, mtimeMs: fs.statSync(fullPath).mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    if (candidates.length === 0) return false;
+    fs.renameSync(candidates[0].fullPath, filePath);
+    this.log(`[FACE-IP-RECAST] Restored ${label} from interrupted recast archive: ${candidates[0].fullPath} -> ${filePath}`);
+    return true;
+  }
+
+  _buildFaceIpRecastAssetPaths(projectDir, character) {
+    const path = require('path');
+    const characterId = character?.id;
+    const outfitIds = (character?.outfits?.length ? character.outfits.map(o => o.outfit_id) : ['o1'])
+      .map(id => String(id || '').toLowerCase())
+      .filter(Boolean);
+    const portraitDir = path.join(projectDir, 'assets', 'portraits');
+    const gridDir = path.join(projectDir, 'assets', 'grids');
+    const masterPortrait = path.join(portraitDir, `portrait_${characterId}.png`);
+    const outfitPortraits = {};
+    for (const outfitId of outfitIds) {
+      if (outfitId === 'o1') continue;
+      outfitPortraits[`${characterId}_${outfitId}`] = path.join(portraitDir, `portrait_${characterId}_${outfitId}.png`);
+    }
+    const grids = {};
+    for (const outfitId of outfitIds) {
+      const unitKey = `${characterId}_${outfitId}`;
+      grids[unitKey] = path.join(gridDir, `${unitKey}_grid.png`);
+    }
+    return { masterPortrait, outfitPortraits, grids };
+  }
+
+  _allFaceIpRecastAssetPathsExist(assetPaths) {
+    const fs = require('fs');
+    if (!assetPaths?.masterPortrait || !fs.existsSync(assetPaths.masterPortrait)) return false;
+    for (const filePath of Object.values(assetPaths.outfitPortraits || {})) {
+      if (!fs.existsSync(filePath)) return false;
+    }
+    for (const filePath of Object.values(assetPaths.grids || {})) {
+      if (!fs.existsSync(filePath)) return false;
+    }
+    return true;
+  }
+
+  _recoverFaceIpRecastAssetPaths(projectDir, character) {
+    const fs = require('fs');
+    const assetPaths = this._buildFaceIpRecastAssetPaths(projectDir, character);
+    const recovered = [];
+    const masterExisted = fs.existsSync(assetPaths.masterPortrait);
+    if (this._restoreLatestFaceIpArchiveToPath(assetPaths.masterPortrait, `master portrait ${character.id}`) && !masterExisted) {
+      recovered.push(assetPaths.masterPortrait);
+    }
+    for (const [unitKey, filePath] of Object.entries(assetPaths.outfitPortraits || {})) {
+      const existed = fs.existsSync(filePath);
+      if (this._restoreLatestFaceIpArchiveToPath(filePath, `outfit portrait ${unitKey}`) && !existed) recovered.push(filePath);
+    }
+    for (const [unitKey, filePath] of Object.entries(assetPaths.grids || {})) {
+      const existed = fs.existsSync(filePath);
+      if (this._restoreLatestFaceIpArchiveToPath(filePath, `grid ${unitKey}`) && !existed) recovered.push(filePath);
+    }
+    return {
+      assetPaths,
+      recovered,
+      ready: this._allFaceIpRecastAssetPathsExist(assetPaths),
+    };
+  }
+
+  _adoptRecoveredFaceIpRecastAssets(projectId, character, assetPaths) {
+    if (!projectId || !character?.id || !assetPaths) return;
+    const fs = require('fs');
+    const markLatestActive = (type, characterId, filePath) => {
+      if (!filePath || !fs.existsSync(filePath)) return;
+      const rows = db.getAssets(projectId, { type })
+        .filter(a => a.character_id === characterId && a.status !== 'archived')
+        .sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+      if (rows.length === 0) {
+        db.insertExpectedAssets(projectId, [{ type, character_id: characterId }]);
+        const inserted = db.getAssets(projectId, { type })
+          .filter(a => a.character_id === characterId && a.status !== 'archived')
+          .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
+        if (inserted) db.markAssetDone(inserted.id, filePath, { sourceGenId: 'face-ip-recast-archive-recovered' });
+        return;
+      }
+      const active = rows.find(a => a.status !== 'done') || rows[0];
+      db.markAssetDone(active.id, filePath, { sourceGenId: 'face-ip-recast-archive-recovered' });
+    };
+
+    markLatestActive('portrait', character.id, assetPaths.masterPortrait);
+    for (const [unitKey, filePath] of Object.entries(assetPaths.grids || {})) {
+      markLatestActive('character_grid', unitKey, filePath);
+    }
   }
 
   _clearCinematicElementStateForRecast(projectId, elementNames = []) {
@@ -10892,49 +11062,112 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
     this.log(`[FACE-IP-RECAST] Starting pre-video recast for ${spec.characterId} after @${failedElementName} stayed not eligible. Elements: ${elementNames.map(n => '@' + n).join(', ')}`);
 
-    for (const elementName of elementNames) {
-      videoAutomation.invalidateElementEligibility?.(elementName);
-      try {
-        await videoAutomation.deleteElementFromPicker(elementName, { requireNotEligible: false });
-        this.log(`[FACE-IP-RECAST] Deleted @${elementName} from Higgsfield before local recast reset.`);
-      } catch (deleteErr) {
-        const alreadyMissing = /not visible for delete|already absent|alreadyMissing/i.test(deleteErr.message || '');
-        if (alreadyMissing) {
-          this.log(`[FACE-IP-RECAST] @${elementName} already absent before recast.`);
-        } else {
-          return { ok: false, reason: `Safe delete failed for @${elementName}: ${deleteErr.message}` };
+    const existingRecastState = this._getCinemaFaceIpRecastState(projectId, spec.characterId);
+    const resumableStatuses = new Set(['elements-pending', 'eligibility-pending', 'scene-reset-pending']);
+    const recoveredAssets = this._recoverFaceIpRecastAssetPaths(projectDir, character);
+    const inferredInterruptedRecast = !existingRecastState &&
+      recoveredAssets.ready &&
+      recoveredAssets.recovered.length > 0 &&
+      /well-known|famous|celebrity|public figure|fictional original person/i.test(
+        `${character.physical_description || ''} ${character.full_prompt_description || ''}`
+      );
+
+    if (existingRecastState && resumableStatuses.has(existingRecastState.status)) {
+      this.log(`[FACE-IP-RECAST] Resuming ${spec.characterId} from persisted state "${existingRecastState.status}" - skipping delete/archive/regeneration.`);
+      this._adoptRecoveredFaceIpRecastAssets(projectId, character, recoveredAssets.assetPaths);
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        ...existingRecastState,
+        status: existingRecastState.status === 'scene-reset-pending' ? 'scene-reset-pending' : 'elements-pending',
+        failedElementName,
+        elementNames,
+        assetPaths: recoveredAssets.assetPaths,
+      });
+    } else if (inferredInterruptedRecast) {
+      this.log(`[FACE-IP-RECAST] Recovered ${spec.characterId} recast assets from interrupted archive state - skipping delete/archive/regeneration and recreating elements.`);
+      this._adoptRecoveredFaceIpRecastAssets(projectId, character, recoveredAssets.assetPaths);
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        status: 'elements-pending',
+        reason: 'face-ip-recast-interrupted-recovery',
+        failedElementName,
+        elementNames,
+        assetPaths: recoveredAssets.assetPaths,
+      });
+    } else {
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        status: 'delete-pending',
+        reason: 'face-ip-recast',
+        failedElementName,
+        elementNames,
+      });
+
+      for (const elementName of elementNames) {
+        videoAutomation.invalidateElementEligibility?.(elementName);
+        try {
+          await videoAutomation.deleteElementFromPicker(elementName, { requireNotEligible: false });
+          this.log(`[FACE-IP-RECAST] Deleted @${elementName} from Higgsfield before local recast reset.`);
+        } catch (deleteErr) {
+          const alreadyMissing = /not visible for delete|already absent|alreadyMissing/i.test(deleteErr.message || '');
+          if (alreadyMissing) {
+            this.log(`[FACE-IP-RECAST] @${elementName} already absent before recast.`);
+          } else {
+            return { ok: false, reason: `Safe delete failed for @${elementName}: ${deleteErr.message}` };
+          }
         }
       }
-    }
 
-    const oldPhysical = character.physical_description || character.full_prompt_description || character.description_label || '';
-    let newPhysical = await this._rewriteCharacterDescription(character, {
-      reason: 'face-ip-recast',
-      sourceField: 'physical_description',
-    }).catch(err => {
-      this.log(`[FACE-IP-RECAST] Claude physical-description rewrite failed: ${err.message}; applying deterministic caveat`, 'warn');
-      return null;
-    });
-    const caveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
-    if (!newPhysical) newPhysical = oldPhysical;
-    if (!/well-known|famous|celebrity|public figure/i.test(newPhysical)) newPhysical = `${newPhysical}. ${caveat}`;
-    character.physical_description = newPhysical;
-    if (character.full_prompt_description) {
-      character.full_prompt_description = /well-known|famous|celebrity|public figure/i.test(character.full_prompt_description)
-        ? character.full_prompt_description
-        : `${character.full_prompt_description}. ${caveat}`;
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        status: 'assets-pending',
+        reason: 'face-ip-recast',
+        failedElementName,
+        elementNames,
+      });
+
+      const oldPhysical = character.physical_description || character.full_prompt_description || character.description_label || '';
+      let newPhysical = await this._rewriteCharacterDescription(character, {
+        reason: 'face-ip-recast',
+        sourceField: 'physical_description',
+      }).catch(err => {
+        this.log(`[FACE-IP-RECAST] Claude physical-description rewrite failed: ${err.message}; applying deterministic caveat`, 'warn');
+        return null;
+      });
+      const caveat = 'This is a fictional original person and must not resemble any well-known, famous, public, or celebrity figure.';
+      if (!newPhysical) newPhysical = oldPhysical;
+      if (!/well-known|famous|celebrity|public figure/i.test(newPhysical)) newPhysical = `${newPhysical}. ${caveat}`;
+      character.physical_description = newPhysical;
+      if (character.full_prompt_description) {
+        character.full_prompt_description = /well-known|famous|celebrity|public figure/i.test(character.full_prompt_description)
+          ? character.full_prompt_description
+          : `${character.full_prompt_description}. ${caveat}`;
+      }
+      this._saveScriptState(projectId);
+      db.logEvent(projectId, 'face_ip_recast_description', {
+        characterId: spec.characterId,
+        failedElementName,
+        detail: `Updated physical_description for Face/IP recast: ${oldPhysical.slice(0, 120)} -> ${newPhysical.slice(0, 120)}`,
+      });
+
+      this._clearCinematicElementStateForRecast(projectId, elementNames);
+      this._archiveCharacterVisualAssetsForRecast(projectId, projectDir, spec.characterId);
+      await this._regenerateMasterPortraitForRecast(projectId, projectDir, character);
+      const assetPaths = this._buildFaceIpRecastAssetPaths(projectDir, character);
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        status: 'elements-pending',
+        reason: 'face-ip-recast',
+        failedElementName,
+        elementNames,
+        assetPaths,
+      });
     }
-    this._saveScriptState(projectId);
-    db.logEvent(projectId, 'face_ip_recast_description', {
-      characterId: spec.characterId,
-      failedElementName,
-      detail: `Updated physical_description for Face/IP recast: ${oldPhysical.slice(0, 120)} -> ${newPhysical.slice(0, 120)}`,
-    });
 
     this._clearCinematicElementStateForRecast(projectId, elementNames);
-    this._archiveCharacterVisualAssetsForRecast(projectId, projectDir, spec.characterId);
-    await this._regenerateMasterPortraitForRecast(projectId, projectDir, character);
     await this._runCinematicElementSetup(projectId, projectDir);
+    this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+      status: 'eligibility-pending',
+      reason: 'face-ip-recast',
+      failedElementName,
+      elementNames,
+      assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+    });
 
     videoAutomation.invalidateElementEligibility?.(elementNames);
     const eligibility = [];
@@ -10951,6 +11184,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       };
     }
 
+    this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+      status: 'scene-reset-pending',
+      reason: 'face-ip-recast',
+      failedElementName,
+      elementNames,
+      assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+    });
+
     const scenes = this._archiveScenesForCharacterRecast(projectId, spec.characterId);
     if (scenes.length > 0) {
       this.log(`[FACE-IP-RECAST] Regenerating ${scenes.length} affected scene image(s) before returning to video generation.`);
@@ -10965,6 +11206,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       detail: 'Pre-video Face/IP recast completed; affected scene images reset',
     });
     this._clearCinemaElementRepairAttempts(projectId, elementNames);
+    this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+      status: 'complete',
+      reason: 'face-ip-recast',
+      failedElementName,
+      elementNames,
+      scenes: scenes.map(s => `ch${s.chapter}_sc${s.scene}`),
+      assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+    });
     return {
       ok: true,
       characterId: spec.characterId,
