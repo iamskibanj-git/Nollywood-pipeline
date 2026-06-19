@@ -955,6 +955,31 @@ function clearAssetGenerationMeta(assetId) {
 }
 
 /**
+ * Mark a replacement cinematic scene image row as created because of a
+ * character Face/IP recast. The row keeps this marker after markAssetDone(),
+ * giving later video-stage checks a DB-level proof that the scene image was
+ * regenerated for this recast rather than reused from the pre-recast cast.
+ */
+function markSceneImageRecastPending(assetId, characterId) {
+  runSql(
+    `UPDATE project_assets
+     SET error_message = ?,
+         file_path = NULL,
+         completed_at = NULL,
+         model_used = NULL,
+         source_gen_id = NULL,
+         cdn_url = NULL,
+         references_used = NULL,
+         generation_duration_ms = NULL,
+         gen_clicked_at = NULL,
+         credit_cost = NULL,
+         prompt_used = NULL
+     WHERE id = ?`,
+    [`face-ip-recast:${characterId}`, assetId]
+  );
+}
+
+/**
  * Update the prompt_used field on a scene asset (e.g. to persist vision-verified
  * blocking so it doesn't need to be re-verified on subsequent runs).
  */
@@ -1985,6 +2010,7 @@ module.exports = {
   markAssetFailed,
   resetAsset,
   clearAssetGenerationMeta,
+  markSceneImageRecastPending,
   updateAssetPromptUsed,
   getAssets,
   getIncompleteAssets,

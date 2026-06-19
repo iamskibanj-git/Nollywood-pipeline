@@ -10971,8 +10971,103 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     return { outfitIds, gridUnitKeys };
   }
 
-  _archiveScenesForCharacterRecast(projectId, characterId) {
-    const scenes = this._findScenesContainingCharacter(characterId);
+  _normalizeRecastSceneRefs(scenes = []) {
+    const seen = new Set();
+    const refs = [];
+    for (const scene of scenes || []) {
+      const chapter = Number(scene?.chapter);
+      const sceneNumber = Number(scene?.scene);
+      if (!Number.isFinite(chapter) || !Number.isFinite(sceneNumber)) continue;
+      const key = `${chapter}_${sceneNumber}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      refs.push({
+        chapter,
+        scene: sceneNumber,
+        hint: scene.hint || `ch${String(chapter).padStart(2, '0')}_sc${String(sceneNumber).padStart(2, '0')}_cinematic`,
+      });
+    }
+    return refs;
+  }
+
+  _getPersistedFaceIpRecastScenes(projectId, characterId) {
+    const state = this._getCinemaFaceIpRecastState(projectId, characterId);
+    return this._normalizeRecastSceneRefs(state?.scenes || []);
+  }
+
+  _assertFaceIpRecastSceneDbProof(projectId, characterId, scenes, phase) {
+    const fs = require('fs');
+    const sceneRefs = this._normalizeRecastSceneRefs(scenes);
+    const sceneAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
+    const failures = [];
+    const sceneProof = [];
+    const recastMarker = `face-ip-recast:${characterId}`;
+
+    for (const sceneRef of sceneRefs) {
+      const activeRows = sceneAssets.filter(a =>
+        a.status !== 'archived' &&
+        Number(a.chapter) === Number(sceneRef.chapter) &&
+        Number(a.scene) === Number(sceneRef.scene)
+      );
+      const activeDoneRows = activeRows.filter(a => a.status === 'done');
+      const activePendingRows = activeRows.filter(a => a.status !== 'done');
+
+      if (phase === 'reset') {
+        if (activeDoneRows.length > 0) {
+          failures.push(`ch${sceneRef.chapter}_sc${sceneRef.scene} still has ${activeDoneRows.length} active done scene row(s) after reset`);
+        }
+        const taggedPendingRows = activePendingRows.filter(a => String(a.error_message || '') === recastMarker);
+        if (taggedPendingRows.length === 0) {
+          failures.push(`ch${sceneRef.chapter}_sc${sceneRef.scene} has no active recast-tagged pending scene row after reset`);
+        }
+      } else if (phase === 'regenerated') {
+        const doneWithFile = activeDoneRows.filter(a =>
+          a.file_path &&
+          fs.existsSync(a.file_path) &&
+          String(a.error_message || '') === recastMarker
+        );
+        if (doneWithFile.length === 0) {
+          failures.push(`ch${sceneRef.chapter}_sc${sceneRef.scene} has no active recast-tagged done scene row with file after regeneration`);
+        }
+        if (activePendingRows.length > 0) {
+          failures.push(`ch${sceneRef.chapter}_sc${sceneRef.scene} still has ${activePendingRows.length} active non-done scene row(s) after regeneration`);
+        }
+      }
+
+      sceneProof.push({
+        chapter: sceneRef.chapter,
+        scene: sceneRef.scene,
+        activeRows: activeRows.map(a => ({
+          id: a.id,
+          status: a.status,
+          hasFile: !!a.file_path,
+          fileExists: !!(a.file_path && fs.existsSync(a.file_path)),
+          sourceGenId: a.source_gen_id || null,
+          recastMarker: a.error_message || null,
+        })),
+      });
+    }
+
+    const proof = {
+      phase,
+      characterId,
+      scenes: sceneProof,
+      checkedAt: new Date().toISOString(),
+    };
+    db.logEvent(projectId, `face_ip_recast_scene_${phase}_proof`, {
+      characterId,
+      scenes: sceneRefs.map(s => `ch${s.chapter}_sc${s.scene}`),
+      detail: failures.length ? `FAILED: ${failures.join('; ')}` : `OK: ${sceneRefs.length} scene image row(s)`,
+    });
+    if (failures.length > 0) {
+      throw new Error(`[FACE-IP-RECAST] DB proof failed during scene ${phase}: ${failures.join('; ')}`);
+    }
+    this.log(`[FACE-IP-RECAST] DB proof OK (${phase}) for ${characterId}: ${sceneRefs.length} scene image row(s).`);
+    return proof;
+  }
+
+  _archiveScenesForCharacterRecast(projectId, characterId, scenesOverride = null) {
+    const scenes = this._normalizeRecastSceneRefs(scenesOverride || this._findScenesContainingCharacter(characterId));
     if (scenes.length === 0) {
       this.log(`[FACE-IP-RECAST] No scenes found for ${characterId}; no scene images reset`, 'warn');
       return scenes;
@@ -10993,18 +11088,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         chapter: sceneRef.chapter,
         scene: sceneRef.scene,
       }]);
+      const replacement = db.getAssets(projectId, { type: 'scene_image_cinematic' })
+        .filter(a =>
+          a.status !== 'archived' &&
+          Number(a.chapter) === Number(sceneRef.chapter) &&
+          Number(a.scene) === Number(sceneRef.scene)
+        )
+        .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
+      if (replacement) db.markSceneImageRecastPending(replacement.id, characterId);
     }
 
-    const clips = db.getAssets(projectId, { type: 'video_clip_cinematic' });
-    let clearedClips = 0;
-    for (const clip of clips) {
-      if (!scenes.some(sceneRef => Number(sceneRef.chapter) === Number(clip.chapter) && Number(sceneRef.scene) === Number(clip.scene))) continue;
-      db.clearAssetGenerationMeta(clip.id);
-      if (clip.status !== 'done') db.resetAsset(clip.id);
-      clearedClips++;
-    }
-
-    this.log(`[FACE-IP-RECAST] Archived/reset ${archived} scene image row(s) for ${characterId}; cleared pre-video metadata on ${clearedClips} tied clip row(s).`);
+    this.log(`[FACE-IP-RECAST] Archived/reset ${archived} scene image row(s) for ${characterId}; replacement scene rows tagged face-ip-recast:${characterId}.`);
     return scenes;
   }
 
@@ -11063,7 +11157,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this.log(`[FACE-IP-RECAST] Starting pre-video recast for ${spec.characterId} after @${failedElementName} stayed not eligible. Elements: ${elementNames.map(n => '@' + n).join(', ')}`);
 
     const existingRecastState = this._getCinemaFaceIpRecastState(projectId, spec.characterId);
-    const resumableStatuses = new Set(['elements-pending', 'eligibility-pending', 'scene-reset-pending']);
+    const resumableStatuses = new Set(['elements-pending', 'eligibility-pending', 'scene-reset-pending', 'scene-regen-pending', 'scene-regenerated']);
     const recoveredAssets = this._recoverFaceIpRecastAssetPaths(projectDir, character);
     const inferredInterruptedRecast = !existingRecastState &&
       recoveredAssets.ready &&
@@ -11075,9 +11169,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     if (existingRecastState && resumableStatuses.has(existingRecastState.status)) {
       this.log(`[FACE-IP-RECAST] Resuming ${spec.characterId} from persisted state "${existingRecastState.status}" - skipping delete/archive/regeneration.`);
       this._adoptRecoveredFaceIpRecastAssets(projectId, character, recoveredAssets.assetPaths);
+      const keepSceneState = ['scene-reset-pending', 'scene-regen-pending', 'scene-regenerated'].includes(existingRecastState.status);
       this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
         ...existingRecastState,
-        status: existingRecastState.status === 'scene-reset-pending' ? 'scene-reset-pending' : 'elements-pending',
+        status: keepSceneState ? existingRecastState.status : 'elements-pending',
         failedElementName,
         elementNames,
         assetPaths: recoveredAssets.assetPaths,
@@ -11184,20 +11279,61 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       };
     }
 
-    this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
-      status: 'scene-reset-pending',
-      reason: 'face-ip-recast',
-      failedElementName,
-      elementNames,
-      assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
-    });
+    const sceneState = this._getCinemaFaceIpRecastState(projectId, spec.characterId);
+    const persistedScenes = this._getPersistedFaceIpRecastScenes(projectId, spec.characterId);
+    let scenes = persistedScenes.length
+      ? persistedScenes
+      : this._normalizeRecastSceneRefs(this._findScenesContainingCharacter(spec.characterId));
+    let resetProof = null;
+    let regenProof = null;
 
-    const scenes = this._archiveScenesForCharacterRecast(projectId, spec.characterId);
-    if (scenes.length > 0) {
+    if (scenes.length > 0 && sceneState?.status === 'scene-regenerated') {
+      regenProof = this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'regenerated');
+    } else {
+      if (scenes.length > 0 && sceneState?.status === 'scene-regen-pending') {
+        resetProof = this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'reset');
+        this.log(`[FACE-IP-RECAST] Resuming ${spec.characterId} from recast-tagged scene rows; skipping scene archive reset.`);
+      } else {
+        this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+          status: 'scene-reset-pending',
+          reason: 'face-ip-recast',
+          failedElementName,
+          elementNames,
+          scenes: scenes.map(s => ({ chapter: s.chapter, scene: s.scene, hint: s.hint })),
+          assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+        });
+        scenes = this._archiveScenesForCharacterRecast(projectId, spec.characterId, scenes.length ? scenes : null);
+        resetProof = scenes.length > 0
+          ? this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'reset')
+          : null;
+        this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+          status: 'scene-regen-pending',
+          reason: 'face-ip-recast',
+          failedElementName,
+          elementNames,
+          scenes: scenes.map(s => ({ chapter: s.chapter, scene: s.scene, hint: s.hint })),
+          resetProof,
+          assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+        });
+      }
+    }
+
+    if (scenes.length > 0 && !regenProof) {
       this.log(`[FACE-IP-RECAST] Regenerating ${scenes.length} affected scene image(s) before returning to video generation.`);
       await this._runCinematicSceneImageStage(projectId, projectDir);
       this.verifyStageComplete('scene_image_cinematic', 'Scene Images (cinematic)');
+      regenProof = this._assertFaceIpRecastSceneDbProof(projectId, spec.characterId, scenes, 'regenerated');
       db.updateProjectStage(projectId, 'scenes-done');
+      this._persistCinemaFaceIpRecastState(projectId, spec.characterId, {
+        status: 'scene-regenerated',
+        reason: 'face-ip-recast',
+        failedElementName,
+        elementNames,
+        scenes: scenes.map(s => ({ chapter: s.chapter, scene: s.scene, hint: s.hint })),
+        resetProof,
+        regenProof,
+        assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
+      });
     }
     db.logEvent(projectId, 'face_ip_recast_complete', {
       characterId: spec.characterId,
@@ -11212,6 +11348,8 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       failedElementName,
       elementNames,
       scenes: scenes.map(s => `ch${s.chapter}_sc${s.scene}`),
+      resetProof,
+      regenProof,
       assetPaths: this._buildFaceIpRecastAssetPaths(projectDir, character),
     });
     return {
