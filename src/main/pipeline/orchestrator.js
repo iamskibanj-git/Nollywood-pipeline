@@ -9559,7 +9559,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
                 projectDir,
                 failedAssetsForGate,
                 videoAutomation,
-                { maxAttempts: 3 }
+                { maxAttempts: 6 }
               );
             } catch (repairErr) {
               this.log(`[CINEMATIC] ${clipId}: automated Cinema Studio element repair failed: ${repairErr.message}`, 'warn');
@@ -9600,7 +9600,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           await this.waitForApproval('cinema-eligibility-failed');
           if (this.cancelled) return;
           if (cinematicVideoEngine === 'cinema-studio-3.5') {
-            await this._repairCinemaElementEligibilityFailures(projectId, projectDir, failedAssetsForGate, videoAutomation, { maxAttempts: 3 });
+            await this._repairCinemaElementEligibilityFailures(projectId, projectDir, failedAssetsForGate, videoAutomation, { maxAttempts: 6 });
           }
           i--;
           continue;
@@ -11457,7 +11457,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
 
     const names = elementFailures.map(a => a.name);
-    const maxAttempts = Math.max(1, Math.min(5, Number(opts.maxAttempts) || 3));
+    const maxAttempts = Math.max(1, Math.min(8, Number(opts.maxAttempts) || 6));
     const repaired = [];
     const unresolved = [];
     const recastCharacters = new Set();
