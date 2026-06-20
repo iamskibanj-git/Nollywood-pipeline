@@ -187,14 +187,15 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _typeMultiShotPrompt(promptText, validElements) {
     const page = this.automation.page;
-    await this._focusPromptTextboxForTyping();
-    await page.waitForTimeout(200);
-    await page.keyboard.press('Control+A');
-    await page.keyboard.press('Delete');
-    await page.waitForTimeout(200);
+    await this._clearCinemaPromptComposer();
 
     const validSet = new Set([...(validElements || [])].map(name => String(name || '').toLowerCase().replace(/^@/, '')));
-    const expectedMentionCounts = new Map();
+    const fullExpectedMentionCounts = this._expectedPromptMentionCounts(promptText, validElements);
+    const typedMentionCounts = new Map();
+    if (fullExpectedMentionCounts.size > 0) {
+      const expectedSummary = [...fullExpectedMentionCounts.entries()].map(([name, count]) => `${name}x${count}`).join(', ');
+      this.log(`[PROMPT] Expected strict @mention chips for full prompt: ${expectedSummary}`);
+    }
     const segments = parsePromptSegments(promptText);
 
     for (const seg of segments) {
@@ -239,18 +240,97 @@ class CinemaVideoAutomation extends KlingAutomation {
         throw new Error(`[PRE-GEN] Required Cinema Studio @mention did not resolve for @${name}. Options: ${JSON.stringify(selected.options || [])}`);
       }
       this.log(`[PROMPT] Strict @mention selected: @${name} → "${selected.text}"`);
-      expectedMentionCounts.set(name, (expectedMentionCounts.get(name) || 0) + 1);
+      typedMentionCounts.set(name, (typedMentionCounts.get(name) || 0) + 1);
 
-      const audit = await this._auditPromptMentionChips(expectedMentionCounts);
+      const audit = await this._auditPromptMentionChips(fullExpectedMentionCounts, { requiredCounts: typedMentionCounts });
       if (!audit.ok) {
         throw new Error(`[PRE-GEN] @mention chip audit failed after @${name}: ${audit.reason}`);
       }
     }
 
-    const finalAudit = await this._auditPromptMentionChips(expectedMentionCounts);
+    const finalAudit = await this._auditPromptMentionChips(fullExpectedMentionCounts, { requiredCounts: fullExpectedMentionCounts });
     if (!finalAudit.ok) {
       throw new Error(`[PRE-GEN] Final @mention chip audit failed: ${finalAudit.reason}`);
     }
+  }
+
+  _expectedPromptMentionCounts(promptText, validElements) {
+    const validSet = new Set([...(validElements || [])]
+      .map(name => String(name || '').toLowerCase().replace(/^@/, ''))
+      .filter(Boolean));
+    const counts = new Map();
+    for (const seg of parsePromptSegments(promptText || '')) {
+      if (!seg || !seg.at) continue;
+      const name = String(seg.at || '').toLowerCase().replace(/^@+/, '');
+      if (!name) continue;
+      if (validElements && !validSet.has(name)) continue;
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return counts;
+  }
+
+  async _snapshotPromptComposerState() {
+    const page = this.automation.page;
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const canonical = (value) => clean(value).toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
+      const textbox = document.activeElement?.closest?.('[role="textbox"]')
+        || document.querySelector('[data-cinema-prompt-target="typing"]')
+        || document.querySelector('[role="textbox"]');
+      const chipTexts = [];
+      const seenNodes = new Set();
+      if (textbox) {
+        const primary = [...textbox.querySelectorAll('[data-beautiful-mention]')];
+        const fallback = [...textbox.querySelectorAll('[contenteditable="false"]')]
+          .filter(el => /[a-z0-9_]/i.test(clean(el.innerText || el.textContent || '')));
+        for (const el of [...primary, ...fallback]) {
+          const chipRoot = el.closest('[data-beautiful-mention]') || el.closest('[contenteditable="false"]') || el;
+          if (seenNodes.has(chipRoot)) continue;
+          seenNodes.add(chipRoot);
+          const text = canonical(chipRoot.innerText || chipRoot.textContent || '');
+          if (text) chipTexts.push(text);
+        }
+      }
+      const text = textbox ? clean(textbox.innerText || textbox.textContent || '') : '';
+      return { text, textLength: text.length, chipTexts };
+    }).catch(err => ({ text: '', textLength: 0, chipTexts: [], error: err.message }));
+  }
+
+  async _clearCinemaPromptComposer() {
+    const page = this.automation.page;
+    await this._focusPromptTextboxForTyping();
+    await page.waitForTimeout(200);
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.waitForTimeout(200);
+      let state = await this._snapshotPromptComposerState();
+      if (!state.textLength && state.chipTexts.length === 0) return;
+
+      await page.evaluate(() => {
+        const textbox = document.activeElement?.closest?.('[role="textbox"]')
+          || document.querySelector('[data-cinema-prompt-target="typing"]')
+          || document.querySelector('[role="textbox"]');
+        if (!textbox) return;
+        textbox.focus();
+        try {
+          document.execCommand('selectAll', false, null);
+          document.execCommand('delete', false, null);
+        } catch (_) {}
+        if ((textbox.innerText || textbox.textContent || '').trim() || textbox.querySelector('[data-beautiful-mention], [contenteditable="false"]')) {
+          textbox.innerHTML = '';
+        }
+        textbox.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+      }).catch(() => {});
+      await page.waitForTimeout(350);
+      state = await this._snapshotPromptComposerState();
+      if (!state.textLength && state.chipTexts.length === 0) return;
+      this.log(`[PROMPT] Composer clear attempt ${attempt}/3 left text_len=${state.textLength}, chips=${state.chipTexts.join(',') || 'none'}`, 'warn');
+    }
+
+    const state = await this._snapshotPromptComposerState();
+    throw new Error(`[PRE-GEN] Prompt composer could not be cleared before typing (text_len=${state.textLength}, chips=${state.chipTexts.join(',') || 'none'})`);
   }
 
   async _selectExactMentionOption(name) {
@@ -326,10 +406,11 @@ class CinemaVideoAutomation extends KlingAutomation {
     return { ok: true, text: state.exact.text, options: state.options };
   }
 
-  async _auditPromptMentionChips(expectedCounts) {
+  async _auditPromptMentionChips(expectedCounts, { requiredCounts = expectedCounts } = {}) {
     const page = this.automation.page;
     const expected = Object.fromEntries([...expectedCounts.entries()]);
-    return page.evaluate((expectedByName) => {
+    const required = Object.fromEntries([...requiredCounts.entries()]);
+    return page.evaluate(({ expectedByName, requiredByName }) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const canonical = (value) => clean(value).toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
       const expectedNames = new Set(Object.keys(expectedByName).map(canonical));
@@ -355,16 +436,24 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (unexpected.length > 0) {
         return { ok: false, reason: `unexpected mention chip(s): ${unexpected.join(', ')}` };
       }
-      const missing = [];
+      const overLimit = [];
       for (const [name, expectedCount] of Object.entries(expectedByName)) {
+        const key = canonical(name);
+        if ((counts[key] || 0) > expectedCount) {
+          overLimit.push(`${name} expected ${expectedCount}, found ${counts[key] || 0}`);
+        }
+      }
+      if (overLimit.length > 0) return { ok: false, reason: `duplicate/stale mention chip(s): ${overLimit.join('; ')}` };
+      const missing = [];
+      for (const [name, expectedCount] of Object.entries(requiredByName)) {
         const key = canonical(name);
         if ((counts[key] || 0) < expectedCount) {
           missing.push(`${name} expected ${expectedCount}, found ${counts[key] || 0}`);
         }
       }
       if (missing.length > 0) return { ok: false, reason: `missing mention chip(s): ${missing.join('; ')}` };
-      return { ok: true, chips: chipTexts };
-    }, expected).catch(err => ({ ok: false, reason: err.message }));
+      return { ok: true, chips: chipTexts, counts };
+    }, { expectedByName: expected, requiredByName: required }).catch(err => ({ ok: false, reason: err.message }));
   }
 
   _expectedComposerReferenceTileCount(promptText, validElements) {
@@ -4001,13 +4090,13 @@ class CinemaVideoAutomation extends KlingAutomation {
     const pattern = /([+-]?\s*\d+(?:[.,]\d+)?\s+credits)\s+(Cinematic\s+Studio\s+3\.5\s+Video|Cinema\s+Studio\s+3\.5\s+Video)\s+(Spent|Refunded)\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s*\d{1,2}:\d{2}\s*(?:AM|PM))/ig;
     for (const match of wholeText.matchAll(pattern)) {
       const action = normalize(match[3]);
-      if (!/^spent$/i.test(action)) continue;
       const dateText = parseDateText(match[4]);
       const rowText = normalize(match[0]);
       rows.push({
         text: rowText,
         signature: rowText.toLowerCase(),
         cost: parseCost(match[1]),
+        action: /^refunded$/i.test(action) ? 'refunded' : 'spent',
         dateText,
         source: 'text-scan',
       });
@@ -4041,15 +4130,17 @@ class CinemaVideoAutomation extends KlingAutomation {
         const text = normalize(el.innerText || el.textContent || '');
         if (!text || seen.has(text)) continue;
         seen.add(text);
-        if (!isCinemaFeature(text) || !/\bspent\b/i.test(text) || !/credits/i.test(text)) continue;
+        if (!isCinemaFeature(text) || !/\b(spent|refunded)\b/i.test(text) || !/credits/i.test(text)) continue;
         const cells = [...el.querySelectorAll('td, [role="cell"], th')].map(cell => normalize(cell.innerText || cell.textContent || ''));
         const rowText = cells.length >= 4 ? normalize(cells.slice(0, 4).join(' ')) : text;
         const actionText = cells.length >= 3 ? cells[2] : text;
-        if (!/\bspent\b/i.test(actionText) || /\brefunded\b/i.test(actionText)) continue;
+        const action = /\brefunded\b/i.test(actionText) ? 'refunded' : (/\bspent\b/i.test(actionText) ? 'spent' : null);
+        if (!action) continue;
         rows.push({
           text: rowText,
           signature: rowText.toLowerCase(),
           cost: parseCost(cells[0] || text),
+          action,
           dateText: parseDateText(cells[3] || text),
           source: cells.length >= 4 ? 'table-cells' : 'dom',
         });
@@ -4079,6 +4170,58 @@ class CinemaVideoAutomation extends KlingAutomation {
     } finally {
       await ledgerPage.close().catch(() => {});
     }
+  }
+
+  _parseCinemaSubmitDate(value) {
+    if (value instanceof Date) return value.getTime();
+    const raw = String(value || '').trim();
+    if (!raw) return NaN;
+    const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+    const normalized = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(raw)
+      ? raw.replace(' ', 'T')
+      : raw;
+    const stamped = hasTimezone ? normalized : `${normalized}Z`;
+    const ms = Date.parse(stamped);
+    return Number.isFinite(ms) ? ms : Date.parse(raw);
+  }
+
+  _findMatchingCinemaRefundRow(rows, { expectedCost, clickedAt, baselineSignatures = [] } = {}) {
+    const baseline = new Set(baselineSignatures || []);
+    const expected = Number.isFinite(expectedCost) ? Math.abs(expectedCost) : null;
+    const clickedMs = this._parseCinemaSubmitDate(clickedAt);
+    if (!Number.isFinite(clickedMs)) return null;
+    const lowerBound = clickedMs - (2 * 60 * 1000);
+    const upperBound = clickedMs + (35 * 60 * 1000);
+
+    return (rows || [])
+      .filter(row => {
+        if (!row || row.action !== 'refunded') return false;
+        if (baseline.has(row.signature)) return false;
+        if (!row.dateText) return false;
+        if (expected !== null && row.cost !== null && Math.abs(Math.abs(row.cost) - expected) > 0.02) return false;
+        const rowTime = this._parseCreditLedgerDate(row.dateText);
+        if (!Number.isFinite(rowTime)) return false;
+        return rowTime >= lowerBound && rowTime <= upperBound;
+      })
+      .sort((a, b) => this._parseCreditLedgerDate(a.dateText) - this._parseCreditLedgerDate(b.dateText))[0] || null;
+  }
+
+  async findCinemaRefundForSubmit({ expectedCost, clickedAt, baselineSignatures = [], timeoutMs = 15000, ledgerWaitMs = 5000 } = {}) {
+    const context = this.automation.page?.context();
+    if (!context) return { found: false, reason: 'no browser context' };
+    const started = Date.now();
+    let lastRows = [];
+    let firstRead = true;
+    while (firstRead || Date.now() - started <= timeoutMs) {
+      firstRead = false;
+      const rows = await this._readCinemaCreditLedger(context, ledgerWaitMs);
+      lastRows = rows;
+      const row = this._findMatchingCinemaRefundRow(rows, { expectedCost, clickedAt, baselineSignatures });
+      if (row) return { found: true, row };
+      if (timeoutMs <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    return { found: false, rowsChecked: lastRows.length };
   }
 
   async _detectCinemaGenerationInProgress(page) {
@@ -4208,6 +4351,7 @@ class CinemaVideoAutomation extends KlingAutomation {
             return false;
           };
           if (baseline.has(row.signature)) return reject('baseline');
+          if (row.action && row.action !== 'spent') return reject('action');
           if (!row.dateText) return reject('no-date');
           if (expected !== null && row.cost !== null && Math.abs(row.cost - expected) > 0.02) return reject('cost');
           const rowTime = this._parseCreditLedgerDate(row.dateText);
@@ -4366,6 +4510,8 @@ class CinemaVideoAutomation extends KlingAutomation {
     let acceptedState = null;
     let creditConfirmation = null;
     let creditCost = null;
+    let submittedClickedAt = null;
+    let submittedBaselineSignatures = [];
     let submitAttempt = 0;
     const maxSubmitAttempts = 3;
 
@@ -4400,6 +4546,8 @@ class CinemaVideoAutomation extends KlingAutomation {
         await this._disarmCinemaGenerationEndpointBlocker();
         await this._allowNextGenerateClick();
         const clickedAt = new Date();
+        submittedClickedAt = clickedAt;
+        submittedBaselineSignatures = baselineLedgerSignatures;
         this._cinemaGeneratePhase = 'intentionalGenerate';
         await page.mouse.click(genBtnBox.x, genBtnBox.y);
         this._cinemaGeneratePhase = 'postGenerate';
@@ -4450,6 +4598,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     const startedAt = Date.now();
     let settledPolls = 0;
     let nextAssetProbeIndex = 0;
+    let lastRefundLedgerCheckAt = 0;
     this.log(`Cinema Studio generation submitted; polling UI lifecycle up to ${Math.round(maxWaitMs / 60000)}min before Asset Library recovery (direct UI video-source download disabled for identity safety)`);
     let lastSeenSrc = initialFirstSrc;
     while (Date.now() - startedAt < maxWaitMs) {
@@ -4458,6 +4607,25 @@ class CinemaVideoAutomation extends KlingAutomation {
       const lifecycle = await this._detectCinemaGenerationLifecycle(page);
       if (lifecycle.state === 'failed_refunded') {
         throw new CinemaRefundedFailureError(`CINEMA_REFUNDED_FAILURE: Cinema Studio failed and credits were refunded (${lifecycle.evidence || 'visible failure state'})`, lifecycle.evidence);
+      }
+      if (submittedClickedAt && elapsedMs >= 60000 && Date.now() - lastRefundLedgerCheckAt > 120000) {
+        lastRefundLedgerCheckAt = Date.now();
+        try {
+          const refund = await this.findCinemaRefundForSubmit({
+            expectedCost: creditCost,
+            clickedAt: submittedClickedAt,
+            baselineSignatures: submittedBaselineSignatures,
+            timeoutMs: 0,
+            ledgerWaitMs: 4000,
+          });
+          if (refund?.found) {
+            const row = refund.row;
+            throw new CinemaRefundedFailureError(`CINEMA_REFUNDED_FAILURE: Cinema Studio usage ledger shows refunded submit (${row.cost ?? 'unknown'} credits, ${row.dateText})`, row);
+          }
+        } catch (refundErr) {
+          if (refundErr.code === 'CINEMA_REFUNDED_FAILURE') throw refundErr;
+          this.log(`[CINEMA-VIDEO] Refund ledger check failed non-fatally: ${String(refundErr.message || refundErr).split('\n')[0]}`, 'warn');
+        }
       }
       if (lifecycle.state === 'active') {
         settledPolls = 0;

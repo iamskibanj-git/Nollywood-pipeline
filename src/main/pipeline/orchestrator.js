@@ -46,6 +46,11 @@ const MAX_PORTRAIT_PROVIDER_MISS_RETRIES = 2;
 const TEMP_SKIP_CINEMA35_PROMPT_PREVIEW = true;
 const TEMP_AUTO_APPROVE_CINEMA35_CLIP_REVIEW = false;
 const CONTINUE_OVERLAY_CLEARANCE_MS = 60_000;
+const GEN_REFUNDED_MARKER_RE = /\[GEN-REFUNDED\]|CINEMA_REFUNDED_FAILURE|credits?\s+refunded/i;
+
+function isGenerationRefundedAsset(asset) {
+  return GEN_REFUNDED_MARKER_RE.test(String(asset?.error_message || ''));
+}
 
 function sanitizeCinemaVideoPrompt(prompt) {
   if (!prompt) return { prompt, removedCount: 0, markers: [] };
@@ -1463,7 +1468,7 @@ class PipelineOrchestrator {
           let clearedFreshRedo = 0;
           let preservedSubmitted = 0;
           for (const clip of pendingRedoClips) {
-            const hasSubmittedSignal = !!clip.gen_clicked_at || (!!clip.credit_cost && !!clip.prompt_used);
+            const hasSubmittedSignal = !isGenerationRefundedAsset(clip) && (!!clip.gen_clicked_at || (!!clip.credit_cost && !!clip.prompt_used));
             if (hasSubmittedSignal) {
               preservedSubmitted++;
               continue;
@@ -8644,6 +8649,29 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       });
     };
 
+    const detectCinemaRefundForAsset = async (asset, context = 'submitted') => {
+      if (cinematicVideoEngine !== 'cinema-studio-3.5') return null;
+      if (!asset?.id || !asset.gen_clicked_at || typeof videoAutomation.findCinemaRefundForSubmit !== 'function') return null;
+      try {
+        const refund = await videoAutomation.findCinemaRefundForSubmit({
+          expectedCost: Number.isFinite(asset.credit_cost) ? asset.credit_cost : null,
+          clickedAt: asset.gen_clicked_at,
+          timeoutMs: 0,
+          ledgerWaitMs: 4000,
+        });
+        if (refund?.found) {
+          const row = refund.row || {};
+          const reason = `Cinema Studio usage ledger refund matched ${asset.gen_clicked_at} during ${context}: ${row.cost ?? 'unknown'} credits, ${row.dateText || 'unknown date'}`;
+          db.markAssetGenerationRefunded(asset.id, reason);
+          this.log(`[CINEMATIC] ${asset.kling_clip_id || 'clip'}: ledger-confirmed refund (${row.cost ?? 'unknown'} credits, ${row.dateText || 'unknown date'}) â€” clearing submitted metadata for clean retry`, 'warn');
+          return refund;
+        }
+      } catch (refundErr) {
+        this.log(`[CINEMATIC] ${asset.kling_clip_id || 'clip'}: refund ledger check failed (${refundErr.message}) â€” keeping recovery-safe submitted state`, 'warn');
+      }
+      return null;
+    };
+
     const attemptSubmittedClipRecovery = async ({
       clipId,
       clipDef,
@@ -8661,8 +8689,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       if (!freshAsset || freshAsset.status === 'done') {
         return { status: 'skip', reason: freshAsset?.status === 'done' ? 'already done' : 'missing asset' };
       }
+      if (isGenerationRefundedAsset(freshAsset)) {
+        return { status: 'skip', reason: 'generation refunded; clean retry required' };
+      }
       if (!freshAsset.gen_clicked_at || !freshAsset.prompt_used) {
         return { status: 'skip', reason: 'missing gen_clicked_at or prompt_used' };
+      }
+      const refund = await detectCinemaRefundForAsset(freshAsset, context);
+      if (refund) {
+        return { status: 'refunded', asset: getFreshClipAsset(clipId, freshAsset), refund };
       }
 
       this.log(`[CINEMATIC] ${clipId}: gen_clicked_at=${freshAsset.gen_clicked_at}, prompt_len=${freshAsset.prompt_used.length} - attempting Asset Library recovery before any new Generate click (${context})`);
@@ -8716,6 +8751,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     // Scenes whose clips are all done never trigger verification.
     const verifiedBlockingCache = {}; // "ch{N}_sc{M}" → { chars: corrected visionRefinedChars, hadCorrections: bool }
     const shotReconcileCache = {};   // clipId → true (reconciled shot directions for this clip)
+    const cinemaClipFailureCycles = new Map();
 
     for (let i = 0; i < allKlingClips.length; i++) {
       const item = allKlingClips[i];
@@ -8910,14 +8946,22 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       //
       // Signals that credits were burned:
       //   1. gen_clicked_at is set (explicit timestamp from onGenClicked callback)
-      //   2. prompt_used is set AND error is NOT a [PRE-GEN] error
-      //      (markAssetGenerating sets prompt_used before generateClip, but
-      //       [PRE-GEN] errors mean Generate was never clicked — no credits burned)
+      //   2. legacy credit_cost + prompt_used are both set AND error is NOT a
+      //      [PRE-GEN] error. prompt_used alone is not proof of spend because
+      //      markAssetGenerating writes it before Generate is clicked.
       const genWasClicked = existingAsset && existingAsset.status !== 'done' && (
         existingAsset.gen_clicked_at ||
-        (existingAsset.prompt_used && !isPreGenError)
+        (existingAsset.credit_cost && existingAsset.prompt_used && !isPreGenError)
       );
+      let submittedRefundedBeforeRecovery = false;
       if (genWasClicked) {
+        submittedRefundedBeforeRecovery = isGenerationRefundedAsset(existingAsset) ||
+          !!(await detectCinemaRefundForAsset(existingAsset, 'resume recovery guard'));
+        if (submittedRefundedBeforeRecovery) {
+          this.log(`[CINEMATIC] ${clipId}: prior submit was refunded â€” skipping Asset Library recovery and retrying cleanly`);
+        }
+      }
+      if (genWasClicked && !submittedRefundedBeforeRecovery) {
         const signal = existingAsset.gen_clicked_at
           ? `gen_clicked_at=${existingAsset.gen_clicked_at}`
           : `error="${(existingAsset.error_message || '').slice(0, 60)}"`;
@@ -9582,6 +9626,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         }
 
         if (clipAsset) {
+          const latestBeforeSubmit = getFreshClipAsset(clipId, clipAsset);
+          if (isGenerationRefundedAsset(latestBeforeSubmit)) {
+            db.resetAsset(latestBeforeSubmit.id);
+            clipAsset.error_message = null;
+          }
           // Store prompt as JSON with reconciliation flag for restart persistence
           const promptPayload = {
             prompt: finalMultiShotPrompt,
@@ -9764,6 +9813,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
         if (isCinemaRefundedFailure) {
           shouldRetry = true;
+          if (clipAsset) {
+            const evidence = e.evidence && typeof e.evidence === 'object'
+              ? `${e.evidence.cost ?? 'unknown'} credits, ${e.evidence.dateText || 'unknown date'}`
+              : e.message;
+            db.markAssetGenerationRefunded(clipAsset.id, `Cinema Studio refunded failure: ${evidence}`);
+          }
           this.log(`[CINEMATIC] ${clipId}: Cinema Studio failed with visible credits-refunded state — retrying once without Asset Library recovery`);
         } else if (!isPreGen && isTimeout && !isBrowserDead && finalMultiShotPrompt) {
           const isEarlyUiSettled = e.message.includes('UI settled early');
@@ -9901,6 +9956,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           try {
             // Reset asset status for retry
             if (clipAsset) {
+              const latestBeforeRetry = getFreshClipAsset(clipId, clipAsset);
+              if (isGenerationRefundedAsset(latestBeforeRetry)) {
+                db.resetAsset(latestBeforeRetry.id);
+                clipAsset.error_message = null;
+              }
               const retryPayload = {
                 prompt: finalMultiShotPrompt,
                 shot_directions_reconciled: shotReconcileCache[clipId] === true,
@@ -9959,6 +10019,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             continue; // retry succeeded — skip failure path
           } catch (retryErr) {
             this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
+
+            const retryRefunded = cinematicVideoEngine === 'cinema-studio-3.5' && (
+              retryErr.code === 'CINEMA_REFUNDED_FAILURE' ||
+              retryErr.message?.includes('CINEMA_REFUNDED_FAILURE')
+            );
+            if (retryRefunded && clipAsset) {
+              const evidence = retryErr.evidence && typeof retryErr.evidence === 'object'
+                ? `${retryErr.evidence.cost ?? 'unknown'} credits, ${retryErr.evidence.dateText || 'unknown date'}`
+                : retryErr.message;
+              db.markAssetGenerationRefunded(clipAsset.id, `Cinema Studio refunded retry failure: ${evidence}`);
+            }
 
             if (retryErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || retryErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) {
               await this._pauseForHiggsfieldVerification(`${clipId} retry (${label})`, retryErr.message);
@@ -10021,6 +10092,40 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
 
         if (cinematicVideoEngine === 'cinema-studio-3.5') {
           this.log(`[CINEMATIC] ${clipId}: Cinema Studio 3.5 clip failed after retry — pausing instead of advancing to the next clip`, 'error');
+          const freshAfterFailure = getFreshClipAsset(clipId, clipAsset);
+          const hasSubmittedProof = freshAfterFailure && !isGenerationRefundedAsset(freshAfterFailure) && (
+            !!freshAfterFailure.gen_clicked_at ||
+            (!!freshAfterFailure.credit_cost && !!freshAfterFailure.prompt_used && !isPreGen)
+          );
+          const failureCycle = (cinemaClipFailureCycles.get(clipId) || 0) + 1;
+          cinemaClipFailureCycles.set(clipId, failureCycle);
+
+          if (!hasSubmittedProof) {
+            if (clipAsset) {
+              db.markAssetFailed(clipAsset.id, e.message);
+              db.clearAssetGenerationMeta(clipAsset.id);
+              db.resetAsset(clipAsset.id);
+            }
+            if (failureCycle >= 3) {
+              this.paused = true;
+              this.state.status = 'paused';
+              this.emit({
+                type: 'paused',
+                reason: 'cinema-clip-setup-retry-exhausted',
+                clipId,
+                message: e.message,
+              });
+              this.log(`[CINEMATIC] ${clipId}: setup failed ${failureCycle} time(s) without Generate proof — pausing for operator instead of looping`, 'error');
+              await this.checkPause();
+              if (this.cancelled) return;
+            } else {
+              this.log(`[CINEMATIC] ${clipId}: no submitted generation proof after failure — clearing prompt metadata and retrying cleanly (cycle ${failureCycle}/3)`, 'warn');
+              try { await this.automation.recreateContext(); } catch (_) {}
+            }
+            i--;
+            continue;
+          }
+
           if (clipAsset) {
             db.markAssetFailed(clipAsset.id, e.message);
             db.resetAsset(clipAsset.id);

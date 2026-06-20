@@ -994,6 +994,29 @@ function clearAssetGenerationMeta(assetId) {
 }
 
 /**
+ * A Cinema Studio generation can be accepted, spend credits, then immediately
+ * refund. Once that refund is proven, the row is no longer recoverable from
+ * Asset Library and must retry cleanly without stale submitted metadata.
+ */
+function markAssetGenerationRefunded(assetId, reason = 'Cinema Studio credits refunded') {
+  const detail = String(reason || 'Cinema Studio credits refunded').replace(/\s+/g, ' ').trim();
+  runSql(
+    `UPDATE project_assets SET
+       status = 'pending',
+       file_path = NULL,
+       error_message = ?,
+       gen_clicked_at = NULL,
+       prompt_used = NULL,
+       source_gen_id = NULL,
+       cdn_url = NULL,
+       credit_cost = NULL,
+       completed_at = NULL
+     WHERE id = ?`,
+    [`[GEN-REFUNDED] ${detail}`, assetId]
+  );
+}
+
+/**
  * Mark a replacement cinematic scene image row as created because of a
  * character Face/IP recast. The row keeps this marker after markAssetDone(),
  * giving later video-stage checks a DB-level proof that the scene image was
@@ -2057,6 +2080,7 @@ module.exports = {
   markAssetFailed,
   resetAsset,
   clearAssetGenerationMeta,
+  markAssetGenerationRefunded,
   markSceneImageRecastPending,
   updateAssetPromptUsed,
   getAssets,
