@@ -1683,6 +1683,303 @@ class KlingAutomation {
   }
 
   /**
+   * Lightweight Asset Library probe for already-submitted video generations.
+   *
+   * Unlike recoverTimedOutClip(), this does not recreate the browser context.
+   * It opens a temporary page in the existing context, checks the newest video
+   * assets with the same strict prompt/dialogue matching, downloads only on a
+   * proven match, then closes the temporary page. A miss is not a failure.
+   *
+   * @param {string} submittedPrompt
+   * @param {string} outputPath
+   * @param {Object} [opts]
+   * @returns {Promise<{path, sourceGenId, cdnUrl, assetUuid, similarity}|null>}
+   */
+  async probeAssetLibraryForClip(submittedPrompt, outputPath, opts = {}) {
+    const fs = require('fs');
+    const context = this.automation.page?.context?.();
+    const tag = opts.logPrefix || '[RECOVERY-PROBE]';
+    if (!context) {
+      this.log(`${tag} No browser context available for Asset Library probe`);
+      return null;
+    }
+
+    const minSimilarity = opts.minSimilarity || 92;
+    const maxTilesToCheck = opts.maxTilesToCheck || 6;
+    const timeoutMs = opts.timeoutMs || 30000;
+    const tilePolls = opts.tilePolls || 2;
+    const pollDelayMs = opts.pollDelayMs || 1500;
+    const startedAt = Date.now();
+    let probePage = null;
+
+    const remainingMs = () => Math.max(1000, timeoutMs - (Date.now() - startedAt));
+    const truncate = (err) => String(err?.message || err || '').split('\n')[0];
+
+    try {
+      probePage = await context.newPage();
+      await probePage.goto('https://higgsfield.ai/asset/video', {
+        waitUntil: 'domcontentloaded',
+        timeout: Math.min(15000, remainingMs()),
+      });
+      await probePage.waitForTimeout(opts.initialWaitMs || 1500);
+      await this._dismissAssetProbeOverlays(probePage, tag);
+
+      const bodyText = await probePage.evaluate(() => document.body?.innerText || '').catch(() => '');
+      if (/Verification Required|Slide right to secure your access|unusual activity/i.test(bodyText)) {
+        const err = new Error('HIGGSFIELD_VERIFICATION_REQUIRED: verification appeared during Asset Library probe');
+        err.code = 'HIGGSFIELD_VERIFICATION_REQUIRED';
+        throw err;
+      }
+      if (/Project Not Found|Log in|Sign in|Sign up/i.test(bodyText) && !/Usage history|All assets|Uploads|Video/i.test(bodyText)) {
+        throw new Error('SESSION_EXPIRED: Asset Library probe could not see logged-in video assets');
+      }
+
+      this.log(`${tag} Asset/video page loaded for quick probe. URL: ${probePage.url()}`);
+
+      let videoTiles = [];
+      for (let poll = 0; poll < tilePolls; poll++) {
+        videoTiles = await probePage.evaluate(() => {
+          const results = [];
+          const addTile = (el, uuid) => {
+            const r = el.getBoundingClientRect();
+            if (r.width < 80 || r.height < 80 || r.width === 0 || r.height === 0) return;
+            results.push({
+              uuid: uuid || null,
+              x: Math.round(r.x + r.width / 2),
+              y: Math.round(r.y + r.height / 2),
+              href: uuid ? `/asset/video/${uuid}` : null,
+            });
+          };
+
+          for (const fig of document.querySelectorAll('figure[data-asset-id]')) {
+            addTile(fig, fig.getAttribute('data-asset-id'));
+          }
+          if (results.length === 0) {
+            for (const img of document.querySelectorAll('img[data-asset-preview]')) {
+              addTile(img, img.getAttribute('data-asset-preview'));
+            }
+          }
+          if (results.length === 0) {
+            for (const img of document.querySelectorAll('img[src*="cloudfront"], img[src*="higgs"]')) {
+              addTile(img, null);
+            }
+          }
+          return results;
+        });
+        if (videoTiles.length > 0) break;
+        if (poll < tilePolls - 1) {
+          this.log(`${tag} No video tiles yet (poll ${poll + 1}/${tilePolls}); continuing probe wait`);
+          await probePage.waitForTimeout(pollDelayMs);
+        }
+      }
+
+      if (videoTiles.length === 0) {
+        this.log(`${tag} No video tiles found during quick probe`);
+        return null;
+      }
+
+      const tilesToCheck = videoTiles.slice(0, maxTilesToCheck);
+      this.log(`${tag} Found ${videoTiles.length} video tile(s); checking up to ${tilesToCheck.length}`);
+
+      for (let i = 0; i < tilesToCheck.length; i++) {
+        if (Date.now() - startedAt > timeoutMs) {
+          this.log(`${tag} Probe timeout (${timeoutMs / 1000}s) after ${i} tile(s)`);
+          return null;
+        }
+
+        const tile = tilesToCheck[i];
+        this.log(`${tag} Checking tile ${i + 1}/${tilesToCheck.length} (uuid=${tile.uuid || 'unknown'})...`);
+
+        try {
+          await probePage.mouse.click(tile.x, tile.y);
+          await probePage.waitForTimeout(1200);
+          if (tile.uuid && !probePage.url().includes(tile.uuid)) {
+            await probePage.goto(`https://higgsfield.ai/asset/video/${tile.uuid}`, {
+              waitUntil: 'domcontentloaded',
+              timeout: Math.min(12000, remainingMs()),
+            });
+            await probePage.waitForTimeout(1500);
+          }
+
+          let detailReady = false;
+          for (let wait = 0; wait < 6; wait++) {
+            detailReady = await probePage.evaluate(() => {
+              const bodyText = document.body?.innerText || '';
+              return bodyText.includes('PROMPT') &&
+                (bodyText.includes('Copy') || bodyText.includes('INFORMATION'));
+            }).catch(() => false);
+            if (detailReady) break;
+            await probePage.waitForTimeout(750);
+          }
+
+          if (!detailReady) {
+            this.log(`${tag} Detail panel not ready for tile ${i + 1}; skipping`);
+            await probePage.keyboard.press('Escape').catch(() => {});
+            await probePage.waitForTimeout(500);
+            if (probePage.url().match(/\/asset\/video\/[a-f0-9-]/i)) {
+              await probePage.goto('https://higgsfield.ai/asset/video', {
+                waitUntil: 'domcontentloaded',
+                timeout: Math.min(12000, remainingMs()),
+              }).catch(() => {});
+              await probePage.waitForTimeout(1000);
+            }
+            continue;
+          }
+
+          const currentUrl = probePage.url();
+          const assetUuidMatch = currentUrl.match(/\/asset\/video\/([a-f0-9-]{36})/i);
+          const assetUuid = assetUuidMatch ? assetUuidMatch[1] : tile.uuid;
+
+          let copiedPrompt = '';
+          try {
+            const copyBtn = await probePage.evaluate(() => {
+              const allBtns = [...document.querySelectorAll('button, [role="button"], span, div')];
+              for (const el of allBtns) {
+                const text = el.textContent?.trim();
+                if (text !== 'Copy' || el.getBoundingClientRect().width <= 0) continue;
+                const r = el.getBoundingClientRect();
+                const promptHeading = [...document.querySelectorAll('*')].find(e =>
+                  e.textContent?.trim() === 'PROMPT' && e.getBoundingClientRect().width > 0
+                );
+                if (!promptHeading) continue;
+                const pr = promptHeading.getBoundingClientRect();
+                if (Math.abs(r.y - pr.y) < 50) {
+                  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+                }
+              }
+              return null;
+            });
+
+            if (copyBtn) {
+              await probePage.evaluate(() => navigator.clipboard.writeText('')).catch(() => {});
+              await probePage.mouse.click(copyBtn.x, copyBtn.y);
+              await probePage.waitForTimeout(400);
+              copiedPrompt = await probePage.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+            }
+
+            if (!copiedPrompt || copiedPrompt.length < 20) {
+              copiedPrompt = await probePage.evaluate(() => {
+                const body = document.body?.innerText || '';
+                const promptIdx = body.indexOf('PROMPT');
+                const infoIdx = body.indexOf('INFORMATION');
+                if (promptIdx >= 0 && infoIdx > promptIdx) {
+                  let section = body.substring(promptIdx + 6, infoIdx).trim();
+                  section = section.replace(/^Copy\s*/i, '').replace(/\s*See all\s*$/i, '').trim();
+                  return section;
+                }
+                return '';
+              }).catch(() => '');
+            }
+          } catch (copyErr) {
+            this.log(`${tag} Copy/scrape failed for tile ${i + 1}: ${truncate(copyErr)}`);
+          }
+
+          if (!copiedPrompt || copiedPrompt.length < 20) {
+            this.log(`${tag} No prompt text for tile ${i + 1}; skipping`);
+            await probePage.keyboard.press('Escape').catch(() => {});
+            await probePage.waitForTimeout(500);
+            continue;
+          }
+
+          const similarity = this._promptSimilarity(submittedPrompt, copiedPrompt);
+          this.log(`${tag} Tile ${i + 1} similarity: ${similarity}% (need >=${minSimilarity}%)`);
+          const dialogue = opts.requireDialogueMatch ? this._dialogueMatch(submittedPrompt, copiedPrompt) : null;
+          if (dialogue) {
+            this.log(`${tag} Tile ${i + 1} dialogue match: ${dialogue.matched.length}/${dialogue.expected.length} (need ${dialogue.required})`);
+          }
+
+          if (similarity < minSimilarity || (dialogue && !dialogue.ok)) {
+            await probePage.keyboard.press('Escape').catch(() => {});
+            await probePage.waitForTimeout(500);
+            continue;
+          }
+
+          this.log(`${tag} MATCH at ${similarity}% - attempting download for ${assetUuid || 'unknown'}...`);
+          try {
+            const dlBtn = await probePage.getByText('Download', { exact: true }).first();
+            const [download] = await Promise.all([
+              probePage.waitForEvent('download', { timeout: Math.min(25000, remainingMs()) }),
+              dlBtn.click({ timeout: 5000 }),
+            ]);
+            await download.saveAs(outputPath);
+            const stat = fs.statSync(outputPath);
+            if (stat.size < 50000) {
+              this.log(`${tag} Download too small (${stat.size} bytes); treating as not ready`);
+              fs.unlinkSync(outputPath);
+              await probePage.keyboard.press('Escape').catch(() => {});
+              return null;
+            }
+
+            const sizeMb = (stat.size / (1024 * 1024)).toFixed(2);
+            const cdnUrl = await probePage.evaluate(() => {
+              const vid = document.querySelector('video[src*="cloudfront"], video source[src*="cloudfront"]');
+              return vid?.src || vid?.getAttribute('src') || null;
+            }).catch(() => null);
+
+            this.log(`${tag} Downloaded early to ${outputPath} (${sizeMb} MB)`);
+            await probePage.keyboard.press('Escape').catch(() => {});
+            return {
+              path: outputPath,
+              sourceGenId: assetUuid || 'recovered',
+              cdnUrl,
+              assetUuid,
+              similarity,
+            };
+          } catch (downloadErr) {
+            this.log(`${tag} Matched tile is not downloadable yet: ${truncate(downloadErr)}`);
+            await probePage.keyboard.press('Escape').catch(() => {});
+            return null;
+          }
+        } catch (tileErr) {
+          this.log(`${tag} Error checking tile ${i + 1}: ${truncate(tileErr)}`);
+          await probePage.keyboard.press('Escape').catch(() => {});
+          await probePage.waitForTimeout(500);
+        }
+      }
+
+      this.log(`${tag} No matching ready video found after checking ${tilesToCheck.length} tile(s)`);
+      return null;
+    } catch (err) {
+      const message = truncate(err);
+      if (err.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' ||
+          /HIGGSFIELD_VERIFICATION_REQUIRED|SESSION_EXPIRED|Target page, context or browser has been closed|browser has been closed|Pipeline cancelled/i.test(message)) {
+        throw err;
+      }
+      this.log(`${tag} Probe failed without recovery: ${message}`);
+      return null;
+    } finally {
+      if (probePage && !probePage.isClosed()) {
+        await probePage.close().catch(() => {});
+      }
+    }
+  }
+
+  async _dismissAssetProbeOverlays(page, tag) {
+    try {
+      const clicked = await page.evaluate(() => {
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        for (const btn of document.querySelectorAll('button, [role="button"]')) {
+          if (!visible(btn)) continue;
+          const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+          if (/^I agree,?\s*continue$/i.test(text) || /^Agree$/i.test(text)) {
+            btn.click();
+            return text;
+          }
+        }
+        return null;
+      });
+      if (clicked) {
+        this.log(`${tag} Dismissed probe overlay button: ${clicked}`);
+        await page.waitForTimeout(800);
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Generate a single Kling 3.0 multi-shot clip.
    *
    * Dismiss any promo/ad overlays using the shared HiggsFieldAutomation's

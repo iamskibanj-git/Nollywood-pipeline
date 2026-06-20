@@ -4446,8 +4446,10 @@ class CinemaVideoAutomation extends KlingAutomation {
     const maxWaitMs = 12 * 60 * 1000;
     const minEarlyRecoveryMs = 4 * 60 * 1000;
     const pollMs = 60 * 1000;
+    const earlyAssetProbeScheduleMs = [5, 7, 9, 11].map(minutes => minutes * 60 * 1000);
     const startedAt = Date.now();
     let settledPolls = 0;
+    let nextAssetProbeIndex = 0;
     this.log(`Cinema Studio generation submitted; polling UI lifecycle up to ${Math.round(maxWaitMs / 60000)}min before Asset Library recovery (direct UI video-source download disabled for identity safety)`);
     let lastSeenSrc = initialFirstSrc;
     while (Date.now() - startedAt < maxWaitMs) {
@@ -4475,6 +4477,39 @@ class CinemaVideoAutomation extends KlingAutomation {
         if (currentFirstSrc !== lastSeenSrc) {
           lastSeenSrc = currentFirstSrc;
           this.log('[CINEMA-VIDEO] Candidate video source appeared during mandatory wait; ignoring direct UI source and deferring to Asset Library recovery');
+        }
+      }
+
+      if (nextAssetProbeIndex < earlyAssetProbeScheduleMs.length &&
+          elapsedMs >= earlyAssetProbeScheduleMs[nextAssetProbeIndex]) {
+        const scheduledSec = Math.round(earlyAssetProbeScheduleMs[nextAssetProbeIndex] / 1000);
+        nextAssetProbeIndex++;
+        this.log(`[CINEMA-VIDEO] Early Asset Library probe at ${Math.round(elapsedMs / 1000)}s (scheduled ${scheduledSec}s) after confirmed spend`);
+        try {
+          const recovered = await this.probeAssetLibraryForClip(this._expectedCinemaPromptText, outputPath, {
+            minSimilarity: 92,
+            maxTilesToCheck: 6,
+            timeoutMs: 35000,
+            tilePolls: 2,
+            pollDelayMs: 1500,
+            requireDialogueMatch: true,
+            logPrefix: '[CINEMA-VIDEO-PROBE]',
+          });
+          if (recovered) {
+            this.log(`[CINEMA-VIDEO] Early Asset Library recovery succeeded at ${Math.round(elapsedMs / 1000)}s (similarity=${recovered.similarity ?? 'unknown'}%, source=${recovered.assetUuid || recovered.sourceGenId || 'recovered'})`);
+            return recovered;
+          }
+          this.log('[CINEMA-VIDEO] Early Asset Library probe found no matching ready asset; continuing lifecycle wait');
+        } catch (probeErr) {
+          if ((probeErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || probeErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) && typeof onVerificationRequired === 'function') {
+            this.log('[CINEMA-VIDEO] Higgsfield verification interrupted early Asset Library probe; waiting for manual completion before continuing lifecycle wait', 'warn');
+            await onVerificationRequired({ message: probeErr.message, phase: 'asset-library-probe' });
+            continue;
+          }
+          if (/SESSION_EXPIRED|Target page, context or browser has been closed|browser has been closed|Pipeline cancelled/i.test(probeErr.message || '')) {
+            throw probeErr;
+          }
+          this.log(`[CINEMA-VIDEO] Early Asset Library probe failed non-fatally: ${String(probeErr.message || probeErr).split('\n')[0]}`, 'warn');
         }
       }
     }
