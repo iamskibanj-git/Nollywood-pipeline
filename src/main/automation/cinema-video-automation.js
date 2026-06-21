@@ -212,14 +212,9 @@ class CinemaVideoAutomation extends KlingAutomation {
         continue;
       }
 
+      await this._installCinemaPromptComposerResolver();
       const lastChar = await page.evaluate(() => {
-        const active = document.activeElement;
-        const selection = window.getSelection?.();
-        const selectedNode = selection?.anchorNode?.nodeType === Node.ELEMENT_NODE
-          ? selection.anchorNode
-          : selection?.anchorNode?.parentElement;
-        const tb = active?.closest?.('[role="textbox"]')
-          || selectedNode?.closest?.('[role="textbox"]')
+        const tb = window.__resolveCinemaPromptTextbox?.()
           || document.querySelector('[data-cinema-prompt-target="typing"]');
         const text = tb ? (tb.innerText || tb.textContent || '') : '';
         return text.slice(-1);
@@ -275,28 +270,111 @@ class CinemaVideoAutomation extends KlingAutomation {
     return counts;
   }
 
-  async _snapshotPromptComposerState() {
+  async _installCinemaPromptComposerResolver() {
     const page = this.automation.page;
-    return page.evaluate(() => {
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const canonical = (value) => clean(value).toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
-      const textbox = document.activeElement?.closest?.('[role="textbox"]')
-        || document.querySelector('[data-cinema-prompt-target="typing"]')
-        || document.querySelector('[role="textbox"]');
-      const chipTexts = [];
-      const seenNodes = new Set();
-      if (textbox) {
-        const primary = [...textbox.querySelectorAll('[data-beautiful-mention]')];
-        const fallback = [...textbox.querySelectorAll('[contenteditable="false"]')]
+    await page.evaluate(() => {
+      window.__resolveCinemaPromptTextbox = () => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const visible = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 100 && r.height > 18
+            && r.bottom > 0 && r.top < window.innerHeight
+            && r.right > 0 && r.left < window.innerWidth
+            && s.display !== 'none'
+            && s.visibility !== 'hidden'
+            && Number(s.opacity || 1) > 0;
+        };
+        const inCinemaComposer = (el) => {
+          let node = el;
+          for (let depth = 0; node && depth < 12; depth++, node = node.parentElement) {
+            const r = node.getBoundingClientRect();
+            const text = clean(node.textContent);
+            if (
+              r.width > 300 && r.height > 70
+              && r.y > window.innerHeight * 0.40
+              && /Cinema Studio 3\.5/i.test(text)
+              && !/Nano Banana/i.test(text)
+            ) return true;
+          }
+          return false;
+        };
+        const textboxOf = (node) => {
+          const el = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+          if (!el) return null;
+          if (el.matches?.('textarea, [role="textbox"]')) return el;
+          return el.closest?.('textarea, [role="textbox"]') || null;
+        };
+        const marked = document.querySelector('[data-cinema-prompt-target="typing"]');
+        if (marked && visible(marked) && inCinemaComposer(marked)) return marked;
+
+        const activeTextbox = textboxOf(document.activeElement);
+        if (activeTextbox && visible(activeTextbox) && inCinemaComposer(activeTextbox)) return activeTextbox;
+
+        const selection = window.getSelection?.();
+        const selectionTextbox = textboxOf(selection?.anchorNode);
+        if (selectionTextbox && visible(selectionTextbox) && inCinemaComposer(selectionTextbox)) return selectionTextbox;
+
+        const candidates = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea')]
+          .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || el.value || '') }))
+          .filter(({ el, r }) => (
+            visible(el)
+            && r.y > window.innerHeight * 0.40
+            && r.y < window.innerHeight - 20
+            && inCinemaComposer(el)
+          ))
+          .sort((a, b) => {
+            const aBottom = Math.abs(window.innerHeight - a.r.bottom);
+            const bBottom = Math.abs(window.innerHeight - b.r.bottom);
+            if (aBottom !== bBottom) return aBottom - bBottom;
+            const aEmpty = a.text.length === 0 ? 0 : 1;
+            const bEmpty = b.text.length === 0 ? 0 : 1;
+            if (aEmpty !== bEmpty) return aEmpty - bEmpty;
+            return b.r.y - a.r.y;
+          });
+        return candidates[0]?.el || null;
+      };
+
+      window.__cinemaPromptChipTexts = (root) => {
+        const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const canonical = (value) => clean(value).toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
+        const chipVisible = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 0 && r.height > 0
+            && r.bottom > 0 && r.top < window.innerHeight
+            && r.right > 0 && r.left < window.innerWidth
+            && s.display !== 'none'
+            && s.visibility !== 'hidden'
+            && Number(s.opacity || 1) > 0;
+        };
+        const chipTexts = [];
+        const seenNodes = new Set();
+        if (!root) return chipTexts;
+        const primary = [...root.querySelectorAll('[data-beautiful-mention]')];
+        const fallback = [...root.querySelectorAll('[contenteditable="false"]')]
           .filter(el => /[a-z0-9_]/i.test(clean(el.innerText || el.textContent || '')));
         for (const el of [...primary, ...fallback]) {
           const chipRoot = el.closest('[data-beautiful-mention]') || el.closest('[contenteditable="false"]') || el;
-          if (seenNodes.has(chipRoot)) continue;
+          if (seenNodes.has(chipRoot) || !chipVisible(chipRoot)) continue;
           seenNodes.add(chipRoot);
           const text = canonical(chipRoot.innerText || chipRoot.textContent || '');
-          if (text) chipTexts.push(text);
+          if (text && /[a-z0-9_]/.test(text)) chipTexts.push(text);
         }
-      }
+        return chipTexts;
+      };
+    }).catch(() => {});
+  }
+
+  async _snapshotPromptComposerState() {
+    const page = this.automation.page;
+    await this._installCinemaPromptComposerResolver();
+    return page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const textbox = window.__resolveCinemaPromptTextbox?.() || null;
+      const chipTexts = window.__cinemaPromptChipTexts?.(textbox) || [];
       const text = textbox ? clean(textbox.innerText || textbox.textContent || '') : '';
       return { text, textLength: text.length, chipTexts };
     }).catch(err => ({ text: '', textLength: 0, chipTexts: [], error: err.message }));
@@ -315,9 +393,7 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (!state.textLength && state.chipTexts.length === 0) return;
 
       await page.evaluate(() => {
-        const textbox = document.activeElement?.closest?.('[role="textbox"]')
-          || document.querySelector('[data-cinema-prompt-target="typing"]')
-          || document.querySelector('[role="textbox"]');
+        const textbox = window.__resolveCinemaPromptTextbox?.() || null;
         if (!textbox) return;
         textbox.focus();
         try {
@@ -341,11 +417,12 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _selectExactMentionOption(name) {
     const page = this.automation.page;
+    await this._installCinemaPromptComposerResolver();
     const target = String(name || '').toLowerCase().replace(/^@/, '');
     const state = await page.evaluate((targetName) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const normalize = (value) => clean(value).toLowerCase().replace(/^@/, '');
-      const textbox = document.querySelector('[role="textbox"]');
+      const textbox = window.__resolveCinemaPromptTextbox?.() || null;
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = getComputedStyle(el);
@@ -414,25 +491,22 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _auditPromptMentionChips(expectedCounts, { requiredCounts = expectedCounts } = {}) {
     const page = this.automation.page;
+    await this._installCinemaPromptComposerResolver();
     const expected = Object.fromEntries([...expectedCounts.entries()]);
     const required = Object.fromEntries([...requiredCounts.entries()]);
     return page.evaluate(({ expectedByName, requiredByName }) => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const canonical = (value) => clean(value).toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
       const expectedNames = new Set(Object.keys(expectedByName).map(canonical));
-      const chipTexts = [];
-      const seenNodes = new Set();
-      const root = document.querySelector('[role="textbox"]') || document;
-      const primary = [...root.querySelectorAll('[data-beautiful-mention]')];
-      const fallback = [...root.querySelectorAll('[contenteditable="false"]')]
-        .filter(el => /[a-z0-9_]/i.test(clean(el.innerText || el.textContent || '')));
-      for (const el of [...primary, ...fallback]) {
-        const chipRoot = el.closest('[data-beautiful-mention]') || el.closest('[contenteditable="false"]') || el;
-        if (seenNodes.has(chipRoot)) continue;
-        seenNodes.add(chipRoot);
-        const text = canonical(chipRoot.innerText || chipRoot.textContent || '');
-        if (!text || !/[a-z0-9_]/.test(text)) continue;
-        chipTexts.push(text);
+      const root = window.__resolveCinemaPromptTextbox?.() || null;
+      if (!root) return { ok: false, reason: 'active Cinema prompt textbox not found for chip audit' };
+      const chipTexts = window.__cinemaPromptChipTexts?.(root) || [];
+      const pageChipTexts = (window.__cinemaPromptChipTexts?.(document) || [])
+        .filter((text, index, list) => list.indexOf(text) === index);
+      const outsideStale = pageChipTexts.filter(text => !chipTexts.includes(text));
+      const activeText = clean(root.innerText || root.textContent || '');
+      if (!root.hasAttribute('data-cinema-prompt-target')) {
+        root.setAttribute('data-cinema-prompt-target', 'typing');
       }
       const counts = {};
       for (const text of chipTexts) {
@@ -440,7 +514,10 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
       const unexpected = chipTexts.filter(text => !expectedNames.has(text));
       if (unexpected.length > 0) {
-        return { ok: false, reason: `unexpected mention chip(s): ${unexpected.join(', ')}` };
+        return {
+          ok: false,
+          reason: `unexpected mention chip(s) in active composer: ${unexpected.join(', ')}; active_text_len=${activeText.length}; active_chips=${chipTexts.join(',') || 'none'}; page_chips=${pageChipTexts.join(',') || 'none'}`,
+        };
       }
       const missing = [];
       for (const name of Object.keys(requiredByName)) {
@@ -453,7 +530,10 @@ class CinemaVideoAutomation extends KlingAutomation {
       const duplicates = Object.entries(counts)
         .filter(([, count]) => count > 1)
         .map(([name, count]) => `${name}x${count}`);
-      return { ok: true, chips: chipTexts, counts, warning: duplicates.length ? `duplicate chip DOM count observed: ${duplicates.join(', ')}` : null };
+      const warnings = [];
+      if (duplicates.length) warnings.push(`duplicate chip DOM count observed in active composer: ${duplicates.join(', ')}`);
+      if (outsideStale.length) warnings.push(`ignored chips outside active composer: ${outsideStale.join(', ')}`);
+      return { ok: true, chips: chipTexts, counts, warning: warnings.length ? warnings.join('; ') : null };
     }, { expectedByName: expected, requiredByName: required }).catch(err => ({ ok: false, reason: err.message }));
   }
 
@@ -809,43 +889,20 @@ class CinemaVideoAutomation extends KlingAutomation {
   async _focusPromptTextboxForTyping() {
     const page = this.automation.page;
     await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]');
+    await this._installCinemaPromptComposerResolver();
     const target = await page.evaluate(() => {
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const inCinemaComposer = (el) => {
-        let node = el;
-        for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
-          const r = node.getBoundingClientRect();
-          const text = clean(node.textContent);
-          if (
-            r.width > 300 && r.height > 80
-            && r.y > window.innerHeight * 0.45
-            && /Cinema Studio 3\.5/i.test(text)
-            && !/Nano Banana/i.test(text)
-          ) return true;
+      const chosenEl = window.__resolveCinemaPromptTextbox?.() || null;
+      const chosen = chosenEl
+        ? {
+          el: chosenEl,
+          r: chosenEl.getBoundingClientRect(),
+          text: String(chosenEl.innerText || chosenEl.textContent || chosenEl.value || '').replace(/\s+/g, ' ').trim(),
         }
-        return false;
-      };
-      const boxes = [...document.querySelectorAll('[role="textbox"][contenteditable="true"], [role="textbox"], textarea')]
-        .map(el => ({ el, r: el.getBoundingClientRect(), text: clean(el.innerText || el.textContent || el.value || '') }))
-        .filter(({ el, r }) => (
-          r.width > 100
-          && r.height > 18
-          && r.y > window.innerHeight * 0.45
-          && r.y < window.innerHeight - 40
-          && inCinemaComposer(el)
-        ))
-        .sort((a, b) => {
-          const aEmpty = a.text.length === 0 ? 0 : 1;
-          const bEmpty = b.text.length === 0 ? 0 : 1;
-          if (aEmpty !== bEmpty) return aEmpty - bEmpty;
-          return a.r.y - b.r.y;
-        });
-      const chosen = boxes[0];
+        : null;
       if (!chosen) {
         return {
           ok: false,
           reason: 'no visible Cinema Studio prompt textbox candidate',
-          candidates: boxes.length,
           scrollY: window.scrollY,
         };
       }
@@ -904,8 +961,11 @@ class CinemaVideoAutomation extends KlingAutomation {
   async _readCinemaPromptText() {
     const page = this.automation.page;
     if (!page || page.isClosed?.()) return '';
+    await this._installCinemaPromptComposerResolver();
     return page.evaluate(() => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const target = window.__resolveCinemaPromptTextbox?.() || null;
+      if (target) return target.innerText || target.textContent || target.value || '';
       const inCinemaComposer = (el) => {
         let node = el;
         for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
