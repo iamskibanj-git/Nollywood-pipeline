@@ -246,11 +246,17 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (!audit.ok) {
         throw new Error(`[PRE-GEN] @mention chip audit failed after @${name}: ${audit.reason}`);
       }
+      if (audit.warning) {
+        this.log(`[PROMPT] @mention chip audit warning after @${name}: ${audit.warning}`, 'warn');
+      }
     }
 
     const finalAudit = await this._auditPromptMentionChips(fullExpectedMentionCounts, { requiredCounts: fullExpectedMentionCounts });
     if (!finalAudit.ok) {
       throw new Error(`[PRE-GEN] Final @mention chip audit failed: ${finalAudit.reason}`);
+    }
+    if (finalAudit.warning) {
+      this.log(`[PROMPT] Final @mention chip audit warning: ${finalAudit.warning}`, 'warn');
     }
   }
 
@@ -436,23 +442,18 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (unexpected.length > 0) {
         return { ok: false, reason: `unexpected mention chip(s): ${unexpected.join(', ')}` };
       }
-      const overLimit = [];
-      for (const [name, expectedCount] of Object.entries(expectedByName)) {
-        const key = canonical(name);
-        if ((counts[key] || 0) > expectedCount) {
-          overLimit.push(`${name} expected ${expectedCount}, found ${counts[key] || 0}`);
-        }
-      }
-      if (overLimit.length > 0) return { ok: false, reason: `duplicate/stale mention chip(s): ${overLimit.join('; ')}` };
       const missing = [];
-      for (const [name, expectedCount] of Object.entries(requiredByName)) {
+      for (const name of Object.keys(requiredByName)) {
         const key = canonical(name);
-        if ((counts[key] || 0) < expectedCount) {
-          missing.push(`${name} expected ${expectedCount}, found ${counts[key] || 0}`);
+        if ((counts[key] || 0) < 1) {
+          missing.push(`${name} missing`);
         }
       }
       if (missing.length > 0) return { ok: false, reason: `missing mention chip(s): ${missing.join('; ')}` };
-      return { ok: true, chips: chipTexts, counts };
+      const duplicates = Object.entries(counts)
+        .filter(([, count]) => count > 1)
+        .map(([name, count]) => `${name}x${count}`);
+      return { ok: true, chips: chipTexts, counts, warning: duplicates.length ? `duplicate chip DOM count observed: ${duplicates.join(', ')}` : null };
     }, { expectedByName: expected, requiredByName: required }).catch(err => ({ ok: false, reason: err.message }));
   }
 

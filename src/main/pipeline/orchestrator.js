@@ -10019,6 +10019,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             continue; // retry succeeded — skip failure path
           } catch (retryErr) {
             this.log(`[CINEMATIC] ${clipId}: retry also failed — ${retryErr.message}`, 'warn');
+            if (this.cancelled || /Target page, context or browser has been closed|browser has been closed|Pipeline cancelled/i.test(retryErr.message || '')) {
+              this.cancelled = true;
+              this.log(`[CINEMATIC] ${clipId}: retry aborted during shutdown/browser close — skipping failure DB writes`, 'warn');
+              return;
+            }
 
             const retryRefunded = cinematicVideoEngine === 'cinema-studio-3.5' && (
               retryErr.code === 'CINEMA_REFUNDED_FAILURE' ||
@@ -10090,8 +10095,10 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           }
         }
 
+        if (this.cancelled) return;
+
         if (cinematicVideoEngine === 'cinema-studio-3.5') {
-          this.log(`[CINEMATIC] ${clipId}: Cinema Studio 3.5 clip failed after retry — pausing instead of advancing to the next clip`, 'error');
+          this.log(`[CINEMATIC] ${clipId}: Cinema Studio 3.5 clip failed after retry — evaluating autonomous retry/recovery path`, 'error');
           const freshAfterFailure = getFreshClipAsset(clipId, clipAsset);
           const hasSubmittedProof = freshAfterFailure && !isGenerationRefundedAsset(freshAfterFailure) && (
             !!freshAfterFailure.gen_clicked_at ||
@@ -10106,22 +10113,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               db.clearAssetGenerationMeta(clipAsset.id);
               db.resetAsset(clipAsset.id);
             }
-            if (failureCycle >= 3) {
-              this.paused = true;
-              this.state.status = 'paused';
-              this.emit({
-                type: 'paused',
-                reason: 'cinema-clip-setup-retry-exhausted',
-                clipId,
-                message: e.message,
-              });
-              this.log(`[CINEMATIC] ${clipId}: setup failed ${failureCycle} time(s) without Generate proof — pausing for operator instead of looping`, 'error');
-              await this.checkPause();
-              if (this.cancelled) return;
-            } else {
-              this.log(`[CINEMATIC] ${clipId}: no submitted generation proof after failure — clearing prompt metadata and retrying cleanly (cycle ${failureCycle}/3)`, 'warn');
-              try { await this.automation.recreateContext(); } catch (_) {}
-            }
+            const cooloffMs = failureCycle >= 3 ? Math.min(30000, 5000 * (failureCycle - 2)) : 0;
+            this.log(`[CINEMATIC] ${clipId}: no submitted generation proof after failure — clearing prompt metadata and retrying same clip cleanly (cycle ${failureCycle}${cooloffMs ? `, cooloff ${Math.round(cooloffMs / 1000)}s` : ''})`, 'warn');
+            if (cooloffMs) await new Promise(r => setTimeout(r, cooloffMs));
+            if (this.cancelled) return;
+            try { await this.automation.recreateContext(); } catch (_) {}
             i--;
             continue;
           }
@@ -10130,22 +10126,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             db.markAssetFailed(clipAsset.id, e.message);
             db.resetAsset(clipAsset.id);
           }
-          this.log(`[CINEMATIC] ${clipId}: paused with submitted generation metadata preserved; resume will attempt Asset Library recovery before any new Generate click`);
-          this.paused = true;
-          this.state.status = 'paused';
-          this.emit({
-            type: 'paused',
-            reason: 'cinema-clip-failed-auto-recovery',
-            clipId,
-            message: e.message,
-          });
-          this.log(`[CINEMATIC] ${clipId}: auto-resuming in 5s to enter Asset Library recovery path`);
+          this.log(`[CINEMATIC] ${clipId}: submitted generation metadata preserved; retrying recovery-first path in 5s without human pause`);
           await new Promise(r => setTimeout(r, 5000));
           if (this.cancelled) return;
-          this.paused = false;
           this.state.status = 'running';
-          this.emit({ type: 'resumed' });
-          this.log(`[CINEMATIC] ${clipId}: auto-resumed; retrying clip through recovery-first path`);
+          this.log(`[CINEMATIC] ${clipId}: retrying clip through recovery-first path`);
           i--;
           continue;
         }
