@@ -4573,6 +4573,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     let creditCost = null;
     let submittedClickedAt = null;
     let submittedBaselineSignatures = [];
+    let submittedAssetBaselineSignatures = [];
     let submitAttempt = 0;
     const maxSubmitAttempts = 3;
 
@@ -4599,6 +4600,30 @@ class CinemaVideoAutomation extends KlingAutomation {
           this.log(`Warn: could not capture credit ledger baseline before click: ${ledgerErr.message}`, 'warn');
         }
 
+        let baselineAssetSignatures = [];
+        this._cinemaGeneratePhase = 'assetBaseline';
+        try {
+          const assetBaseline = await this.snapshotVideoAssetLibrary({
+            logPrefix: '[CINEMA-VIDEO-BASELINE]',
+            timeoutMs: 30000,
+            tilePolls: 4,
+            pollDelayMs: 2000,
+            initialWaitMs: 3000,
+          });
+          baselineAssetSignatures = Array.isArray(assetBaseline?.signatures) ? assetBaseline.signatures : [];
+          if (baselineAssetSignatures.length > 0) {
+            this.log(`[CINEMA-VIDEO] Asset Library baseline captured (${baselineAssetSignatures.length} video asset signature(s))`);
+          } else {
+            this.log('[CINEMA-VIDEO] Warn: Asset Library baseline captured zero signatures; early probes will fall back to newest-tile scanning', 'warn');
+          }
+        } catch (assetBaselineErr) {
+          if ((assetBaselineErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || assetBaselineErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) ||
+              /SESSION_EXPIRED|Target page, context or browser has been closed|browser has been closed|Pipeline cancelled/i.test(assetBaselineErr.message || '')) {
+            throw assetBaselineErr;
+          }
+          this.log(`[CINEMA-VIDEO] Warn: could not capture Asset Library baseline before click: ${String(assetBaselineErr.message || assetBaselineErr).split('\n')[0]}`, 'warn');
+        }
+
         await this._waitForCinemaEndpointQuietPeriod({ quietMs: 5000, timeoutMs: 15000, label: 'intentional Generate click' });
         await this._dismissLowCreditToast('intentional Generate click');
         ({ genBtnBox, creditCost } = await this._readGenerateButtonWithCreditCost({ timeoutMs: 8000, expectedMaxCost: 70 }));
@@ -4609,6 +4634,7 @@ class CinemaVideoAutomation extends KlingAutomation {
         const clickedAt = new Date();
         submittedClickedAt = clickedAt;
         submittedBaselineSignatures = baselineLedgerSignatures;
+        submittedAssetBaselineSignatures = baselineAssetSignatures;
         this._cinemaGeneratePhase = 'intentionalGenerate';
         await page.mouse.click(genBtnBox.x, genBtnBox.y);
         this._cinemaGeneratePhase = 'postGenerate';
@@ -4719,8 +4745,10 @@ class CinemaVideoAutomation extends KlingAutomation {
             minSimilarity: 92,
             maxTilesToCheck: 6,
             timeoutMs: 35000,
-            tilePolls: 2,
-            pollDelayMs: 1500,
+            tilePolls: 4,
+            pollDelayMs: 2000,
+            initialWaitMs: 3000,
+            baselineAssetSignatures: submittedAssetBaselineSignatures,
             requireDialogueMatch: true,
             logPrefix: '[CINEMA-VIDEO-PROBE]',
           });

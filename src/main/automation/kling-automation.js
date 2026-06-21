@@ -1682,6 +1682,218 @@ class KlingAutomation {
     return null;
   }
 
+  _videoAssetTileSignature(tile) {
+    if (!tile || typeof tile !== 'object') return null;
+    const uuid = String(tile.uuid || '').trim();
+    if (uuid) return `uuid:${uuid}`;
+    const preview = String(tile.preview || tile.assetPreview || '').trim();
+    if (preview) return `preview:${preview}`;
+    const cellId = String(tile.cellId || '').trim();
+    if (cellId) return `cell:${cellId}`;
+    const href = String(tile.href || '').trim();
+    if (href) return `href:${href}`;
+    const src = String(tile.src || '').trim().split('?')[0];
+    if (src) return `src:${src.slice(-180)}`;
+    return null;
+  }
+
+  _normalizeVideoAssetBaselineSignatures(baseline) {
+    const set = new Set();
+    const add = (item) => {
+      if (!item) return;
+      if (typeof item === 'string') {
+        if (item.trim()) set.add(item.trim());
+        return;
+      }
+      const signature = item.signature || this._videoAssetTileSignature(item);
+      if (signature) set.add(signature);
+    };
+
+    if (Array.isArray(baseline)) {
+      baseline.forEach(add);
+    } else if (baseline && typeof baseline === 'object') {
+      if (Array.isArray(baseline.signatures)) baseline.signatures.forEach(add);
+      if (Array.isArray(baseline.tiles)) baseline.tiles.forEach(add);
+    }
+    return set;
+  }
+
+  async _captureVideoAssetGridDiagnostics(page) {
+    return page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 &&
+          style.visibility !== 'hidden' &&
+          style.display !== 'none';
+      };
+      const bodyText = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      const visibleTexts = [...document.querySelectorAll('button, [role="button"], [role="tab"], h1, h2, h3, span, div')]
+        .filter(visible)
+        .map(el => String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .slice(0, 25);
+      return {
+        url: location.href,
+        bodySample: bodyText.slice(0, 500),
+        counts: {
+          figures: document.querySelectorAll('figure').length,
+          assetFigures: document.querySelectorAll('figure[data-asset-id]').length,
+          previewImgs: document.querySelectorAll('img[data-asset-preview]').length,
+          cloudImgs: document.querySelectorAll('img[src*="cloudfront"], img[src*="higgs"]').length,
+          buttons: document.querySelectorAll('button, [role="button"]').length,
+        },
+        visibleTexts,
+      };
+    }).catch(err => ({
+      url: '',
+      bodySample: '',
+      counts: {},
+      visibleTexts: [],
+      error: String(err?.message || err || '').split('\n')[0],
+    }));
+  }
+
+  async _assertVideoAssetPageUsable(page, tag) {
+    const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    if (/Verification Required|Slide right to secure your access|unusual activity/i.test(bodyText)) {
+      const err = new Error('HIGGSFIELD_VERIFICATION_REQUIRED: verification appeared during Asset Library probe');
+      err.code = 'HIGGSFIELD_VERIFICATION_REQUIRED';
+      throw err;
+    }
+    if (/Project Not Found|Log in|Sign in|Sign up/i.test(bodyText) && !/Usage history|All assets|Uploads|Video/i.test(bodyText)) {
+      throw new Error('SESSION_EXPIRED: Asset Library probe could not see logged-in video assets');
+    }
+    if (tag && /Project Not Found/i.test(bodyText)) {
+      this.log(`${tag} Asset page text includes Project Not Found; continuing only if authenticated asset UI is also visible`, 'warn');
+    }
+  }
+
+  async _readVideoAssetTilesFromPage(page, opts = {}) {
+    const tag = opts.logPrefix || '[RECOVERY-PROBE]';
+    const tilePolls = opts.tilePolls || 4;
+    const pollDelayMs = opts.pollDelayMs || 2000;
+    const initialWaitMs = opts.initialWaitMs ?? 3000;
+    const refreshOnEmpty = opts.refreshOnEmpty !== false;
+
+    if (initialWaitMs > 0) {
+      await page.waitForTimeout(initialWaitMs);
+    }
+    await this._dismissAssetProbeOverlays(page, tag);
+    await this._assertVideoAssetPageUsable(page, tag);
+
+    let videoTiles = [];
+    let refreshed = false;
+    for (let poll = 0; poll < tilePolls; poll++) {
+      videoTiles = await page.evaluate(() => {
+        const results = [];
+        const addTile = (el, uuid, preview, cellId, src) => {
+          const r = el.getBoundingClientRect();
+          if (r.width < 80 || r.height < 80 || r.width === 0 || r.height === 0) return;
+          results.push({
+            uuid: uuid || null,
+            preview: preview || null,
+            cellId: cellId || null,
+            src: src || null,
+            x: Math.round(r.x + r.width / 2),
+            y: Math.round(r.y + r.height / 2),
+            href: uuid ? `/asset/video/${uuid}` : null,
+          });
+        };
+
+        for (const fig of document.querySelectorAll('figure[data-asset-id]')) {
+          const img = fig.querySelector('img');
+          addTile(
+            fig,
+            fig.getAttribute('data-asset-id'),
+            img?.getAttribute('data-asset-preview'),
+            fig.getAttribute('data-cell-id'),
+            img?.getAttribute('src')
+          );
+        }
+        if (results.length === 0) {
+          for (const img of document.querySelectorAll('img[data-asset-preview]')) {
+            addTile(
+              img,
+              img.getAttribute('data-asset-preview'),
+              img.getAttribute('data-asset-preview'),
+              null,
+              img.getAttribute('src')
+            );
+          }
+        }
+        if (results.length === 0) {
+          for (const img of document.querySelectorAll('img[src*="cloudfront"], img[src*="higgs"]')) {
+            addTile(img, null, null, null, img.getAttribute('src'));
+          }
+        }
+        return results;
+      });
+
+      videoTiles = videoTiles.map(tile => ({
+        ...tile,
+        signature: this._videoAssetTileSignature(tile),
+      }));
+      if (videoTiles.length > 0) break;
+
+      if (refreshOnEmpty && !refreshed && poll === Math.max(0, Math.floor(tilePolls / 2) - 1)) {
+        refreshed = true;
+        this.log(`${tag} No video tiles after initial polls; refreshing Asset/video page once`);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        await this._dismissAssetProbeOverlays(page, tag);
+        await this._assertVideoAssetPageUsable(page, tag);
+      }
+
+      if (poll < tilePolls - 1) {
+        this.log(`${tag} No video tiles yet (poll ${poll + 1}/${tilePolls}); continuing probe wait`);
+        await page.waitForTimeout(pollDelayMs);
+      }
+    }
+
+    const diagnostics = videoTiles.length > 0 ? null : await this._captureVideoAssetGridDiagnostics(page);
+    return { tiles: videoTiles, diagnostics };
+  }
+
+  async snapshotVideoAssetLibrary(opts = {}) {
+    const context = this.automation.page?.context?.();
+    const tag = opts.logPrefix || '[ASSET-BASELINE]';
+    if (!context) {
+      this.log(`${tag} No browser context available for video Asset Library snapshot`);
+      return { tiles: [], signatures: [], diagnostics: null };
+    }
+
+    const timeoutMs = opts.timeoutMs || 30000;
+    const startedAt = Date.now();
+    const remainingMs = () => Math.max(1000, timeoutMs - (Date.now() - startedAt));
+    let snapshotPage = null;
+
+    try {
+      snapshotPage = await context.newPage();
+      await snapshotPage.goto('https://higgsfield.ai/asset/video', {
+        waitUntil: 'domcontentloaded',
+        timeout: Math.min(15000, remainingMs()),
+      });
+      this.log(`${tag} Asset/video page loaded for snapshot. URL: ${snapshotPage.url()}`);
+      const snapshot = await this._readVideoAssetTilesFromPage(snapshotPage, {
+        logPrefix: tag,
+        tilePolls: opts.tilePolls || 4,
+        pollDelayMs: opts.pollDelayMs || 2000,
+        initialWaitMs: opts.initialWaitMs ?? 3000,
+        refreshOnEmpty: opts.refreshOnEmpty !== false,
+      });
+      const signatures = [...new Set(snapshot.tiles.map(tile => tile.signature).filter(Boolean))];
+      if (snapshot.tiles.length === 0) {
+        this.log(`${tag} No video tiles found during snapshot; diagnostics=${JSON.stringify(snapshot.diagnostics || {}).slice(0, 900)}`, 'warn');
+      }
+      return { ...snapshot, signatures };
+    } finally {
+      if (snapshotPage && !snapshotPage.isClosed()) {
+        await snapshotPage.close().catch(() => {});
+      }
+    }
+  }
+
   /**
    * Lightweight Asset Library probe for already-submitted video generations.
    *
@@ -1707,8 +1919,11 @@ class KlingAutomation {
     const minSimilarity = opts.minSimilarity || 92;
     const maxTilesToCheck = opts.maxTilesToCheck || 6;
     const timeoutMs = opts.timeoutMs || 30000;
-    const tilePolls = opts.tilePolls || 2;
-    const pollDelayMs = opts.pollDelayMs || 1500;
+    const tilePolls = opts.tilePolls || 4;
+    const pollDelayMs = opts.pollDelayMs || 2000;
+    const baselineSignatures = this._normalizeVideoAssetBaselineSignatures(
+      opts.baselineAssetSignatures || opts.assetBaselineSignatures || opts.baselineAssetSnapshot
+    );
     const startedAt = Date.now();
     let probePage = null;
 
@@ -1721,65 +1936,37 @@ class KlingAutomation {
         waitUntil: 'domcontentloaded',
         timeout: Math.min(15000, remainingMs()),
       });
-      await probePage.waitForTimeout(opts.initialWaitMs || 1500);
-      await this._dismissAssetProbeOverlays(probePage, tag);
-
-      const bodyText = await probePage.evaluate(() => document.body?.innerText || '').catch(() => '');
-      if (/Verification Required|Slide right to secure your access|unusual activity/i.test(bodyText)) {
-        const err = new Error('HIGGSFIELD_VERIFICATION_REQUIRED: verification appeared during Asset Library probe');
-        err.code = 'HIGGSFIELD_VERIFICATION_REQUIRED';
-        throw err;
-      }
-      if (/Project Not Found|Log in|Sign in|Sign up/i.test(bodyText) && !/Usage history|All assets|Uploads|Video/i.test(bodyText)) {
-        throw new Error('SESSION_EXPIRED: Asset Library probe could not see logged-in video assets');
-      }
 
       this.log(`${tag} Asset/video page loaded for quick probe. URL: ${probePage.url()}`);
 
-      let videoTiles = [];
-      for (let poll = 0; poll < tilePolls; poll++) {
-        videoTiles = await probePage.evaluate(() => {
-          const results = [];
-          const addTile = (el, uuid) => {
-            const r = el.getBoundingClientRect();
-            if (r.width < 80 || r.height < 80 || r.width === 0 || r.height === 0) return;
-            results.push({
-              uuid: uuid || null,
-              x: Math.round(r.x + r.width / 2),
-              y: Math.round(r.y + r.height / 2),
-              href: uuid ? `/asset/video/${uuid}` : null,
-            });
-          };
-
-          for (const fig of document.querySelectorAll('figure[data-asset-id]')) {
-            addTile(fig, fig.getAttribute('data-asset-id'));
-          }
-          if (results.length === 0) {
-            for (const img of document.querySelectorAll('img[data-asset-preview]')) {
-              addTile(img, img.getAttribute('data-asset-preview'));
-            }
-          }
-          if (results.length === 0) {
-            for (const img of document.querySelectorAll('img[src*="cloudfront"], img[src*="higgs"]')) {
-              addTile(img, null);
-            }
-          }
-          return results;
-        });
-        if (videoTiles.length > 0) break;
-        if (poll < tilePolls - 1) {
-          this.log(`${tag} No video tiles yet (poll ${poll + 1}/${tilePolls}); continuing probe wait`);
-          await probePage.waitForTimeout(pollDelayMs);
-        }
-      }
+      const snapshot = await this._readVideoAssetTilesFromPage(probePage, {
+        logPrefix: tag,
+        tilePolls,
+        pollDelayMs,
+        initialWaitMs: opts.initialWaitMs ?? 3000,
+        refreshOnEmpty: opts.refreshOnEmpty !== false,
+      });
+      let videoTiles = snapshot.tiles;
 
       if (videoTiles.length === 0) {
-        this.log(`${tag} No video tiles found during quick probe`);
+        this.log(`${tag} No video tiles found during quick probe; diagnostics=${JSON.stringify(snapshot.diagnostics || {}).slice(0, 900)}`);
         return null;
       }
 
+      let newTiles = [];
+      if (baselineSignatures.size > 0) {
+        newTiles = videoTiles.filter(tile => tile.signature && !baselineSignatures.has(tile.signature));
+        this.log(`${tag} Asset diff: baseline=${baselineSignatures.size}, current=${videoTiles.length}, new=${newTiles.length}`);
+        if (newTiles.length === 0) {
+          this.log(`${tag} No new video asset signatures since pre-Generate baseline; continuing lifecycle wait`);
+          return null;
+        }
+        const oldTiles = videoTiles.filter(tile => !newTiles.includes(tile));
+        videoTiles = [...newTiles, ...oldTiles];
+      }
+
       const tilesToCheck = videoTiles.slice(0, maxTilesToCheck);
-      this.log(`${tag} Found ${videoTiles.length} video tile(s); checking up to ${tilesToCheck.length}`);
+      this.log(`${tag} Found ${videoTiles.length} video tile(s); checking up to ${tilesToCheck.length}${baselineSignatures.size > 0 ? ` (${newTiles.length} new first)` : ''}`);
 
       for (let i = 0; i < tilesToCheck.length; i++) {
         if (Date.now() - startedAt > timeoutMs) {
