@@ -9808,18 +9808,22 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           e.code === 'CINEMA_REFUNDED_FAILURE' ||
           e.message.includes('CINEMA_REFUNDED_FAILURE')
         );
+        const isLedgerCurrentSubmitRefund = isCinemaRefundedFailure &&
+          e.evidence &&
+          typeof e.evidence === 'object' &&
+          e.evidence.source === 'ledger-current-submit';
         const isBrowserDead = e.message.includes('closed') || e.message.includes('crashed') ||
                               e.message.includes('disconnected') || e.message.includes('Target');
 
-        if (isCinemaRefundedFailure) {
+        if (isLedgerCurrentSubmitRefund) {
           shouldRetry = true;
           if (clipAsset) {
-            const evidence = e.evidence && typeof e.evidence === 'object'
-              ? `${e.evidence.cost ?? 'unknown'} credits, ${e.evidence.dateText || 'unknown date'}`
-              : e.message;
+            const evidence = `${e.evidence.cost ?? 'unknown'} credits, ${e.evidence.dateText || 'unknown date'}`;
             db.markAssetGenerationRefunded(clipAsset.id, `Cinema Studio refunded failure: ${evidence}`);
           }
-          this.log(`[CINEMATIC] ${clipId}: Cinema Studio failed with visible credits-refunded state — retrying once without Asset Library recovery`);
+          this.log(`[CINEMATIC] ${clipId}: Cinema Studio usage ledger confirms current-submit refund - retrying once without Asset Library recovery`);
+        } else if (isCinemaRefundedFailure) {
+          this.log(`[CINEMATIC] ${clipId}: Cinema Studio refund signal was not ledger-scoped to this submit - preserving submitted metadata for recovery-first retry`, 'warn');
         } else if (!isPreGen && isTimeout && !isBrowserDead && finalMultiShotPrompt) {
           const isEarlyUiSettled = e.message.includes('UI settled early');
           const recoveryGraceMs = isEarlyUiSettled ? 30000 : 120000;
@@ -10029,11 +10033,15 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               retryErr.code === 'CINEMA_REFUNDED_FAILURE' ||
               retryErr.message?.includes('CINEMA_REFUNDED_FAILURE')
             );
-            if (retryRefunded && clipAsset) {
-              const evidence = retryErr.evidence && typeof retryErr.evidence === 'object'
-                ? `${retryErr.evidence.cost ?? 'unknown'} credits, ${retryErr.evidence.dateText || 'unknown date'}`
-                : retryErr.message;
+            const retryLedgerCurrentSubmitRefund = retryRefunded &&
+              retryErr.evidence &&
+              typeof retryErr.evidence === 'object' &&
+              retryErr.evidence.source === 'ledger-current-submit';
+            if (retryLedgerCurrentSubmitRefund && clipAsset) {
+              const evidence = `${retryErr.evidence.cost ?? 'unknown'} credits, ${retryErr.evidence.dateText || 'unknown date'}`;
               db.markAssetGenerationRefunded(clipAsset.id, `Cinema Studio refunded retry failure: ${evidence}`);
+            } else if (retryRefunded) {
+              this.log(`[CINEMATIC] ${clipId}: retry refund signal was not ledger-scoped to this submit - preserving submitted metadata for final recovery`, 'warn');
             }
 
             if (retryErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' || retryErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED')) {

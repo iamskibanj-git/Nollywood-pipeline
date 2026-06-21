@@ -4246,13 +4246,24 @@ class CinemaVideoAutomation extends KlingAutomation {
     return Number.isFinite(ms) ? ms : Date.parse(raw);
   }
 
-  _findMatchingCinemaRefundRow(rows, { expectedCost, clickedAt, baselineSignatures = [] } = {}) {
+  _floorToLedgerMinute(ms) {
+    return Number.isFinite(ms) ? Math.floor(ms / 60000) * 60000 : NaN;
+  }
+
+  _findMatchingCinemaRefundRow(rows, { expectedCost, clickedAt, confirmedSpendRow = null, baselineSignatures = [] } = {}) {
     const baseline = new Set(baselineSignatures || []);
     const expected = Number.isFinite(expectedCost) ? Math.abs(expectedCost) : null;
     const clickedMs = this._parseCinemaSubmitDate(clickedAt);
     if (!Number.isFinite(clickedMs)) return null;
-    const lowerBound = clickedMs - (2 * 60 * 1000);
-    const upperBound = clickedMs + (35 * 60 * 1000);
+    const spendRowMs = confirmedSpendRow?.dateText
+      ? this._parseCreditLedgerDate(confirmedSpendRow.dateText)
+      : NaN;
+    const anchorMs = Number.isFinite(spendRowMs) ? Math.max(clickedMs, spendRowMs) : clickedMs;
+    // Higgsfield usage history is minute-granular. Treat a refund as current-submit
+    // proof only if it lands in the same submit window, not anywhere later in the
+    // session; otherwise an unrelated old refund can erase a paid, recoverable job.
+    const lowerBound = this._floorToLedgerMinute(anchorMs);
+    const upperBound = lowerBound + (10 * 60 * 1000);
 
     return (rows || [])
       .filter(row => {
@@ -4262,12 +4273,13 @@ class CinemaVideoAutomation extends KlingAutomation {
         if (expected !== null && row.cost !== null && Math.abs(Math.abs(row.cost) - expected) > 0.02) return false;
         const rowTime = this._parseCreditLedgerDate(row.dateText);
         if (!Number.isFinite(rowTime)) return false;
-        return rowTime >= lowerBound && rowTime <= upperBound;
+        const rowMinute = this._floorToLedgerMinute(rowTime);
+        return rowMinute >= lowerBound && rowMinute <= upperBound;
       })
       .sort((a, b) => this._parseCreditLedgerDate(a.dateText) - this._parseCreditLedgerDate(b.dateText))[0] || null;
   }
 
-  async findCinemaRefundForSubmit({ expectedCost, clickedAt, baselineSignatures = [], timeoutMs = 15000, ledgerWaitMs = 5000 } = {}) {
+  async findCinemaRefundForSubmit({ expectedCost, clickedAt, confirmedSpendRow = null, baselineSignatures = [], timeoutMs = 15000, ledgerWaitMs = 5000 } = {}) {
     const context = this.automation.page?.context();
     if (!context) return { found: false, reason: 'no browser context' };
     const started = Date.now();
@@ -4277,12 +4289,21 @@ class CinemaVideoAutomation extends KlingAutomation {
       firstRead = false;
       const rows = await this._readCinemaCreditLedger(context, ledgerWaitMs);
       lastRows = rows;
-      const row = this._findMatchingCinemaRefundRow(rows, { expectedCost, clickedAt, baselineSignatures });
-      if (row) return { found: true, row };
+      const row = this._findMatchingCinemaRefundRow(rows, { expectedCost, clickedAt, confirmedSpendRow, baselineSignatures });
+      if (row) {
+        const clickedMs = this._parseCinemaSubmitDate(clickedAt);
+        const spendMs = confirmedSpendRow?.dateText ? this._parseCreditLedgerDate(confirmedSpendRow.dateText) : NaN;
+        return { found: true, row, clickedAt, spendDateText: confirmedSpendRow?.dateText || null, clickedMs, spendMs };
+      }
       if (timeoutMs <= 0) break;
       await new Promise(resolve => setTimeout(resolve, 3000));
     }
-    return { found: false, rowsChecked: lastRows.length };
+    return {
+      found: false,
+      rowsChecked: lastRows.length,
+      clickedAt,
+      spendDateText: confirmedSpendRow?.dateText || null,
+    };
   }
 
   async _detectCinemaGenerationInProgress(page) {
@@ -4574,6 +4595,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     let submittedClickedAt = null;
     let submittedBaselineSignatures = [];
     let submittedAssetBaselineSignatures = [];
+    let submittedCreditSpendRow = null;
     let submitAttempt = 0;
     const maxSubmitAttempts = 3;
 
@@ -4662,6 +4684,12 @@ class CinemaVideoAutomation extends KlingAutomation {
             throw new Error(`[PRE-GEN] Generate click was not submitted after ${maxSubmitAttempts} attempts (${creditConfirmation.reason})`);
           }
         }
+        if (creditConfirmation.ok) {
+          submittedCreditSpendRow = creditConfirmation.row || null;
+          if (submittedCreditSpendRow?.dateText) {
+            this.log(`[CINEMA-VIDEO] Current submit spend anchor: click=${clickedAt.toISOString()}, ledger=${submittedCreditSpendRow.dateText}`);
+          }
+        }
         if (creditConfirmation.ok && typeof onGenClicked === 'function') {
           try { onGenClicked(creditCost); } catch (_) {}
         }
@@ -4686,6 +4714,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     let settledPolls = 0;
     let nextAssetProbeIndex = 0;
     let lastRefundLedgerCheckAt = 0;
+    let visibleRefundedPolls = 0;
     this.log(`Cinema Studio generation submitted; polling UI lifecycle up to ${Math.round(maxWaitMs / 60000)}min before Asset Library recovery (direct UI video-source download disabled for identity safety)`);
     let lastSeenSrc = initialFirstSrc;
     while (Date.now() - startedAt < maxWaitMs) {
@@ -4693,7 +4722,8 @@ class CinemaVideoAutomation extends KlingAutomation {
       const elapsedMs = Date.now() - startedAt;
       const lifecycle = await this._detectCinemaGenerationLifecycle(page);
       if (lifecycle.state === 'failed_refunded') {
-        throw new CinemaRefundedFailureError(`CINEMA_REFUNDED_FAILURE: Cinema Studio failed and credits were refunded (${lifecycle.evidence || 'visible failure state'})`, lifecycle.evidence);
+        visibleRefundedPolls++;
+        this.log(`[CINEMA-VIDEO] Visible Failed/Credits refunded text after ${Math.round(elapsedMs / 1000)}s (${visibleRefundedPolls} poll(s)); treating as stale-prone UI evidence until the current-submit usage ledger confirms a refund`, 'warn');
       }
       if (submittedClickedAt && elapsedMs >= 60000 && Date.now() - lastRefundLedgerCheckAt > 120000) {
         lastRefundLedgerCheckAt = Date.now();
@@ -4701,13 +4731,14 @@ class CinemaVideoAutomation extends KlingAutomation {
           const refund = await this.findCinemaRefundForSubmit({
             expectedCost: creditCost,
             clickedAt: submittedClickedAt,
+            confirmedSpendRow: submittedCreditSpendRow,
             baselineSignatures: submittedBaselineSignatures,
             timeoutMs: 0,
             ledgerWaitMs: 4000,
           });
           if (refund?.found) {
             const row = refund.row;
-            throw new CinemaRefundedFailureError(`CINEMA_REFUNDED_FAILURE: Cinema Studio usage ledger shows refunded submit (${row.cost ?? 'unknown'} credits, ${row.dateText})`, row);
+            throw new CinemaRefundedFailureError(`CINEMA_REFUNDED_FAILURE: Cinema Studio usage ledger shows current-submit refund (${row.cost ?? 'unknown'} credits, refund=${row.dateText}, click=${submittedClickedAt.toISOString()}, spend=${submittedCreditSpendRow?.dateText || 'unknown'})`, { ...row, source: 'ledger-current-submit' });
           }
         } catch (refundErr) {
           if (refundErr.code === 'CINEMA_REFUNDED_FAILURE') throw refundErr;
@@ -4717,6 +4748,9 @@ class CinemaVideoAutomation extends KlingAutomation {
       if (lifecycle.state === 'active') {
         settledPolls = 0;
         this.log(`[CINEMA-VIDEO] Generation still active after ${Math.round(elapsedMs / 1000)}s (${lifecycle.evidence || 'Processing/Generating'})`);
+      } else if (lifecycle.state === 'failed_refunded') {
+        settledPolls = 0;
+        this.log(`[CINEMA-VIDEO] Waiting despite visible refund text after ${Math.round(elapsedMs / 1000)}s; Asset Library probes and scoped ledger proof remain authoritative`);
       } else if (elapsedMs >= minEarlyRecoveryMs && lifecycle.state === 'settled') {
         settledPolls++;
         this.log(`[CINEMA-VIDEO] UI appears settled after ${Math.round(elapsedMs / 1000)}s (${settledPolls}/2): ${lifecycle.evidence || 'no active label'}`);
