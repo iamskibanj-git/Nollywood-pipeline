@@ -9647,8 +9647,13 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         if (i > 0 || generated > 0) {
           this.log(`[CINEMATIC] Recreating browser context before ${clipId}...`);
           try {
-            await this.automation.recreateContext();
+            await this.automation.recreateContext({ label: `before ${clipId}` });
           } catch (ctxErr) {
+            if (ctxErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' ||
+                ctxErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED') ||
+                ctxErr.message?.includes('SESSION_EXPIRED')) {
+              throw ctxErr;
+            }
             this.log(`[CINEMATIC] Context recreate failed: ${ctxErr.message.split('\n')[0]} — proceeding anyway`, 'warn');
           }
         }
@@ -9977,7 +9982,16 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             } else {
               // Cinema Studio and browser-dead/post-click retry paths need a clean page.
               this.log(`[CINEMATIC] Recreating browser context for ${clipId} retry...`);
-              try { await this.automation.recreateContext(); } catch (_) {}
+              try {
+                await this.automation.recreateContext({ label: `${clipId} retry` });
+              } catch (ctxErr) {
+                if (ctxErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' ||
+                    ctxErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED') ||
+                    ctxErr.message?.includes('SESSION_EXPIRED')) {
+                  throw ctxErr;
+                }
+                this.log(`[CINEMATIC] ${clipId}: retry context recreate failed: ${ctxErr.message.split('\n')[0]} - proceeding anyway`, 'warn');
+              }
             }
 
             const retryResult = await videoAutomation.generateClip({
@@ -10125,7 +10139,16 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
             this.log(`[CINEMATIC] ${clipId}: no submitted generation proof after failure — clearing prompt metadata and retrying same clip cleanly (cycle ${failureCycle}${cooloffMs ? `, cooloff ${Math.round(cooloffMs / 1000)}s` : ''})`, 'warn');
             if (cooloffMs) await new Promise(r => setTimeout(r, cooloffMs));
             if (this.cancelled) return;
-            try { await this.automation.recreateContext(); } catch (_) {}
+            try {
+              await this.automation.recreateContext({ label: `${clipId} clean retry` });
+            } catch (ctxErr) {
+              if (ctxErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' ||
+                  ctxErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED') ||
+                  ctxErr.message?.includes('SESSION_EXPIRED')) {
+                throw ctxErr;
+              }
+              this.log(`[CINEMATIC] ${clipId}: clean-retry context recreate failed: ${ctxErr.message.split('\n')[0]} - proceeding anyway`, 'warn');
+            }
             i--;
             continue;
           }

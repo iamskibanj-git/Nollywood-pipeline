@@ -332,6 +332,11 @@ class HiggsFieldAutomation {
         return;
       }
     } catch (nuclearErr) {
+      if (nuclearErr.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' ||
+          nuclearErr.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED') ||
+          nuclearErr.message?.includes('SESSION_EXPIRED')) {
+        throw nuclearErr;
+      }
       console.warn(`[${label}] Nuclear recovery failed: ${nuclearErr.message}`);
     }
 
@@ -354,6 +359,29 @@ class HiggsFieldAutomation {
     }
   }
 
+  async _verifySessionAfterContextRecreate(label = 'context reset') {
+    const page = this.page;
+    if (!page || page.isClosed?.()) {
+      throw new Error(`SESSION_EXPIRED: Higgsfield page unavailable after browser context reset (${label}). Please log into Higgsfield AI in the browser, then click Resume.`);
+    }
+
+    console.log(`[CTX] Verifying Higgsfield session after ${label}...`);
+    try {
+      await page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(2500);
+    } catch (navErr) {
+      throw new Error(`SESSION_EXPIRED: Could not load Higgsfield after browser context reset (${label}): ${navErr.message.split('\n')[0]}`);
+    }
+
+    await this.assertNoVerificationRequired?.(`after ${label}`);
+    const loggedIn = await this.isLoggedIn();
+    if (!loggedIn) {
+      console.warn('[CTX] Session expired after context reset - pausing before generation setup');
+      throw new Error(`SESSION_EXPIRED: Higgsfield session expired after browser context reset (${label}). Please log into Higgsfield AI in the browser, then click Resume.`);
+    }
+    console.log(`[CTX] Session verified after context reset (${label})`);
+  }
+
   /**
    * Tear down the current page + context and create a fresh one with the same
    * cookies/auth state. This is the ONLY guaranteed way to clear all React state
@@ -362,8 +390,8 @@ class HiggsFieldAutomation {
    * Use this between video clip generations to avoid cross-contamination.
    * Cookies are preserved so login persists.
    */
-  async recreateContext() {
-    console.log('[CTX] Recreating browser context for clean state...');
+  async recreateContext({ verifySession = true, label = 'context reset' } = {}) {
+    console.log(`[CTX] Recreating browser context for clean state (${label})...`);
 
     let storageState = null;
     // Capture current cookies/auth before tearing down (if page is still alive)
@@ -471,6 +499,10 @@ class HiggsFieldAutomation {
     this.page.on('download', async (download) => {
       this._lastDownload = download;
     });
+
+    if (verifySession) {
+      await this._verifySessionAfterContextRecreate(label);
+    }
 
     console.log('[CTX] ✓ Fresh context created');
   }
@@ -6110,6 +6142,11 @@ class HiggsFieldAutomation {
     try {
       await this.recreateContext();
     } catch (e) {
+      if (e.code === 'HIGGSFIELD_VERIFICATION_REQUIRED' ||
+          e.message?.includes('HIGGSFIELD_VERIFICATION_REQUIRED') ||
+          e.message?.includes('SESSION_EXPIRED')) {
+        throw e;
+      }
       console.warn(`[IMG RECOVERY] Context recreate failed: ${e.message}`);
       return null;
     }
