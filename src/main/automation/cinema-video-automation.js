@@ -4071,65 +4071,134 @@ class CinemaVideoAutomation extends KlingAutomation {
     return false;
   }
 
+  async _refreshProjectPageAndVerifyElementAbsent(name, options = {}) {
+    const normalized = String(name || '').trim().replace(/^@/, '');
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) throw new Error(`Cannot refresh page while verifying @${normalized}: browser page is closed`);
+
+    await this._closeOpenElementDetail().catch(() => {});
+    await this._clearElementsPickerSearch().catch(() => {});
+    await this._closePickerAndReturnToComposer().catch(() => {});
+
+    const projectUrl = options.projectUrl || null;
+    if (projectUrl) {
+      this.log(`Refreshing project page before verifying @${normalized} deletion`);
+      await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } else {
+      this.log(`Reloading page before verifying @${normalized} deletion`);
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+    await page.waitForTimeout(Math.max(1000, Number(options.settleMs) || 3000));
+    await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+    await this._ensureElementsPickerOpen();
+    const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
+    if (searchFiltered) this.log(`Filtered refreshed Elements picker to @${normalized} for delete verification`);
+    const timeoutMs = Math.max(2000, Number(options.timeoutMs) || 12000);
+    const card = await this._waitForElementCard(normalized, timeoutMs).catch(() => null);
+    const proof = card ? await this._snapshotElementCardProof(card).catch(() => ({})) : null;
+    await this._clearElementsPickerSearch().catch(() => {});
+    await this._closePickerAndReturnToComposer().catch(() => {});
+    return { absent: !card, proof };
+  }
+
   async deleteElementFromPicker(name, options = {}) {
     const normalized = String(name || '').trim().replace(/^@/, '');
     if (!normalized) throw new Error('deleteElementFromPicker: element name required');
     const requireNotEligible = options.requireNotEligible !== false;
-    const page = this.automation.page;
-    this.invalidateElementEligibility(normalized);
-    await this._closePickerAndReturnToComposer().catch(() => {});
-    await this._ensureElementsPickerOpen();
-    const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
-    if (searchFiltered) this.log(`Filtered Elements picker to @${normalized} before delete confirmation`);
-    const card = await this._waitForElementCard(normalized, 45000);
-    if (!card) {
-      this.log(`Element @${normalized} not visible for delete; treating as already absent`);
+    const refreshAfterDelete = options.refreshAfterDelete === true;
+    const deleteVerifyRetries = Math.max(0, Math.min(2, Number(options.deleteVerifyRetries) || 0));
+    const projectUrl = options.projectUrl || null;
+    const freshVerifyTimeoutMs = Math.max(2000, Number(options.freshVerifyTimeoutMs) || 12000);
+    const notifyProgress = async (status, detail = {}) => {
+      if (typeof options.onProgress !== 'function') return;
+      try {
+        await options.onProgress(status, detail);
+      } catch (err) {
+        this.log(`Delete progress callback failed for @${normalized}: ${err.message}`, 'warn');
+      }
+    };
+
+    for (let attempt = 0; attempt <= deleteVerifyRetries; attempt++) {
+      if (attempt > 0) {
+        this.log(`Retrying safe delete for @${normalized} from refreshed page (attempt ${attempt + 1}/${deleteVerifyRetries + 1})`);
+        await notifyProgress('delete-retry', { attempt: attempt + 1, maxAttempts: deleteVerifyRetries + 1 });
+      }
+
+      const page = this.automation.page;
+      this.invalidateElementEligibility(normalized);
+      await this._closePickerAndReturnToComposer().catch(() => {});
+      await this._ensureElementsPickerOpen();
+      const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
+      if (searchFiltered) this.log(`Filtered Elements picker to @${normalized} before delete confirmation`);
+      const card = await this._waitForElementCard(normalized, 45000);
+      if (!card) {
+        this.log(`Element @${normalized} not visible for delete; treating as already absent`);
+        await this._clearElementsPickerSearch().catch(() => {});
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        return { deleted: false, alreadyMissing: true, proof: null };
+      }
+      await this._centerElementCardInPicker(normalized).catch(() => null);
+      const centeredCard = await this._findElementCard(normalized).catch(() => null) || card;
+      await this._hoverElementCardControls(centeredCard);
+      const proof = await this._snapshotElementCardProof(centeredCard).catch(() => ({}));
+      const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
+      const cardStatus = await this._readElementCardStatus(centeredCard, {
+        hoverMs: 1000,
+        useFallbackStatus: false,
+      }).catch(() => 'unknown');
+      if (requireNotEligible && cardStatus !== 'not-eligible') {
+        await this._clearElementsPickerSearch().catch(() => {});
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        throw new Error(`Refusing to delete @${normalized}: card status is ${cardStatus || 'unknown'}, not not-eligible${proofText}`);
+      }
+
+      const detail = await this._openElementDetailFromCard(normalized, centeredCard);
+      if (detail.nameNormalized !== normalized.toLowerCase()) {
+        await this._closeOpenElementDetail().catch(() => {});
+        await this._clearElementsPickerSearch().catch(() => {});
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        throw new Error(`Refusing to delete @${normalized}: View modal confirmed "${detail.name || detail.nameNormalized || 'unknown'}"`);
+      }
+
+      const deleteButton = await this._findOpenElementDetailButton('Delete');
+      if (!deleteButton) {
+        await this._closeOpenElementDetail().catch(() => {});
+        await this._clearElementsPickerSearch().catch(() => {});
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        throw new Error(`Detail modal Delete button not found for @${normalized}`);
+      }
+      this.log(`Deleting element @${normalized} from confirmed detail modal (status=${cardStatus})${proofText}`);
+      await page.mouse.click(deleteButton.x, deleteButton.y);
+      await page.waitForTimeout(1000);
+      await this._confirmElementDeleteIfNeeded();
+      await page.waitForTimeout(2500);
+
+      let gone = false;
+      if (refreshAfterDelete) {
+        await notifyProgress('delete-verifying', { attempt: attempt + 1, maxAttempts: deleteVerifyRetries + 1 });
+        const freshProof = await this._refreshProjectPageAndVerifyElementAbsent(normalized, {
+          projectUrl,
+          timeoutMs: freshVerifyTimeoutMs,
+        });
+        gone = !!freshProof.absent;
+        if (!gone && attempt < deleteVerifyRetries) {
+          const retryProofText = freshProof.proof?.text ? ` proof="${freshProof.proof.text.slice(0, 180)}"` : '';
+          this.log(`Element @${normalized} still visible after refreshed delete verification; retrying safe delete${retryProofText}`);
+          continue;
+        }
+      } else {
+        await this._ensureElementsPickerOpen().catch(() => false);
+        gone = await this._waitForElementDeleted(normalized, 45000);
+      }
+
       await this._clearElementsPickerSearch().catch(() => {});
       await this._closePickerAndReturnToComposer().catch(() => {});
-      return { deleted: false, alreadyMissing: true, proof: null };
-    }
-    await this._centerElementCardInPicker(normalized).catch(() => null);
-    const centeredCard = await this._findElementCard(normalized).catch(() => null) || card;
-    await this._hoverElementCardControls(centeredCard);
-    const proof = await this._snapshotElementCardProof(centeredCard).catch(() => ({}));
-    const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
-    const cardStatus = await this._readElementCardStatus(centeredCard, {
-      hoverMs: 1000,
-      useFallbackStatus: false,
-    }).catch(() => 'unknown');
-    if (requireNotEligible && cardStatus !== 'not-eligible') {
-      await this._clearElementsPickerSearch().catch(() => {});
-      await this._closePickerAndReturnToComposer().catch(() => {});
-      throw new Error(`Refusing to delete @${normalized}: card status is ${cardStatus || 'unknown'}, not not-eligible${proofText}`);
+      if (!gone) throw new Error(`Element @${normalized} was still visible after delete`);
+      this.invalidateElementEligibility(normalized);
+      return { deleted: true, alreadyMissing: false, proof: { ...proof, cardStatus, detail } };
     }
 
-    const detail = await this._openElementDetailFromCard(normalized, centeredCard);
-    if (detail.nameNormalized !== normalized.toLowerCase()) {
-      await this._closeOpenElementDetail().catch(() => {});
-      await this._clearElementsPickerSearch().catch(() => {});
-      await this._closePickerAndReturnToComposer().catch(() => {});
-      throw new Error(`Refusing to delete @${normalized}: View modal confirmed "${detail.name || detail.nameNormalized || 'unknown'}"`);
-    }
-
-    const deleteButton = await this._findOpenElementDetailButton('Delete');
-    if (!deleteButton) {
-      await this._closeOpenElementDetail().catch(() => {});
-      await this._clearElementsPickerSearch().catch(() => {});
-      await this._closePickerAndReturnToComposer().catch(() => {});
-      throw new Error(`Detail modal Delete button not found for @${normalized}`);
-    }
-    this.log(`Deleting element @${normalized} from confirmed detail modal (status=${cardStatus})${proofText}`);
-    await page.mouse.click(deleteButton.x, deleteButton.y);
-    await page.waitForTimeout(1000);
-    await this._confirmElementDeleteIfNeeded();
-    await page.waitForTimeout(2500);
-    await this._ensureElementsPickerOpen().catch(() => false);
-    const gone = await this._waitForElementDeleted(normalized, 45000);
-    await this._clearElementsPickerSearch().catch(() => {});
-    await this._closePickerAndReturnToComposer().catch(() => {});
-    if (!gone) throw new Error(`Element @${normalized} was still visible after delete`);
-    this.invalidateElementEligibility(normalized);
-    return { deleted: true, alreadyMissing: false, proof: { ...proof, cardStatus, detail } };
+    throw new Error(`Element @${normalized} was still visible after delete`);
   }
 
   async isElementVisibleInPicker(name, options = {}) {

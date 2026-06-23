@@ -11758,14 +11758,17 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     videoAutomation.invalidateElementEligibility?.(names);
     this._clearCinematicElementProofsForProtectedReferenceRefresh(projectId);
 
+    const protectedReferenceProjectUrl = this.state.higgsfield_project_id
+      ? `https://higgsfield.ai/generate?projectId=${this.state.higgsfield_project_id}`
+      : null;
+
     try {
       await this._ensureHiggsfieldSessionAlive('protected-reference element refresh bubble');
       await this.automation.ensureBrowser();
       const page = this.automation.page;
-      if (page && !page.isClosed?.() && this.state.higgsfield_project_id) {
-        const projectUrl = `https://higgsfield.ai/generate?projectId=${this.state.higgsfield_project_id}`;
-        this.log(`[CINEMATIC] [PROTECTED-REF] Entering isolated element refresh bubble: ${projectUrl}`);
-        await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      if (page && !page.isClosed?.() && protectedReferenceProjectUrl) {
+        this.log(`[CINEMATIC] [PROTECTED-REF] Entering isolated element refresh bubble: ${protectedReferenceProjectUrl}`);
+        await page.goto(protectedReferenceProjectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await page.waitForTimeout(2500);
         await this._holdForOverlayClearance('protected-reference element refresh bubble');
       }
@@ -11785,7 +11788,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
         phase: 'delete-all',
       });
       try {
-        const deleteResult = await videoAutomation.deleteElementFromPicker(name, { requireNotEligible: false });
+        const deleteResult = await videoAutomation.deleteElementFromPicker(name, {
+          requireNotEligible: false,
+          refreshAfterDelete: true,
+          projectUrl: protectedReferenceProjectUrl,
+          deleteVerifyRetries: 1,
+          freshVerifyTimeoutMs: 12000,
+          onProgress: (status, detail = {}) => this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+            status,
+            phase: 'delete-all',
+            ...detail,
+          }),
+        });
         if (deleteResult.deleted) {
           deleted.push(name);
           this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
