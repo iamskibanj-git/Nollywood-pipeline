@@ -11654,11 +11654,18 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   _buildProtectedReferenceElementRefreshSpecs(projectId, projectDir, names = []) {
     const specs = [];
     const unresolved = [];
+    const isArchivePath = (filePath) =>
+      String(filePath || '').toLowerCase().split(/[\\/]+/).includes('.archive');
     for (const rawName of names) {
       const name = this._normalizeElementName(rawName);
       const spec = this._findCinemaElementRepairSpec(projectId, projectDir, name);
       if (!spec) {
         unresolved.push({ name, reason: `No local portrait/grid spec found for @${name}` });
+        continue;
+      }
+      const archiveSource = [spec.portraitPath, spec.gridPath].find(isArchivePath);
+      if (archiveSource) {
+        unresolved.push({ name, reason: `Resolved archive asset path for @${name}; refusing protected-reference rebuild from ${archiveSource}` });
         continue;
       }
       if (!spec.gridPath) {
@@ -12751,31 +12758,55 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   _findCinemaElementRepairSpec(projectId, projectDir, elementName) {
     const fs = require('fs');
     const path = require('path');
-    const cleanName = String(elementName || '').replace(/^@/, '').toLowerCase();
-    const assets = db.getAssets(projectId);
+    const cleanName = this._normalizeElementName(elementName);
+    const assets = db.getAssets(projectId) || [];
     const projectRoot = path.resolve(projectDir).toLowerCase();
+    const normalizeBase = (value) => String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^@+/, '')
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '');
     const inProject = (filePath) => {
       if (!filePath) return false;
       const resolved = path.resolve(filePath).toLowerCase();
       return resolved === projectRoot || resolved.startsWith(projectRoot + path.sep.toLowerCase());
     };
+    const isArchivePath = (filePath) => {
+      if (!filePath) return false;
+      return path.resolve(filePath).toLowerCase().split(/[\\/]+/).includes('.archive');
+    };
+    const isUsableFile = (filePath) =>
+      !!filePath && fs.existsSync(filePath) && inProject(filePath) && !isArchivePath(filePath);
+    const latestUsableAsset = (predicate) => assets
+      .filter(a => a.status !== 'archived' && predicate(a) && isUsableFile(a.file_path))
+      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0] || null;
+    const firstMetadataAsset = (predicate) => assets
+      .filter(predicate)
+      .sort((a, b) => {
+        const aArchived = a.status === 'archived' ? 1 : 0;
+        const bArchived = b.status === 'archived' ? 1 : 0;
+        return aArchived - bArchived || Number(b.id || 0) - Number(a.id || 0);
+      })[0] || null;
 
-    const gridAsset = assets.find(a =>
+    let gridAsset = latestUsableAsset(a =>
       a.type === 'character_grid'
-      && String(a.element_name || '').toLowerCase() === cleanName
-      && a.file_path
-      && fs.existsSync(a.file_path)
-      && inProject(a.file_path)
+      && this._normalizeElementName(a.element_name) === cleanName
     );
-    const directPortrait = assets.find(a =>
+    const directPortrait = latestUsableAsset(a =>
       a.type === 'portrait'
-      && String(a.element_name || '').toLowerCase() === cleanName
-      && a.file_path
-      && fs.existsSync(a.file_path)
-      && inProject(a.file_path)
+      && this._normalizeElementName(a.element_name) === cleanName
     );
 
-    const unitKey = gridAsset?.character_id || directPortrait?.character_id || '';
+    let unitKey = gridAsset?.character_id || directPortrait?.character_id || '';
+    if (!unitKey) {
+      const metadataAsset = firstMetadataAsset(a =>
+        ['portrait', 'character_grid'].includes(a.type)
+        && this._normalizeElementName(a.element_name) === cleanName
+        && a.character_id
+      );
+      unitKey = metadataAsset?.character_id || '';
+    }
     let characterId = unitKey;
     let outfitId = null;
     const outfitMatch = String(unitKey).match(/^(.+?)_(o\d+)$/i);
@@ -12784,30 +12815,95 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       outfitId = outfitMatch[2].toLowerCase();
     }
 
+    const bible = this.state.script?.character_bible || this.state.script?.characters || [];
+    const settings = (() => {
+      try { return this._getProjectSettings(projectId); } catch (_) { return {}; }
+    })();
+    const suffix = normalizeBase(settings.element_name_suffix || this.state.elementSuffix || '');
+    const findCharacterByBase = (base) => {
+      const normalizedBase = normalizeBase(base);
+      return bible.find(c =>
+        c.id === normalizedBase
+        || normalizeBase(c.element_name_hint) === normalizedBase
+        || normalizeBase(c.description_label).replace(/^(the|a|an)_/i, '') === normalizedBase
+      );
+    };
+    const applyInferred = (info) => {
+      if (!info || unitKey) return;
+      const character = info.character || findCharacterByBase(info.baseName);
+      if (!character?.id) return;
+      characterId = character.id;
+      outfitId = info.outfitId || null;
+      unitKey = outfitId ? `${characterId}_${outfitId}` : characterId;
+    };
+
+    for (const outfitMap of [settings._outfitElements, this.state._outfitElements]) {
+      if (unitKey || !outfitMap) continue;
+      for (const [baseName, outfits] of Object.entries(outfitMap || {})) {
+        for (const [rawOutfitId, mappedName] of Object.entries(outfits || {})) {
+          if (this._normalizeElementName(mappedName) === cleanName) {
+            applyInferred({ baseName, outfitId: String(rawOutfitId || '').toLowerCase() || null });
+            break;
+          }
+        }
+        if (unitKey) break;
+      }
+    }
+
+    if (!unitKey) {
+      for (const character of bible) {
+        const bases = [
+          normalizeBase(character.element_name_hint),
+          normalizeBase(character.description_label).replace(/^(the|a|an)_/i, ''),
+          normalizeBase(character.id),
+        ].filter(Boolean);
+        const outfits = Array.isArray(character.outfits) && character.outfits.length > 0
+          ? character.outfits.map(o => String(o.outfit_id || '').toLowerCase()).filter(Boolean)
+          : [null];
+        for (const baseName of [...new Set(bases)]) {
+          for (const candidateOutfitId of outfits) {
+            const expected = candidateOutfitId
+              ? `${baseName}_${candidateOutfitId}${suffix ? '_' + suffix : ''}`
+              : `${baseName}${suffix ? '_' + suffix : ''}`;
+            if (expected === cleanName) {
+              applyInferred({ character, outfitId: candidateOutfitId });
+              break;
+            }
+          }
+          if (unitKey) break;
+        }
+        if (unitKey) break;
+      }
+    }
+
+    if (!gridAsset && unitKey) {
+      gridAsset = latestUsableAsset(a =>
+        a.type === 'character_grid'
+        && a.character_id === unitKey
+      );
+    }
+
     let portraitPath = directPortrait?.file_path || null;
     if (!portraitPath && outfitId && outfitId !== 'o1') {
       const outfitPortraitPath = path.join(projectDir, 'assets', 'portraits', `portrait_${unitKey}.png`);
-      if (fs.existsSync(outfitPortraitPath) && inProject(outfitPortraitPath)) portraitPath = outfitPortraitPath;
+      if (isUsableFile(outfitPortraitPath)) portraitPath = outfitPortraitPath;
     }
     if (!portraitPath && characterId) {
-      const masterPortrait = assets.find(a =>
+      const masterPortrait = latestUsableAsset(a =>
         a.type === 'portrait'
         && a.character_id === characterId
-        && a.file_path
-        && fs.existsSync(a.file_path)
-        && inProject(a.file_path)
       );
       portraitPath = masterPortrait?.file_path || null;
     }
 
     if (!portraitPath) {
       const fallbackPortrait = path.join(projectDir, 'assets', 'portraits', `portrait_${characterId || unitKey}.png`);
-      if (fs.existsSync(fallbackPortrait) && inProject(fallbackPortrait)) portraitPath = fallbackPortrait;
+      if (isUsableFile(fallbackPortrait)) portraitPath = fallbackPortrait;
     }
 
-    const character = (this.state.script?.character_bible || []).find(c => c.id === characterId)
-      || (this.state.script?.character_bible || []).find(c => {
-        const hint = String(c.element_name_hint || '').toLowerCase().replace(/^@/, '');
+    const character = bible.find(c => c.id === characterId)
+      || bible.find(c => {
+        const hint = normalizeBase(c.element_name_hint);
         return hint && cleanName.includes(hint);
       });
     const outfit = character?.outfits?.find(o => String(o.outfit_id || '').toLowerCase() === outfitId);
@@ -12817,10 +12913,14 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       })
       : cleanName;
 
-    if (!portraitPath || !fs.existsSync(portraitPath) || !inProject(portraitPath)) return null;
-    const gridPath = gridAsset?.file_path && fs.existsSync(gridAsset.file_path) && inProject(gridAsset.file_path)
+    if (!portraitPath || !isUsableFile(portraitPath)) return null;
+    let gridPath = gridAsset?.file_path && isUsableFile(gridAsset.file_path)
       ? gridAsset.file_path
       : null;
+    if (!gridPath && unitKey) {
+      const canonicalGridPath = path.join(projectDir, 'assets', 'grids', `${unitKey}_grid.png`);
+      if (isUsableFile(canonicalGridPath)) gridPath = canonicalGridPath;
+    }
 
     return {
       name: cleanName,
