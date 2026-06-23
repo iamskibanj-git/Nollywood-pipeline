@@ -11591,6 +11591,129 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     }
   }
 
+  _isTransientProtectedReferenceEligibilityStatus(status) {
+    const text = String(status || '');
+    if (!/^check-error:/i.test(text)) return false;
+    return /composer @ element button not found|project elements button not found|elements picker|elements panel|elements modal|target page|context or browser has been closed|cannot read properties of null|keyboard|page\.waitfortimeout/i
+      .test(text);
+  }
+
+  _hasCompletedProtectedReferenceCreateProof(record, names = []) {
+    const expected = names.map(name => this._normalizeElementName(name)).filter(Boolean);
+    if (expected.length === 0) return false;
+    const recreated = new Set((Array.isArray(record?.recreated) ? record.recreated : [])
+      .map(item => this._normalizeElementName(item?.name || item))
+      .filter(Boolean));
+    return expected.every(name => recreated.has(name));
+  }
+
+  _shouldRetryProtectedReferenceEligibilityOnly(record, names = []) {
+    const status = String(record?.status || '').trim();
+    if (!['eligibility-failed', 'eligibility-pending'].includes(status)) return false;
+    if (!this._hasCompletedProtectedReferenceCreateProof(record, names)) return false;
+    const eligibility = Array.isArray(record?.eligibility) ? record.eligibility : [];
+    if (eligibility.length === 0) return true;
+    const failed = eligibility.filter(item => String(item?.status || '').trim() !== 'eligible');
+    return failed.length === 0 || failed.every(item => this._isTransientProtectedReferenceEligibilityStatus(item?.status));
+  }
+
+  async _retryProtectedReferenceEligibilityOnly(projectId, videoAutomation, names = [], record = {}) {
+    const normalizedNames = [...new Set(names.map(name => this._normalizeElementName(name)).filter(Boolean))].sort();
+    if (normalizedNames.length === 0) {
+      return { ok: false, reason: 'no managed cinematic element names found for protected-reference eligibility retry' };
+    }
+
+    this.log(`[CINEMATIC] [PROTECTED-REF] Rechecking eligibility for ${normalizedNames.length} refreshed element(s) without deleting/recreating; prior failure was transient picker UI.`);
+
+    const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+    const elements = new HiggsfieldElements({
+      automation: this.automation,
+      logger: (m) => this.log(`[CINEMATIC] [PROTECTED-REF] ${m}`),
+      projectId: this.state.higgsfield_project_id,
+    });
+
+    elements.invalidateCache();
+    const modalProof = await elements.confirmExistingElements(normalizedNames, {
+      timeoutMs: 60000,
+      label: 'Protected-reference refreshed Elements resume proof',
+    });
+    if (modalProof.missing?.length > 0) {
+      const reason = `Elements modal missing refreshed element(s) during eligibility resume: ${modalProof.missing.map(n => '@' + n).join(', ')}`;
+      this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+        status: 'proof-failed',
+        reason,
+        names: normalizedNames,
+        missing: modalProof.missing,
+        resumeRequired: true,
+      });
+      return { ok: false, reason, names: normalizedNames, missing: modalProof.missing };
+    }
+    this._persistCinematicElementModalProof(projectId, normalizedNames, 'protected-reference-refresh-resume');
+
+    videoAutomation.invalidateElementEligibility?.(normalizedNames);
+    const eligibility = [];
+    for (const name of normalizedNames) {
+      await this.checkPause();
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status: 'eligibility-pending',
+        phase: 'eligibility-resume',
+      });
+      const check = await videoAutomation.checkElementEligibility(name).catch(err => ({
+        status: `check-error: ${err.message}`,
+        proof: null,
+      }));
+      const status = check.status || 'unknown';
+      eligibility.push({ name, status });
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status,
+        phase: 'eligibility-resume',
+      });
+    }
+
+    const failedEligibility = eligibility.filter(item => item.status !== 'eligible');
+    if (failedEligibility.length > 0) {
+      const reason = `Refreshed element(s) still not eligible after resume check: ${failedEligibility.map(item => '@' + item.name + '=' + item.status).join(', ')}`;
+      const transientUi = failedEligibility.every(item => this._isTransientProtectedReferenceEligibilityStatus(item.status));
+      this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+        strategy: 'delete-all-then-recreate',
+        attempts: Math.max(0, Number(record?.attempts) || 0),
+        maxAttempts: Math.max(1, Number(record?.maxAttempts) || 2),
+        status: transientUi ? 'eligibility-pending' : 'eligibility-failed',
+        clipId: record?.clipId || null,
+        reason,
+        names: normalizedNames,
+        deleted: Array.isArray(record?.deleted) ? record.deleted : [],
+        absent: Array.isArray(record?.absent) ? record.absent : [],
+        recreated: Array.isArray(record?.recreated) ? record.recreated : [],
+        eligibility,
+        resumeRequired: true,
+      });
+      return { ok: false, reason, names: normalizedNames, eligibility, transientUi };
+    }
+
+    this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      strategy: 'delete-all-then-recreate',
+      attempts: Math.max(0, Number(record?.attempts) || 0),
+      maxAttempts: Math.max(1, Number(record?.maxAttempts) || 2),
+      status: 'refreshed',
+      clipId: record?.clipId || null,
+      reason: 'protected-reference-elements',
+      names: normalizedNames,
+      deleted: Array.isArray(record?.deleted) ? record.deleted : [],
+      absent: Array.isArray(record?.absent) ? record.absent : [],
+      recreated: Array.isArray(record?.recreated) ? record.recreated : [],
+      eligibility,
+      refreshedAt: new Date().toISOString(),
+      resumedAt: new Date().toISOString(),
+      resumeRequired: false,
+    });
+    db.logEvent(projectId, 'cinema_protected_reference_refresh_done', {
+      clipId: record?.clipId || null,
+      detail: `Eligibility resume confirmed ${normalizedNames.length} refreshed managed element(s) after transient picker failure`,
+    });
+    return { ok: true, names: normalizedNames, eligibility };
+  }
+
   async _resolvePendingCinemaProtectedReferenceRefresh(projectId, projectDir, videoAutomation, opts = {}) {
     let record = this._getCinemaProtectedReferenceRebuildRecord(projectId);
     if (!this._isPendingCinemaProtectedReferenceRefresh(record)) return true;
@@ -11601,6 +11724,38 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     db.logEvent(projectId, 'cinema_protected_reference_refresh_resume', {
       detail: `Resume detected pending protected-reference element refresh status=${record.status || 'unknown'} for ${names.length} element(s)`,
     });
+
+    if (this._shouldRetryProtectedReferenceEligibilityOnly(record, names)) {
+      const eligibilityResult = await this._retryProtectedReferenceEligibilityOnly(
+        projectId,
+        videoAutomation,
+        names,
+        record
+      ).catch(err => ({
+        ok: false,
+        reason: err.message,
+        transientUi: /composer @ element button not found|elements picker|target page|context or browser has been closed/i.test(err.message || ''),
+      }));
+      if (eligibilityResult?.ok) {
+        this.log(`[CINEMATIC] [PROTECTED-REF] Pending protected-reference eligibility completed on resume; video setup may continue.`);
+        return true;
+      }
+      if (eligibilityResult?.transientUi) {
+        const reason = eligibilityResult.reason || 'transient protected-reference eligibility picker failure';
+        this.log(`[CINEMATIC] [PROTECTED-REF] Eligibility-only resume still hit transient UI: ${reason}. Pausing without another delete/recreate cycle.`, 'error');
+        this.emit({
+          type: 'waiting',
+          gate: 'cinema-protected-reference-elements',
+          message: reason,
+        });
+        this.paused = true;
+        this.state.status = 'paused';
+        this.emit({ type: 'paused', reason: 'cinema-protected-reference-elements' });
+        await this.checkPause();
+        return false;
+      }
+      this.log(`[CINEMATIC] [PROTECTED-REF] Eligibility-only resume did not clear the refresh (${eligibilityResult?.reason || 'unknown'}); running next full refresh attempt if available.`, 'warn');
+    }
 
     const refreshResult = await this._rebuildCinemaElementsAfterProtectedReferenceBlock(
       projectId,

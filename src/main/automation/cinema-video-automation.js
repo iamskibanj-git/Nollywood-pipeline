@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const { KlingAutomation, parsePromptSegments } = require('./kling-automation');
+const { HiggsfieldElements } = require('./higgsfield-elements');
 
 const ELEMENT_ELIGIBILITY_CACHE_VERSION = 3;
 
@@ -56,7 +57,18 @@ class CinemaVideoAutomation extends KlingAutomation {
       ? onElementEligibilityUpdate
       : null;
     this._lastClipElementEligibility = { required: [], eligible: [] };
+    this._elementsModalHelper = null;
     this._hydrateElementEligibilityCache(elementEligibilityCache);
+  }
+
+  _getElementsModalHelper() {
+    if (!this._elementsModalHelper) {
+      this._elementsModalHelper = new HiggsfieldElements({
+        automation: this.automation,
+        logger: (m) => this.log(`[CINEMA-VIDEO] [ELEMENTS] ${m}`),
+      });
+    }
+    return this._elementsModalHelper;
   }
 
   _elementEligibilityCacheKey(name) {
@@ -2865,37 +2877,60 @@ class CinemaVideoAutomation extends KlingAutomation {
         }
         return false;
       };
-      const buttons = [...document.querySelectorAll('button')];
-      const explicitAt = buttons.map(b => ({
+      const visibleButton = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visibleButton);
+      const items = buttons.map(b => ({
           b,
           r: b.getBoundingClientRect(),
-          t: clean(b.textContent || b.getAttribute('aria-label') || ''),
+          t: clean(b.textContent || ''),
+          aria: clean(b.getAttribute('aria-label') || b.getAttribute('title') || ''),
+          hasSvg: !!b.querySelector('svg'),
         }))
-        .filter(o => o.r.y > vh * 0.60 && o.r.width > 20 && o.r.width < 70 && o.r.height > 20 && o.r.height < 70
-          && /^@$/i.test(o.t) && inCinemaComposer(o.b))
+        .filter(o => o.r.y > vh * 0.58 && inCinemaComposer(o.b));
+      const explicitAt = items
+        .filter(o => o.r.width > 20 && o.r.width < 70 && o.r.height > 20 && o.r.height < 70
+          && /^@$/i.test(o.t || o.aria))
         .sort((a, b) => b.r.x - a.r.x)[0];
       if (explicitAt) {
         return {
           x: Math.round(explicitAt.r.x + explicitAt.r.width / 2),
           y: Math.round(explicitAt.r.y + explicitAt.r.height / 2),
-          text: explicitAt.t,
+          text: explicitAt.t || explicitAt.aria,
         };
       }
-      const sound = buttons.map(b => ({ b, r: b.getBoundingClientRect(), t: clean(b.textContent || '') }))
-        .filter(o => o.r.y > vh * 0.60 && /^(On|Off)$/i.test(o.t))
-        .sort((a, b) => a.r.x - b.r.x).pop();
-      if (!sound) return null;
-      const candidates = [];
-      for (const b of buttons) {
-        const r = b.getBoundingClientRect();
-        const t = clean(b.textContent || b.getAttribute('aria-label') || '');
-        if (r.y > vh * 0.60 && r.x > sound.r.x && r.x < sound.r.x + 140
-            && r.width > 15 && r.width < 70 && r.height > 15 && r.height < 70
-            && inCinemaComposer(b)) {
-          candidates.push({ x: r.x, y: r.y, w: r.width, h: r.height, text: t });
-        }
-      }
-      candidates.sort((a, b) => a.x - b.x);
+
+      const model = items
+        .filter(o => /Cinema Studio\s*3\.5/i.test(o.t || o.aria))
+        .sort((a, b) => b.r.y - a.r.y || a.r.x - b.r.x)[0];
+      const plus = items
+        .filter(o => /^\+$/i.test(o.t || o.aria) && (!model || o.r.x < model.r.x))
+        .sort((a, b) => b.r.x - a.r.x)[0];
+      const candidates = items
+        .filter(o => o.r.width >= 18 && o.r.width <= 72 && o.r.height >= 18 && o.r.height <= 72)
+        .filter(o => {
+          if (model && plus) {
+            return o.r.x > plus.r.x + 2 && o.r.x < model.r.x - 2
+              && Math.abs((o.r.y + o.r.height / 2) - (model.r.y + model.r.height / 2)) < 24;
+          }
+          return /^@$/i.test(o.t || o.aria) || /element/i.test(o.aria);
+        })
+        .map(o => {
+          const label = `${o.t} ${o.aria}`.trim();
+          const score =
+            (/^@$/i.test(o.t || o.aria) ? 120 : 0) +
+            (/element/i.test(label) ? 90 : 0) +
+            (o.hasSvg ? 20 : 0) +
+            (model && plus ? 30 : 0) -
+            (/reference|upload|image|video|sound|audio|generate/i.test(label) ? 100 : 0);
+          return { x: o.r.x, y: o.r.y, w: o.r.width, h: o.r.height, text: o.t || o.aria, score };
+        })
+        .filter(o => o.score > 0)
+        .sort((a, b) => b.score - a.score || a.x - b.x);
       const c = candidates[0];
       return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), text: c.text } : null;
     });
@@ -2907,6 +2942,9 @@ class CinemaVideoAutomation extends KlingAutomation {
 
   async _isElementsPickerOpen() {
     const page = this.automation.page;
+    if (!page || page.isClosed?.()) return false;
+    const helperOpen = await this._getElementsModalHelper()._isElementsModalOpen(page).catch(() => false);
+    if (helperOpen) return true;
     return page.evaluate(() => {
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
       const visible = (el) => {
@@ -2950,39 +2988,57 @@ class CinemaVideoAutomation extends KlingAutomation {
     const maxOpenAttempts = Math.max(1, Math.min(4, Number(options.maxOpenAttempts) || 3));
     const projectUrl = options.projectUrl || null;
     const allowProjectFallback = options.allowProjectFallback !== false;
+    const preferProjectButton = options.preferProjectButton !== false;
+    const allowComposerFallback = options.allowComposerFallback !== false;
     let lastError = null;
 
-    for (let attempt = 1; attempt <= maxOpenAttempts; attempt++) {
+    const tryProjectButton = async (label) => {
+      if (!allowProjectFallback) return false;
       try {
-        await this._openElementsPickerViaAtButton();
+        await this._openElementsPickerViaProjectButton();
         if (await this._isElementsPickerOpen()) return true;
-        lastError = new Error('Composer @ click did not open Elements picker');
+        lastError = new Error('Project Elements button did not open Elements picker');
       } catch (err) {
         lastError = err;
-        this.log(`[CINEMA-VIDEO] Composer @ Elements picker open attempt ${attempt}/${maxOpenAttempts} failed: ${err.message}`, 'warn');
+        this.log(`[CINEMA-VIDEO] Project Elements picker open ${label} failed: ${err.message}`, 'warn');
       }
+      return false;
+    };
 
-      if (attempt < maxOpenAttempts) {
-        await this._closePickerAndReturnToComposer().catch(() => {});
-        await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
-        await page.waitForTimeout(1000 + attempt * 500);
-        if (projectUrl && attempt === maxOpenAttempts - 1) {
-          this.log(`[CINEMA-VIDEO] Refreshing project page before final composer @ Elements retry`);
-          await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { lastError = e; });
-          await page.waitForTimeout(2500);
+    if (preferProjectButton && await tryProjectButton('attempt 1/2')) return true;
+
+    if (allowComposerFallback) {
+      const composerAttempts = preferProjectButton ? Math.min(1, maxOpenAttempts) : maxOpenAttempts;
+      for (let attempt = 1; attempt <= composerAttempts; attempt++) {
+        try {
+          await this._openElementsPickerViaAtButton();
+          if (await this._isElementsPickerOpen()) return true;
+          lastError = new Error('Composer @ click did not open Elements picker');
+        } catch (err) {
+          lastError = err;
+          this.log(`[CINEMA-VIDEO] Composer @ Elements picker open attempt ${attempt}/${composerAttempts} failed: ${err.message}`, 'warn');
+        }
+
+        if (attempt < composerAttempts) {
+          await this._closePickerAndReturnToComposer().catch(() => {});
           await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+          await page.waitForTimeout(1000 + attempt * 500);
         }
       }
     }
 
     if (allowProjectFallback) {
-      try {
-        await this._openElementsPickerViaProjectButton();
-        if (await this._isElementsPickerOpen()) return true;
-      } catch (err) {
-        lastError = err;
-        this.log(`[CINEMA-VIDEO] Project Elements fallback failed: ${err.message}`, 'warn');
+      if (projectUrl && !preferProjectButton) {
+        this.log(`[CINEMA-VIDEO] Refreshing project page before project Elements retry`);
+        await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { lastError = e; });
+        await page.waitForTimeout(2500);
+        await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+      } else {
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+        await page.waitForTimeout(900);
       }
+      if (await tryProjectButton('retry 2/2')) return true;
     }
 
     const finalError = lastError || new Error('Elements picker did not open');
@@ -2991,42 +3047,11 @@ class CinemaVideoAutomation extends KlingAutomation {
   }
 
   async _openElementsPickerViaProjectButton() {
-    const page = this.automation.page;
-    const target = await page.evaluate(() => {
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const candidates = [...document.querySelectorAll('button, [role="button"], div')]
-        .map(el => {
-          const r = el.getBoundingClientRect();
-          const text = clean(el.innerText || el.textContent || '');
-          const aria = clean(el.getAttribute('aria-label') || '');
-          const inProjectControlBand = r.y > 60 && r.y < innerHeight * 0.40 && r.x > innerWidth * 0.38 && r.x < innerWidth * 0.82;
-          const score =
-            (inProjectControlBand ? 100 : 0) +
-            (/^Elements$/i.test(aria) ? 30 : 0) +
-            (/^Elements$/i.test(text) ? 20 : 0) +
-            (r.y < 60 ? -80 : 0) +
-            (r.width >= 30 && r.width <= 90 && r.height >= 28 && r.height <= 90 ? 15 : 0);
-          return { el, r, text, aria, score };
-        })
-        .filter(o =>
-          o.r.width >= 30 && o.r.width <= 160 &&
-          o.r.height >= 20 && o.r.height <= 100 &&
-          o.r.y > 40 && o.r.y < innerHeight * 0.45 &&
-          o.r.x > innerWidth * 0.35 && o.r.x < innerWidth * 0.85 &&
-          (/^Elements$/i.test(o.text) || /^Elements$/i.test(o.aria))
-        )
-        .sort((a, b) => b.score - a.score || a.r.y - b.r.y || a.r.x - b.r.x);
-      const item = candidates[0];
-      return item ? {
-        x: Math.round(item.r.x + item.r.width / 2),
-        y: Math.round(item.r.y + item.r.height / 2),
-        text: item.text || item.aria,
-      } : null;
-    }).catch(() => null);
-    if (!target) throw new Error('Project Elements button not found');
-    this.log(`[CINEMA-VIDEO] Opening Elements panel via project Elements fallback at (${target.x}, ${target.y})`);
-    await page.mouse.click(target.x, target.y);
-    await page.waitForTimeout(1200);
+    this.log(`[CINEMA-VIDEO] Opening Elements picker via project Elements button`);
+    await this._getElementsModalHelper()._openElementsModal();
+    if (!(await this._isElementsPickerOpen())) {
+      throw new Error('Project Elements button did not open Elements picker');
+    }
   }
 
   async _closeElementsPickerWithModalButton() {
