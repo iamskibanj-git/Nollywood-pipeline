@@ -11799,7 +11799,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           requireNotEligible: false,
           refreshAfterDelete: true,
           projectUrl: protectedReferenceProjectUrl,
-          deleteVerifyRetries: 1,
+          deleteVerifyRetries: 2,
           freshVerifyTimeoutMs: 12000,
           onProgress: (status, detail = {}) => this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
             status,
@@ -11840,7 +11840,12 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           phase: 'delete-all',
           reason,
         });
-        return fail('delete-failed', reason, { deleted, absent, failedName: name });
+        return fail('delete-failed', reason, {
+          deleted,
+          absent,
+          failedName: name,
+          ...(deleteErr.transientUi ? { attempts: currentAttempts } : {}),
+        });
       }
     }
 

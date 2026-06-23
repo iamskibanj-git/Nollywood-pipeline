@@ -2899,7 +2899,8 @@ class CinemaVideoAutomation extends KlingAutomation {
       const c = candidates[0];
       return c ? { x: Math.round(c.x + c.w / 2), y: Math.round(c.y + c.h / 2), text: c.text } : null;
     });
-    if (!atButton) throw new Error('@ element button next to Sound/Audio control not found');
+    if (!atButton) throw new Error('Composer @ element button not found');
+    this.log(`[CINEMA-VIDEO] Opening Elements picker via composer @ at (${atButton.x}, ${atButton.y})`);
     await page.mouse.click(atButton.x, atButton.y);
     await page.waitForTimeout(1200);
   }
@@ -2937,12 +2938,56 @@ class CinemaVideoAutomation extends KlingAutomation {
     }).catch(() => false);
   }
 
-  async _ensureElementsPickerOpen() {
+  _isTransientElementsPickerError(err) {
+    return /composer @ element button not found|project elements button not found|elements picker|elements panel|elements modal|target page|context or browser has been closed/i
+      .test(String(err?.message || err || ''));
+  }
+
+  async _ensureElementsPickerOpen(options = {}) {
     if (await this._isElementsPickerOpen()) return true;
-    await this._openElementsPickerViaProjectButton().catch(() => {});
-    if (await this._isElementsPickerOpen()) return true;
-    await this._openElementsPickerViaAtButton();
-    return this._isElementsPickerOpen();
+
+    const page = this.automation.page;
+    const maxOpenAttempts = Math.max(1, Math.min(4, Number(options.maxOpenAttempts) || 3));
+    const projectUrl = options.projectUrl || null;
+    const allowProjectFallback = options.allowProjectFallback !== false;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxOpenAttempts; attempt++) {
+      try {
+        await this._openElementsPickerViaAtButton();
+        if (await this._isElementsPickerOpen()) return true;
+        lastError = new Error('Composer @ click did not open Elements picker');
+      } catch (err) {
+        lastError = err;
+        this.log(`[CINEMA-VIDEO] Composer @ Elements picker open attempt ${attempt}/${maxOpenAttempts} failed: ${err.message}`, 'warn');
+      }
+
+      if (attempt < maxOpenAttempts) {
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+        await page.waitForTimeout(1000 + attempt * 500);
+        if (projectUrl && attempt === maxOpenAttempts - 1) {
+          this.log(`[CINEMA-VIDEO] Refreshing project page before final composer @ Elements retry`);
+          await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => { lastError = e; });
+          await page.waitForTimeout(2500);
+          await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+        }
+      }
+    }
+
+    if (allowProjectFallback) {
+      try {
+        await this._openElementsPickerViaProjectButton();
+        if (await this._isElementsPickerOpen()) return true;
+      } catch (err) {
+        lastError = err;
+        this.log(`[CINEMA-VIDEO] Project Elements fallback failed: ${err.message}`, 'warn');
+      }
+    }
+
+    const finalError = lastError || new Error('Elements picker did not open');
+    finalError.transientUi = this._isTransientElementsPickerError(finalError);
+    throw finalError;
   }
 
   async _openElementsPickerViaProjectButton() {
@@ -2979,15 +3024,91 @@ class CinemaVideoAutomation extends KlingAutomation {
       } : null;
     }).catch(() => null);
     if (!target) throw new Error('Project Elements button not found');
-    this.log(`[CINEMA-VIDEO] Opening Elements panel via project Elements button at (${target.x}, ${target.y})`);
+    this.log(`[CINEMA-VIDEO] Opening Elements panel via project Elements fallback at (${target.x}, ${target.y})`);
     await page.mouse.click(target.x, target.y);
     await page.waitForTimeout(1200);
   }
 
+  async _closeElementsPickerWithModalButton() {
+    const page = this.automation.page;
+    const target = await page.evaluate(() => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden'
+          && r.top < innerHeight && r.left < innerWidth && r.bottom > 0 && r.right > 0;
+      };
+      const containers = [...document.querySelectorAll(
+        '[role="dialog"], [data-state="open"], [class*="Dialog"], [class*="Sheet"], [class*="modal"], [class*="Modal"], [class*="popover"], [class*="Popover"], div'
+      )]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const compactText = text.replace(/\s+/g, '');
+          const looksLikeElements =
+            /\bElements\b/i.test(text) &&
+            (
+              /\bMy Elements\b/i.test(text) ||
+              /\bAll Pinned\b/i.test(text) ||
+              /\bShow subfolders elements\b/i.test(text) ||
+              /UploadsElementsImageGenerations|ElementsImageGenerations/i.test(compactText)
+            );
+          return { el, r, looksLikeElements };
+        })
+        .filter(o => o.looksLikeElements && o.r.width > 300 && o.r.height > 220)
+        .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+      const container = containers[0];
+      if (!container) return null;
+      const cr = container.r;
+      const closeButtons = [...container.el.querySelectorAll('button, [role="button"], div, span')]
+        .filter(visible)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || '');
+          const aria = clean(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+          const nearTopRight = r.x > cr.right - 110 && r.y < cr.top + 100;
+          const squareish = r.width >= 18 && r.width <= 70 && r.height >= 18 && r.height <= 70;
+          const closeText = /^(x|×|close)$/i.test(text) || /close/i.test(aria);
+          const score =
+            (nearTopRight ? 100 : 0) +
+            (closeText ? 50 : 0) +
+            (squareish ? 20 : 0) +
+            (r.x > cr.right - 80 ? 10 : 0) -
+            (/Filter|Search|Upload|Share|New Element/i.test(`${text} ${aria}`) ? 100 : 0);
+          return { r, text, aria, nearTopRight, squareish, score };
+        })
+        .filter(o => o.nearTopRight && o.squareish && o.score > 100)
+        .sort((a, b) => b.score - a.score || b.r.x - a.r.x);
+      const item = closeButtons[0];
+      return item ? {
+        x: Math.round(item.r.x + item.r.width / 2),
+        y: Math.round(item.r.y + item.r.height / 2),
+        label: item.text || item.aria || 'close',
+      } : null;
+    }).catch(() => null);
+    if (!target) return false;
+    this.log(`[CINEMA-VIDEO] Closing Elements picker via modal X at (${target.x}, ${target.y})`);
+    await page.mouse.click(target.x, target.y);
+    await page.waitForTimeout(900);
+    return true;
+  }
+
   async _closePickerAndReturnToComposer() {
     const page = this.automation.page;
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(700);
+    const wasOpen = await this._isElementsPickerOpen().catch(() => false);
+    if (wasOpen) {
+      await this._closeElementsPickerWithModalButton().catch(() => false);
+      if (await this._isElementsPickerOpen().catch(() => false)) {
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(700);
+      }
+      if (await this._isElementsPickerOpen().catch(() => false)) return;
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+    }
     await this._clickPromptTextbox().catch(() => {});
     await page.waitForTimeout(500);
   }
@@ -4090,7 +4211,7 @@ class CinemaVideoAutomation extends KlingAutomation {
     }
     await page.waitForTimeout(Math.max(1000, Number(options.settleMs) || 3000));
     await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
-    await this._ensureElementsPickerOpen();
+    await this._ensureElementsPickerOpen({ projectUrl, maxOpenAttempts: 3 });
     const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
     if (searchFiltered) this.log(`Filtered refreshed Elements picker to @${normalized} for delete verification`);
     const timeoutMs = Math.max(2000, Number(options.timeoutMs) || 12000);
@@ -4125,77 +4246,102 @@ class CinemaVideoAutomation extends KlingAutomation {
       }
 
       const page = this.automation.page;
-      this.invalidateElementEligibility(normalized);
-      await this._closePickerAndReturnToComposer().catch(() => {});
-      await this._ensureElementsPickerOpen();
-      const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
-      if (searchFiltered) this.log(`Filtered Elements picker to @${normalized} before delete confirmation`);
-      const card = await this._waitForElementCard(normalized, 45000);
-      if (!card) {
-        this.log(`Element @${normalized} not visible for delete; treating as already absent`);
-        await this._clearElementsPickerSearch().catch(() => {});
+      try {
+        this.invalidateElementEligibility(normalized);
         await this._closePickerAndReturnToComposer().catch(() => {});
-        return { deleted: false, alreadyMissing: true, proof: null };
-      }
-      await this._centerElementCardInPicker(normalized).catch(() => null);
-      const centeredCard = await this._findElementCard(normalized).catch(() => null) || card;
-      await this._hoverElementCardControls(centeredCard);
-      const proof = await this._snapshotElementCardProof(centeredCard).catch(() => ({}));
-      const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
-      const cardStatus = await this._readElementCardStatus(centeredCard, {
-        hoverMs: 1000,
-        useFallbackStatus: false,
-      }).catch(() => 'unknown');
-      if (requireNotEligible && cardStatus !== 'not-eligible') {
-        await this._clearElementsPickerSearch().catch(() => {});
-        await this._closePickerAndReturnToComposer().catch(() => {});
-        throw new Error(`Refusing to delete @${normalized}: card status is ${cardStatus || 'unknown'}, not not-eligible${proofText}`);
-      }
-
-      const detail = await this._openElementDetailFromCard(normalized, centeredCard);
-      if (detail.nameNormalized !== normalized.toLowerCase()) {
-        await this._closeOpenElementDetail().catch(() => {});
-        await this._clearElementsPickerSearch().catch(() => {});
-        await this._closePickerAndReturnToComposer().catch(() => {});
-        throw new Error(`Refusing to delete @${normalized}: View modal confirmed "${detail.name || detail.nameNormalized || 'unknown'}"`);
-      }
-
-      const deleteButton = await this._findOpenElementDetailButton('Delete');
-      if (!deleteButton) {
-        await this._closeOpenElementDetail().catch(() => {});
-        await this._clearElementsPickerSearch().catch(() => {});
-        await this._closePickerAndReturnToComposer().catch(() => {});
-        throw new Error(`Detail modal Delete button not found for @${normalized}`);
-      }
-      this.log(`Deleting element @${normalized} from confirmed detail modal (status=${cardStatus})${proofText}`);
-      await page.mouse.click(deleteButton.x, deleteButton.y);
-      await page.waitForTimeout(1000);
-      await this._confirmElementDeleteIfNeeded();
-      await page.waitForTimeout(2500);
-
-      let gone = false;
-      if (refreshAfterDelete) {
-        await notifyProgress('delete-verifying', { attempt: attempt + 1, maxAttempts: deleteVerifyRetries + 1 });
-        const freshProof = await this._refreshProjectPageAndVerifyElementAbsent(normalized, {
-          projectUrl,
-          timeoutMs: freshVerifyTimeoutMs,
-        });
-        gone = !!freshProof.absent;
-        if (!gone && attempt < deleteVerifyRetries) {
-          const retryProofText = freshProof.proof?.text ? ` proof="${freshProof.proof.text.slice(0, 180)}"` : '';
-          this.log(`Element @${normalized} still visible after refreshed delete verification; retrying safe delete${retryProofText}`);
-          continue;
+        await this._ensureElementsPickerOpen({ projectUrl, maxOpenAttempts: 3 });
+        const searchFiltered = await this._setElementsPickerSearch(normalized).catch(() => false);
+        if (searchFiltered) this.log(`Filtered Elements picker to @${normalized} before delete confirmation`);
+        const card = await this._waitForElementCard(normalized, 45000);
+        if (!card) {
+          this.log(`Element @${normalized} not visible for delete; treating as already absent`);
+          await this._clearElementsPickerSearch().catch(() => {});
+          await this._closePickerAndReturnToComposer().catch(() => {});
+          return { deleted: false, alreadyMissing: true, proof: null };
         }
-      } else {
-        await this._ensureElementsPickerOpen().catch(() => false);
-        gone = await this._waitForElementDeleted(normalized, 45000);
-      }
+        await this._centerElementCardInPicker(normalized).catch(() => null);
+        const centeredCard = await this._findElementCard(normalized).catch(() => null) || card;
+        await this._hoverElementCardControls(centeredCard);
+        const proof = await this._snapshotElementCardProof(centeredCard).catch(() => ({}));
+        const proofText = proof?.text ? ` proof="${proof.text.slice(0, 180)}"` : '';
+        const cardStatus = await this._readElementCardStatus(centeredCard, {
+          hoverMs: 1000,
+          useFallbackStatus: false,
+        }).catch(() => 'unknown');
+        if (requireNotEligible && cardStatus !== 'not-eligible') {
+          await this._clearElementsPickerSearch().catch(() => {});
+          await this._closePickerAndReturnToComposer().catch(() => {});
+          throw new Error(`Refusing to delete @${normalized}: card status is ${cardStatus || 'unknown'}, not not-eligible${proofText}`);
+        }
 
-      await this._clearElementsPickerSearch().catch(() => {});
-      await this._closePickerAndReturnToComposer().catch(() => {});
-      if (!gone) throw new Error(`Element @${normalized} was still visible after delete`);
-      this.invalidateElementEligibility(normalized);
-      return { deleted: true, alreadyMissing: false, proof: { ...proof, cardStatus, detail } };
+        const detail = await this._openElementDetailFromCard(normalized, centeredCard);
+        if (detail.nameNormalized !== normalized.toLowerCase()) {
+          await this._closeOpenElementDetail().catch(() => {});
+          await this._clearElementsPickerSearch().catch(() => {});
+          await this._closePickerAndReturnToComposer().catch(() => {});
+          throw new Error(`Refusing to delete @${normalized}: View modal confirmed "${detail.name || detail.nameNormalized || 'unknown'}"`);
+        }
+
+        const deleteButton = await this._findOpenElementDetailButton('Delete');
+        if (!deleteButton) {
+          await this._closeOpenElementDetail().catch(() => {});
+          await this._clearElementsPickerSearch().catch(() => {});
+          await this._closePickerAndReturnToComposer().catch(() => {});
+          throw new Error(`Detail modal Delete button not found for @${normalized}`);
+        }
+        this.log(`Deleting element @${normalized} from confirmed detail modal (status=${cardStatus})${proofText}`);
+        await page.mouse.click(deleteButton.x, deleteButton.y);
+        await page.waitForTimeout(1000);
+        await this._confirmElementDeleteIfNeeded();
+        await page.waitForTimeout(2500);
+
+        let gone = false;
+        if (refreshAfterDelete) {
+          await notifyProgress('delete-verifying', { attempt: attempt + 1, maxAttempts: deleteVerifyRetries + 1 });
+          const freshProof = await this._refreshProjectPageAndVerifyElementAbsent(normalized, {
+            projectUrl,
+            timeoutMs: freshVerifyTimeoutMs,
+          });
+          gone = !!freshProof.absent;
+          if (!gone && attempt < deleteVerifyRetries) {
+            const retryProofText = freshProof.proof?.text ? ` proof="${freshProof.proof.text.slice(0, 180)}"` : '';
+            this.log(`Element @${normalized} still visible after refreshed delete verification; retrying safe delete${retryProofText}`);
+            continue;
+          }
+        } else {
+          await this._ensureElementsPickerOpen().catch(() => false);
+          gone = await this._waitForElementDeleted(normalized, 45000);
+        }
+
+        await this._clearElementsPickerSearch().catch(() => {});
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        if (!gone) throw new Error(`Element @${normalized} was still visible after delete`);
+        this.invalidateElementEligibility(normalized);
+        return { deleted: true, alreadyMissing: false, proof: { ...proof, cardStatus, detail } };
+      } catch (err) {
+        if (this._isTransientElementsPickerError(err)) err.transientUi = true;
+        const eligibleRefusal = requireNotEligible && /Refusing to delete @[^:]+: card status is eligible(?:-visual)?/i.test(err.message || '');
+        if (eligibleRefusal || attempt >= deleteVerifyRetries) throw err;
+
+        this.log(`Safe delete attempt ${attempt + 1}/${deleteVerifyRetries + 1} for @${normalized} failed: ${err.message}; resetting picker and retrying same element`, 'warn');
+        await notifyProgress('delete-attempt-failed', {
+          attempt: attempt + 1,
+          maxAttempts: deleteVerifyRetries + 1,
+          reason: err.message,
+          transientUi: !!err.transientUi,
+        });
+        await this._closeOpenElementDetail().catch(() => {});
+        await this._clearElementsPickerSearch().catch(() => {});
+        await this._closePickerAndReturnToComposer().catch(() => {});
+        if (projectUrl && refreshAfterDelete && page && !page.isClosed?.()) {
+          this.log(`Refreshing project page before retrying safe delete for @${normalized}`);
+          await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(refreshErr => {
+            this.log(`Project refresh before delete retry failed for @${normalized}: ${refreshErr.message}`, 'warn');
+          });
+          await page.waitForTimeout(2500).catch(() => {});
+          await this._dismissSeedanceAndAIDirectorOverlays('[CINEMA-VIDEO]').catch(() => {});
+        }
+      }
     }
 
     throw new Error(`Element @${normalized} was still visible after delete`);
