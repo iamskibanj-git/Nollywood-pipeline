@@ -8425,6 +8425,16 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       throw new Error(`[FACE-IP-RECAST] Video stage blocked: pending recast scene image regeneration exists (${details}). Scene images must be regenerated before any video setup.`);
     }
 
+    if (cinematicVideoEngine === 'cinema-studio-3.5') {
+      const protectedReferenceRefreshReady = await this._resolvePendingCinemaProtectedReferenceRefresh(
+        projectId,
+        projectDir,
+        videoAutomation,
+        { maxAttempts: 2 }
+      );
+      if (!protectedReferenceRefreshReady || this.cancelled) return;
+    }
+
     const sceneImageAssets = db.getAssets(projectId, { type: 'scene_image_cinematic' });
 
     // Walk scenes, collect kling_clips with their scene image references
@@ -9801,6 +9811,56 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
           continue;
         }
 
+        const isCinemaProtectedReferenceBlock = cinematicVideoEngine === 'cinema-studio-3.5' && (
+          e.code === 'CINEMA_PROTECTED_REFERENCE_ELEMENTS' ||
+          e.message?.includes('CINEMA_PROTECTED_REFERENCE_ELEMENTS') ||
+          /protected reference elements/i.test(e.message || '')
+        );
+        if (isCinemaProtectedReferenceBlock) {
+          if (clipAsset) db.resetAsset(clipAsset.id);
+          const refreshResult = await this._rebuildCinemaElementsAfterProtectedReferenceBlock(
+            projectId,
+            projectDir,
+            videoAutomation,
+            {
+              clipId,
+              clipLabel: label,
+              error: e,
+              maxAttempts: 2,
+            }
+          ).catch(refreshErr => ({
+            ok: false,
+            reason: refreshErr.message,
+          }));
+
+          if (refreshResult?.ok) {
+            this.log(`[CINEMATIC] ${clipId}: protected-reference element refresh complete (${(refreshResult.names || []).length} managed element(s)); retrying same clip`);
+            i--;
+            continue;
+          }
+
+          const reason = refreshResult?.reason || 'protected-reference element refresh failed';
+          this.log(`[CINEMATIC] ${clipId}: protected-reference refresh incomplete: ${reason}. Pausing before any further Generate attempt.`, 'error');
+          if (clipAsset) {
+            db.markAssetFailed(clipAsset.id, `[PRE-GEN] Protected-reference element refresh failed: ${reason}`);
+            db.resetAsset(clipAsset.id);
+          }
+          this.emit({
+            type: 'waiting',
+            gate: 'cinema-protected-reference-elements',
+            clipId,
+            clipLabel: label,
+            message: reason,
+          });
+          this.paused = true;
+          this.state.status = 'paused';
+          this.emit({ type: 'paused', reason: 'cinema-protected-reference-elements' });
+          await this.checkPause();
+          if (this.cancelled) return;
+          i--;
+          continue;
+        }
+
         let shouldRetry = false;
 
         // ── KLING RECOVERY: attempt to recover from Asset library ──
@@ -10041,6 +10101,56 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
               this.cancelled = true;
               this.log(`[CINEMATIC] ${clipId}: retry aborted during shutdown/browser close — skipping failure DB writes`, 'warn');
               return;
+            }
+
+            const retryProtectedReferenceBlock = cinematicVideoEngine === 'cinema-studio-3.5' && (
+              retryErr.code === 'CINEMA_PROTECTED_REFERENCE_ELEMENTS' ||
+              retryErr.message?.includes('CINEMA_PROTECTED_REFERENCE_ELEMENTS') ||
+              /protected reference elements/i.test(retryErr.message || '')
+            );
+            if (retryProtectedReferenceBlock) {
+              if (clipAsset) db.resetAsset(clipAsset.id);
+              const refreshResult = await this._rebuildCinemaElementsAfterProtectedReferenceBlock(
+                projectId,
+                projectDir,
+                videoAutomation,
+                {
+                  clipId,
+                  clipLabel: `${label} retry`,
+                  error: retryErr,
+                  maxAttempts: 2,
+                }
+              ).catch(refreshErr => ({
+                ok: false,
+                reason: refreshErr.message,
+              }));
+
+              if (refreshResult?.ok) {
+                this.log(`[CINEMATIC] ${clipId}: protected-reference element refresh complete after retry failure; retrying same clip from fresh setup`);
+                i--;
+                continue;
+              }
+
+              const reason = refreshResult?.reason || 'protected-reference element refresh failed';
+              this.log(`[CINEMATIC] ${clipId}: protected-reference refresh incomplete after retry failure: ${reason}. Pausing before any further Generate attempt.`, 'error');
+              if (clipAsset) {
+                db.markAssetFailed(clipAsset.id, `[PRE-GEN] Protected-reference element refresh failed: ${reason}`);
+                db.resetAsset(clipAsset.id);
+              }
+              this.emit({
+                type: 'waiting',
+                gate: 'cinema-protected-reference-elements',
+                clipId,
+                clipLabel: label,
+                message: reason,
+              });
+              this.paused = true;
+              this.state.status = 'paused';
+              this.emit({ type: 'paused', reason: 'cinema-protected-reference-elements' });
+              await this.checkPause();
+              if (this.cancelled) return;
+              i--;
+              continue;
             }
 
             const retryRefunded = cinematicVideoEngine === 'cinema-studio-3.5' && (
@@ -11313,6 +11423,542 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     } catch (e) {
       this.log(`[FACE-IP-RECAST] WARN: Could not clear persisted element proof/cache: ${e.message}`, 'warn');
     }
+  }
+
+  _getManagedCinematicElementNames(projectId) {
+    const normalize = (value) => String(value || '').trim().replace(/^@+/, '').toLowerCase();
+    const names = [];
+    const add = (value) => {
+      const clean = normalize(value);
+      if (clean) names.push(clean);
+    };
+
+    try {
+      for (const asset of db.getAssets(projectId) || []) {
+        if (!['portrait', 'character_grid'].includes(asset.type)) continue;
+        if (asset.status === 'archived') continue;
+        add(asset.element_name);
+      }
+    } catch (e) {
+      this.log(`[CINEMATIC] [PROTECTED-REF] WARN: Could not read managed element names from assets: ${e.message}`, 'warn');
+    }
+
+    try {
+      const settings = this._getProjectSettings(projectId);
+      Object.values(settings._cinematicElementNames || {}).forEach(add);
+      for (const outfitMap of Object.values(settings._outfitElements || {})) {
+        Object.values(outfitMap || {}).forEach(add);
+      }
+      Object.values(this.state.cinematicElementNames || {}).forEach(add);
+      for (const outfitMap of Object.values(this.state._outfitElements || {})) {
+        Object.values(outfitMap || {}).forEach(add);
+      }
+    } catch (e) {
+      this.log(`[CINEMATIC] [PROTECTED-REF] WARN: Could not read managed element names from maps: ${e.message}`, 'warn');
+    }
+
+    return [...new Set(names)]
+      .filter(name => !['check eligibility', 'create element', 'new element'].includes(name))
+      .sort();
+  }
+
+  _getCinemaProtectedReferenceRebuildRecord(projectId) {
+    if (!projectId) return { attempts: 0 };
+    try {
+      const settings = this._getProjectSettings(projectId);
+      return settings._cinemaProtectedReferenceRebuild || { attempts: 0 };
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not read protected-reference refresh state: ${e.message}`, 'warn');
+      return { attempts: 0 };
+    }
+  }
+
+  _persistCinemaProtectedReferenceRebuildRecord(projectId, patch = {}) {
+    if (!projectId) return null;
+    let saved = null;
+    try {
+      this._updateProjectSettings(projectId, (settings) => {
+        const current = settings._cinemaProtectedReferenceRebuild || {};
+        saved = {
+          ...current,
+          ...patch,
+          attempts: Math.max(0, Number(patch.attempts ?? current.attempts) || 0),
+          updatedAt: new Date().toISOString(),
+        };
+        settings._cinemaProtectedReferenceRebuild = saved;
+        return settings;
+      });
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist protected-reference refresh state: ${e.message}`, 'warn');
+    }
+    return saved;
+  }
+
+  _isPendingCinemaProtectedReferenceRefresh(record) {
+    if (!record || typeof record !== 'object') return false;
+    const status = String(record.status || '').trim();
+    if (!status) return false;
+    if (['refreshed', 'complete', 'completed', 'cleared'].includes(status)) return false;
+    return true;
+  }
+
+  _protectedReferenceRefreshNamesFromRecord(projectId, record = null) {
+    const fromRecord = Array.isArray(record?.names) ? record.names : [];
+    const names = fromRecord
+      .map(name => this._normalizeElementName(name))
+      .filter(Boolean);
+    if (names.length > 0) return [...new Set(names)].sort();
+    return this._getManagedCinematicElementNames(projectId);
+  }
+
+  _migratePendingCinemaProtectedReferenceRefresh(projectId, opts = {}) {
+    const record = this._getCinemaProtectedReferenceRebuildRecord(projectId);
+    if (!this._isPendingCinemaProtectedReferenceRefresh(record)) return null;
+
+    const names = this._protectedReferenceRefreshNamesFromRecord(projectId, record);
+    const now = new Date().toISOString();
+    const elementStatus = {};
+    for (const name of names) {
+      const normalized = this._normalizeElementName(name);
+      if (!normalized) continue;
+      elementStatus[normalized] = {
+        ...(record.elementStatus?.[normalized] || {}),
+        status: 'refresh-pending',
+        phase: 'resume-migration',
+        updatedAt: now,
+      };
+    }
+
+    const shouldMigrate =
+      record.strategy !== 'delete-all-then-recreate' ||
+      !Array.isArray(record.names) ||
+      record.names.length === 0 ||
+      (Array.isArray(record.refreshed) && record.refreshed.length > 0) ||
+      (Array.isArray(record.unresolved) && record.unresolved.length > 0);
+
+    if (!shouldMigrate) return record;
+
+    const migrated = this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      strategy: 'delete-all-then-recreate',
+      attempts: 0,
+      maxAttempts: Math.max(1, Math.min(3, Number(opts.maxAttempts || record.maxAttempts) || 2)),
+      status: 'delete-all-pending',
+      clipId: record.clipId || opts.clipId || null,
+      reason: 'protected-reference-elements',
+      resumeRequired: true,
+      names,
+      elementStatus,
+      refreshed: [],
+      unresolved: [],
+      deleted: [],
+      absent: [],
+      recreated: [],
+      eligibility: [],
+      migratedFrom: {
+        status: record.status || null,
+        strategy: record.strategy || null,
+        attempts: Math.max(0, Number(record.attempts) || 0),
+        reason: record.reason || null,
+        updatedAt: record.updatedAt || null,
+      },
+      migratedAt: now,
+    });
+
+    this.log(`[CINEMATIC] [PROTECTED-REF] Migrated persisted protected-reference refresh state (${record.status || 'unknown'} / ${record.strategy || 'legacy'}) into delete-all-then-recreate bubble.`);
+    db.logEvent(projectId, 'cinema_protected_reference_refresh_migrated', {
+      detail: `Migrated protected-reference refresh state from status=${record.status || 'unknown'}, strategy=${record.strategy || 'legacy'} for ${names.length} element(s)`,
+    });
+    return migrated;
+  }
+
+  _persistCinemaProtectedReferenceElementStatus(projectId, name, patch = {}) {
+    const normalized = this._normalizeElementName(name);
+    if (!projectId || !normalized) return null;
+    try {
+      const current = this._getCinemaProtectedReferenceRebuildRecord(projectId);
+      const elementStatus = {
+        ...(current.elementStatus || {}),
+        [normalized]: {
+          ...(current.elementStatus?.[normalized] || {}),
+          ...patch,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      return this._persistCinemaProtectedReferenceRebuildRecord(projectId, { elementStatus });
+    } catch (e) {
+      this.log(`[PERSIST] WARN: Could not persist protected-reference element status for @${normalized}: ${e.message}`, 'warn');
+      return null;
+    }
+  }
+
+  async _resolvePendingCinemaProtectedReferenceRefresh(projectId, projectDir, videoAutomation, opts = {}) {
+    let record = this._getCinemaProtectedReferenceRebuildRecord(projectId);
+    if (!this._isPendingCinemaProtectedReferenceRefresh(record)) return true;
+
+    record = this._migratePendingCinemaProtectedReferenceRefresh(projectId, opts) || record;
+    const names = this._protectedReferenceRefreshNamesFromRecord(projectId, record);
+    this.log(`[CINEMATIC] [PROTECTED-REF] Pending protected-reference refresh state "${record.status || 'unknown'}" found on resume; entering element refresh bubble before video setup (${names.length} managed element(s)).`);
+    db.logEvent(projectId, 'cinema_protected_reference_refresh_resume', {
+      detail: `Resume detected pending protected-reference element refresh status=${record.status || 'unknown'} for ${names.length} element(s)`,
+    });
+
+    const refreshResult = await this._rebuildCinemaElementsAfterProtectedReferenceBlock(
+      projectId,
+      projectDir,
+      videoAutomation,
+      {
+        clipId: record.clipId || opts.clipId || 'resume',
+        clipLabel: opts.clipLabel || 'resume protected-reference element refresh',
+        maxAttempts: opts.maxAttempts || record.maxAttempts || 2,
+      }
+    ).catch(err => ({ ok: false, reason: err.message }));
+
+    if (refreshResult?.ok) {
+      this.log(`[CINEMATIC] [PROTECTED-REF] Pending protected-reference refresh completed on resume; video setup may continue.`);
+      return true;
+    }
+
+    const reason = refreshResult?.reason || 'protected-reference element refresh failed on resume';
+    this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      status: refreshResult?.blocked ? 'blocked' : (this._getCinemaProtectedReferenceRebuildRecord(projectId).status || 'resume-failed'),
+      reason,
+      resumeRequired: true,
+      names,
+    });
+    this.log(`[CINEMATIC] [PROTECTED-REF] Pending protected-reference refresh could not complete on resume: ${reason}. Pausing before any video Generate attempt.`, 'error');
+    this.emit({
+      type: 'waiting',
+      gate: 'cinema-protected-reference-elements',
+      message: reason,
+    });
+    this.paused = true;
+    this.state.status = 'paused';
+    this.emit({ type: 'paused', reason: 'cinema-protected-reference-elements' });
+    await this.checkPause();
+    return false;
+  }
+
+  _clearCinematicElementProofsForProtectedReferenceRefresh(projectId) {
+    this.state._cinematicElementsConfirmedViaAtButton = false;
+    try {
+      this._updateProjectSettings(projectId, (settings) => {
+        delete settings._cinematicElementsModalProof;
+        delete settings._cinemaElementEligibility;
+        return settings;
+      });
+    } catch (e) {
+      this.log(`[CINEMATIC] [PROTECTED-REF] WARN: Could not clear stale element proof/cache: ${e.message}`, 'warn');
+    }
+  }
+
+  _buildProtectedReferenceElementRefreshSpecs(projectId, projectDir, names = []) {
+    const specs = [];
+    const unresolved = [];
+    for (const rawName of names) {
+      const name = this._normalizeElementName(rawName);
+      const spec = this._findCinemaElementRepairSpec(projectId, projectDir, name);
+      if (!spec) {
+        unresolved.push({ name, reason: `No local portrait/grid spec found for @${name}` });
+        continue;
+      }
+      if (!spec.gridPath) {
+        unresolved.push({ name, reason: `No local grid image found for @${name}; refusing one-image refresh` });
+        continue;
+      }
+      specs.push({ ...spec, name });
+    }
+    return { specs, unresolved };
+  }
+
+  async _rebuildCinemaElementsAfterProtectedReferenceBlock(projectId, projectDir, videoAutomation, opts = {}) {
+    const maxAttempts = Math.max(1, Math.min(3, Number(opts.maxAttempts) || 2));
+    const current = this._getCinemaProtectedReferenceRebuildRecord(projectId);
+    const currentAttempts = current.strategy === 'delete-all-then-recreate'
+      ? Math.max(0, Number(current.attempts) || 0)
+      : 0;
+    if (currentAttempts >= maxAttempts) {
+      return {
+        ok: false,
+        blocked: true,
+        reason: `protected-reference element refresh already attempted ${currentAttempts}/${maxAttempts} time(s)`,
+      };
+    }
+
+    const names = this._getManagedCinematicElementNames(projectId);
+    if (names.length === 0) {
+      return { ok: false, reason: 'no managed cinematic element names found to refresh' };
+    }
+
+    const nextAttempt = currentAttempts + 1;
+    const fail = (status, reason, extra = {}) => {
+      this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+        strategy: 'delete-all-then-recreate',
+        attempts: nextAttempt,
+        maxAttempts,
+        status,
+        clipId: opts.clipId || null,
+        reason,
+        names,
+        ...extra,
+      });
+      return { ok: false, reason, names, ...extra };
+    };
+
+    const specProof = this._buildProtectedReferenceElementRefreshSpecs(projectId, projectDir, names);
+    if (specProof.unresolved.length > 0) {
+      for (const item of specProof.unresolved) {
+        this._persistCinemaProtectedReferenceElementStatus(projectId, item.name, {
+          status: 'spec-failed',
+          phase: 'local-spec',
+          reason: item.reason,
+        });
+      }
+      const reason = specProof.unresolved.map(item => `@${item.name}: ${item.reason}`).join('; ');
+      return fail('spec-failed', reason, { unresolved: specProof.unresolved });
+    }
+    const specs = specProof.specs;
+    for (const spec of specs) {
+      this._persistCinemaProtectedReferenceElementStatus(projectId, spec.name, {
+        status: 'spec-ready',
+        phase: 'local-spec',
+        portraitPath: spec.portraitPath || null,
+        gridPath: spec.gridPath || null,
+      });
+    }
+
+    this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      strategy: 'delete-all-then-recreate',
+      attempts: nextAttempt,
+      maxAttempts,
+      status: 'delete-all-pending',
+      clipId: opts.clipId || null,
+      reason: 'protected-reference-elements',
+      names,
+      refreshed: [],
+      unresolved: [],
+      deleted: [],
+      absent: [],
+      recreated: [],
+      eligibility: [],
+    });
+    db.logEvent(projectId, 'cinema_protected_reference_refresh_start', {
+      clipId: opts.clipId || null,
+      detail: `Attempt ${nextAttempt}/${maxAttempts}: refreshing ${names.length} managed Higgsfield element(s) from existing local assets after protected-reference Generate block`,
+    });
+
+    this.log(`[CINEMATIC] [PROTECTED-REF] Protected reference elements blocked intended Generate for ${opts.clipId || 'current clip'}; refreshing ${names.length} managed element(s) with existing assets and same names.`);
+
+    const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+    const elements = new HiggsfieldElements({
+      automation: this.automation,
+      logger: (m) => this.log(`[CINEMATIC] [PROTECTED-REF] ${m}`),
+      projectId: this.state.higgsfield_project_id,
+    });
+
+    videoAutomation.invalidateElementEligibility?.(names);
+    this._clearCinematicElementProofsForProtectedReferenceRefresh(projectId);
+
+    try {
+      await this.automation.ensureBrowser();
+      const page = this.automation.page;
+      if (page && !page.isClosed?.() && this.state.higgsfield_project_id) {
+        const projectUrl = `https://higgsfield.ai/generate?projectId=${this.state.higgsfield_project_id}`;
+        this.log(`[CINEMATIC] [PROTECTED-REF] Entering isolated element refresh bubble: ${projectUrl}`);
+        await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(2500);
+        await this._holdForOverlayClearance('protected-reference element refresh bubble');
+      }
+    } catch (navErr) {
+      return fail('navigation-failed', `Could not enter protected-reference element refresh bubble: ${navErr.message}`);
+    }
+
+    const deleted = [];
+    const absent = [];
+    for (const spec of specs) {
+      await this.checkPause();
+      const name = spec.name;
+      videoAutomation.invalidateElementEligibility?.(name);
+      this.log(`[CINEMATIC] [PROTECTED-REF] Delete-all phase: deleting @${name} via existing safe View-modal flow.`);
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status: 'delete-pending',
+        phase: 'delete-all',
+      });
+      try {
+        const deleteResult = await videoAutomation.deleteElementFromPicker(name, { requireNotEligible: false });
+        if (deleteResult.deleted) {
+          deleted.push(name);
+          this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+            status: 'deleted',
+            phase: 'delete-all',
+          });
+          this.log(`[CINEMATIC] [PROTECTED-REF] Delete-all phase: @${name} deleted.`);
+        } else {
+          absent.push(name);
+          this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+            status: 'absent',
+            phase: 'delete-all',
+          });
+          this.log(`[CINEMATIC] [PROTECTED-REF] Delete-all phase: @${name} already absent.`);
+        }
+      } catch (deleteErr) {
+        const alreadyMissing = /not visible for delete|already absent|alreadyMissing/i.test(deleteErr.message || '');
+        if (alreadyMissing) {
+          absent.push(name);
+          this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+            status: 'absent',
+            phase: 'delete-all',
+          });
+          this.log(`[CINEMATIC] [PROTECTED-REF] Delete-all phase: @${name} already absent.`);
+          continue;
+        }
+        const reason = `Safe delete failed for @${name}: ${deleteErr.message}`;
+        this.log(`[CINEMATIC] [PROTECTED-REF] ${reason}`, 'warn');
+        this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+          status: 'delete-failed',
+          phase: 'delete-all',
+          reason,
+        });
+        return fail('delete-failed', reason, { deleted, absent, failedName: name });
+      }
+    }
+
+    this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      strategy: 'delete-all-then-recreate',
+      attempts: nextAttempt,
+      maxAttempts,
+      status: 'create-all-pending',
+      clipId: opts.clipId || null,
+      reason: 'protected-reference-elements',
+      names,
+      deleted,
+      absent,
+    });
+
+    const recreated = [];
+    for (const spec of specs) {
+      await this.checkPause();
+      const name = spec.name;
+      this.log(`[CINEMATIC] [PROTECTED-REF] Create-all phase: recreating @${name} from existing portrait/grid assets.`);
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status: 'create-pending',
+        phase: 'create-all',
+      });
+      try {
+        elements.invalidateCache();
+        const createResult = await elements.createCharacterElement({
+          name: spec.name,
+          portraitPath: spec.portraitPath,
+          gridPath: spec.gridPath,
+          description: spec.description,
+        });
+        recreated.push({ name, created: !!createResult?.created });
+        videoAutomation.invalidateElementEligibility?.(name);
+        this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+          status: createResult?.created ? 'recreated' : 'exists-after-create',
+          phase: 'create-all',
+          created: !!createResult?.created,
+        });
+        this.log(`[CINEMATIC] [PROTECTED-REF] Create-all phase: @${name} ${createResult?.created ? 'created' : 'already existed'}.`);
+      } catch (createErr) {
+        const reason = `Create failed for @${name}: ${createErr.message}`;
+        this.log(`[CINEMATIC] [PROTECTED-REF] ${reason}`, 'warn');
+        this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+          status: 'create-failed',
+          phase: 'create-all',
+          reason,
+        });
+        return fail('create-failed', reason, { deleted, absent, recreated, failedName: name });
+      }
+    }
+
+    elements.invalidateCache();
+    const modalProof = await elements.confirmExistingElements(names, {
+      timeoutMs: 60000,
+      label: 'Protected-reference refreshed Elements modal proof',
+    });
+    if (modalProof.missing?.length > 0) {
+      const reason = `Elements modal missing refreshed element(s): ${modalProof.missing.map(n => '@' + n).join(', ')}`;
+      for (const missingName of modalProof.missing) {
+        this._persistCinemaProtectedReferenceElementStatus(projectId, missingName, {
+          status: 'proof-missing',
+          phase: 'modal-proof',
+          reason,
+        });
+      }
+      this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+        strategy: 'delete-all-then-recreate',
+        attempts: nextAttempt,
+        maxAttempts,
+        status: 'proof-failed',
+        clipId: opts.clipId || null,
+        reason,
+        names,
+        deleted,
+        absent,
+        recreated,
+        missing: modalProof.missing,
+      });
+      return { ok: false, reason, names, deleted, absent, recreated, missing: modalProof.missing };
+    }
+    this._persistCinematicElementModalProof(projectId, names, 'protected-reference-refresh');
+
+    videoAutomation.invalidateElementEligibility?.(names);
+    const eligibility = [];
+    for (const name of names) {
+      await this.checkPause();
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status: 'eligibility-pending',
+        phase: 'eligibility',
+      });
+      const check = await videoAutomation.checkElementEligibility(name).catch(err => ({
+        status: `check-error: ${err.message}`,
+        proof: null,
+      }));
+      eligibility.push({ name, status: check.status || 'unknown' });
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status: check.status || 'unknown',
+        phase: 'eligibility',
+      });
+    }
+    const failedEligibility = eligibility.filter(item => item.status !== 'eligible');
+    if (failedEligibility.length > 0) {
+      const reason = `Refreshed element(s) still not eligible: ${failedEligibility.map(item => '@' + item.name + '=' + item.status).join(', ')}`;
+      this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+        strategy: 'delete-all-then-recreate',
+        attempts: nextAttempt,
+        maxAttempts,
+        status: 'eligibility-failed',
+        clipId: opts.clipId || null,
+        reason,
+        names,
+        deleted,
+        absent,
+        recreated,
+        eligibility,
+      });
+      return { ok: false, reason, names, deleted, absent, recreated, eligibility };
+    }
+
+    this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      strategy: 'delete-all-then-recreate',
+      attempts: nextAttempt,
+      maxAttempts,
+      status: 'refreshed',
+      clipId: opts.clipId || null,
+      reason: 'protected-reference-elements',
+      names,
+      deleted,
+      absent,
+      recreated,
+      eligibility,
+      refreshedAt: new Date().toISOString(),
+    });
+    db.logEvent(projectId, 'cinema_protected_reference_refresh_done', {
+      clipId: opts.clipId || null,
+      detail: `Refreshed ${names.length} managed element(s) from existing local assets after protected-reference block`,
+    });
+
+    return { ok: true, names, deleted, absent, recreated, eligibility, attempts: nextAttempt };
   }
 
   _archiveCharacterVisualAssetsForRecast(projectId, projectDir, characterId) {
