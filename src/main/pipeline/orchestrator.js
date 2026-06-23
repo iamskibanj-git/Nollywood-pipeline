@@ -11598,6 +11598,11 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       .test(text);
   }
 
+  _isTransientProtectedReferenceUiReason(reason) {
+    return /composer @ element button not found|project elements button not found|elements picker|elements panel|elements modal|target page|context or browser has been closed|cannot read properties of null|keyboard|page\.waitfortimeout|page is closed|browser has been closed|reading 'evaluate'|reading "evaluate"/i
+      .test(String(reason || ''));
+  }
+
   _hasCompletedProtectedReferenceCreateProof(record, names = []) {
     const expected = names.map(name => this._normalizeElementName(name)).filter(Boolean);
     if (expected.length === 0) return false;
@@ -11617,13 +11622,127 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     return failed.length === 0 || failed.every(item => this._isTransientProtectedReferenceEligibilityStatus(item?.status));
   }
 
-  async _retryProtectedReferenceEligibilityOnly(projectId, videoAutomation, names = [], record = {}) {
+  async _enterProtectedReferenceElementBubble(projectId, label = 'protected-reference element refresh bubble') {
+    const projectSettings = this._getProjectSettings(projectId);
+    const cinemaProjectId = this.state.higgsfield_project_id || projectSettings.higgsfield_cinema_project_id || null;
+    const projectUrl = cinemaProjectId
+      ? `https://higgsfield.ai/generate?projectId=${cinemaProjectId}`
+      : null;
+
+    await this._ensureHiggsfieldSessionAlive(label);
+    await this.automation.ensureBrowser();
+    const page = this.automation.page;
+    if (!page || page.isClosed?.()) {
+      throw new Error(`Could not enter ${label}: browser page is not available`);
+    }
+    if (projectUrl) {
+      this.log(`[CINEMATIC] [PROTECTED-REF] Entering isolated element refresh bubble: ${projectUrl}`);
+      await page.goto(projectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(2500);
+      await this._holdForOverlayClearance(label);
+    }
+    return { page, projectUrl };
+  }
+
+  async _recreateMissingProtectedReferenceElements(projectId, projectDir, videoAutomation, names = [], record = {}) {
+    const missingNames = [...new Set(names.map(name => this._normalizeElementName(name)).filter(Boolean))].sort();
+    if (missingNames.length === 0) return { ok: true, recreated: [] };
+
+    const specProof = this._buildProtectedReferenceElementRefreshSpecs(projectId, projectDir, missingNames);
+    if (specProof.unresolved.length > 0) {
+      for (const item of specProof.unresolved) {
+        this._persistCinemaProtectedReferenceElementStatus(projectId, item.name, {
+          status: 'spec-failed',
+          phase: 'missing-only-recreate',
+          reason: item.reason,
+        });
+      }
+      const reason = specProof.unresolved.map(item => `@${item.name}: ${item.reason}`).join('; ');
+      return { ok: false, reason, unresolved: specProof.unresolved };
+    }
+
+    const { HiggsfieldElements } = require('../automation/higgsfield-elements');
+    const elements = new HiggsfieldElements({
+      automation: this.automation,
+      logger: (m) => this.log(`[CINEMATIC] [PROTECTED-REF] ${m}`),
+      projectId: this.state.higgsfield_project_id,
+    });
+
+    const recreated = [];
+    for (const spec of specProof.specs) {
+      await this.checkPause();
+      const name = spec.name;
+      this.log(`[CINEMATIC] [PROTECTED-REF] Missing-only phase: recreating @${name} without deleting additional elements.`);
+      this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+        status: 'create-pending',
+        phase: 'missing-only-recreate',
+        portraitPath: spec.portraitPath || null,
+        gridPath: spec.gridPath || null,
+      });
+      try {
+        elements.invalidateCache();
+        const createResult = await elements.createCharacterElement({
+          name: spec.name,
+          portraitPath: spec.portraitPath,
+          gridPath: spec.gridPath,
+          description: spec.description,
+        });
+        recreated.push({ name, created: !!createResult?.created });
+        videoAutomation.invalidateElementEligibility?.(name);
+        this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+          status: createResult?.created ? 'recreated' : 'exists-after-create',
+          phase: 'missing-only-recreate',
+          created: !!createResult?.created,
+        });
+      } catch (createErr) {
+        const reason = `Missing-only create failed for @${name}: ${createErr.message}`;
+        this.log(`[CINEMATIC] [PROTECTED-REF] ${reason}`, 'warn');
+        this._persistCinemaProtectedReferenceElementStatus(projectId, name, {
+          status: 'create-failed',
+          phase: 'missing-only-recreate',
+          reason,
+        });
+        return { ok: false, reason, recreated, failedName: name };
+      }
+    }
+
+    const existingRecreated = Array.isArray(record?.recreated) ? record.recreated : [];
+    const byName = new Map(existingRecreated
+      .map(item => [this._normalizeElementName(item?.name || item), item])
+      .filter(([name]) => !!name));
+    for (const item of recreated) byName.set(item.name, item);
+    this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+      status: 'eligibility-pending',
+      reason: 'protected-reference missing-only recreate completed; eligibility pending',
+      names: Array.isArray(record?.names) ? record.names : this._getManagedCinematicElementNames(projectId),
+      deleted: Array.isArray(record?.deleted) ? record.deleted : [],
+      absent: Array.isArray(record?.absent) ? record.absent : [],
+      recreated: [...byName.values()],
+      eligibility: [],
+      resumeRequired: true,
+    });
+    return { ok: true, recreated };
+  }
+
+  async _retryProtectedReferenceEligibilityOnly(projectId, projectDir, videoAutomation, names = [], record = {}) {
     const normalizedNames = [...new Set(names.map(name => this._normalizeElementName(name)).filter(Boolean))].sort();
     if (normalizedNames.length === 0) {
       return { ok: false, reason: 'no managed cinematic element names found for protected-reference eligibility retry' };
     }
 
     this.log(`[CINEMATIC] [PROTECTED-REF] Rechecking eligibility for ${normalizedNames.length} refreshed element(s) without deleting/recreating; prior failure was transient picker UI.`);
+    try {
+      await this._enterProtectedReferenceElementBubble(projectId, 'protected-reference eligibility resume');
+    } catch (entryErr) {
+      const reason = `Could not enter protected-reference eligibility resume bubble: ${entryErr.message}`;
+      this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+        status: 'eligibility-pending',
+        reason,
+        names: normalizedNames,
+        resumeRequired: true,
+      });
+      return { ok: false, reason, names: normalizedNames, transientUi: true };
+    }
 
     const { HiggsfieldElements } = require('../automation/higgsfield-elements');
     const elements = new HiggsfieldElements({
@@ -11637,16 +11756,63 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
       timeoutMs: 60000,
       label: 'Protected-reference refreshed Elements resume proof',
     });
-    if (modalProof.missing?.length > 0) {
-      const reason = `Elements modal missing refreshed element(s) during eligibility resume: ${modalProof.missing.map(n => '@' + n).join(', ')}`;
+    if (modalProof.reason && this._isTransientProtectedReferenceUiReason(modalProof.reason)) {
+      const reason = `Elements modal proof was transient during eligibility resume: ${modalProof.reason}`;
       this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
-        status: 'proof-failed',
+        status: 'eligibility-pending',
         reason,
         names: normalizedNames,
-        missing: modalProof.missing,
         resumeRequired: true,
       });
-      return { ok: false, reason, names: normalizedNames, missing: modalProof.missing };
+      return { ok: false, reason, names: normalizedNames, transientUi: true };
+    }
+    if (modalProof.missing?.length > 0) {
+      const recreateResult = await this._recreateMissingProtectedReferenceElements(
+        projectId,
+        projectDir,
+        videoAutomation,
+        modalProof.missing,
+        record
+      );
+      if (!recreateResult.ok) {
+        const reason = recreateResult.reason || `Could not recreate missing refreshed element(s): ${modalProof.missing.map(n => '@' + n).join(', ')}`;
+        this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+          status: 'proof-failed',
+          reason,
+          names: normalizedNames,
+          missing: modalProof.missing,
+          resumeRequired: true,
+        });
+        return { ok: false, reason, names: normalizedNames, missing: modalProof.missing };
+      }
+      record = this._getCinemaProtectedReferenceRebuildRecord(projectId) || record;
+
+      elements.invalidateCache();
+      const followupProof = await elements.confirmExistingElements(normalizedNames, {
+        timeoutMs: 60000,
+        label: 'Protected-reference refreshed Elements post-recreate proof',
+      });
+      if (followupProof.reason && this._isTransientProtectedReferenceUiReason(followupProof.reason)) {
+        const reason = `Elements modal proof was transient after missing-only recreate: ${followupProof.reason}`;
+        this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+          status: 'eligibility-pending',
+          reason,
+          names: normalizedNames,
+          resumeRequired: true,
+        });
+        return { ok: false, reason, names: normalizedNames, transientUi: true };
+      }
+      if (followupProof.missing?.length > 0) {
+        const reason = `Elements modal missing refreshed element(s) after missing-only recreate: ${followupProof.missing.map(n => '@' + n).join(', ')}`;
+        this._persistCinemaProtectedReferenceRebuildRecord(projectId, {
+          status: 'proof-failed',
+          reason,
+          names: normalizedNames,
+          missing: followupProof.missing,
+          resumeRequired: true,
+        });
+        return { ok: false, reason, names: normalizedNames, missing: followupProof.missing };
+      }
     }
     this._persistCinematicElementModalProof(projectId, normalizedNames, 'protected-reference-refresh-resume');
 
@@ -11728,33 +11894,31 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     if (this._shouldRetryProtectedReferenceEligibilityOnly(record, names)) {
       const eligibilityResult = await this._retryProtectedReferenceEligibilityOnly(
         projectId,
+        projectDir,
         videoAutomation,
         names,
         record
       ).catch(err => ({
         ok: false,
         reason: err.message,
-        transientUi: /composer @ element button not found|elements picker|target page|context or browser has been closed/i.test(err.message || ''),
+        transientUi: this._isTransientProtectedReferenceUiReason(err.message),
       }));
       if (eligibilityResult?.ok) {
         this.log(`[CINEMATIC] [PROTECTED-REF] Pending protected-reference eligibility completed on resume; video setup may continue.`);
         return true;
       }
-      if (eligibilityResult?.transientUi) {
-        const reason = eligibilityResult.reason || 'transient protected-reference eligibility picker failure';
-        this.log(`[CINEMATIC] [PROTECTED-REF] Eligibility-only resume still hit transient UI: ${reason}. Pausing without another delete/recreate cycle.`, 'error');
-        this.emit({
-          type: 'waiting',
-          gate: 'cinema-protected-reference-elements',
-          message: reason,
-        });
-        this.paused = true;
-        this.state.status = 'paused';
-        this.emit({ type: 'paused', reason: 'cinema-protected-reference-elements' });
-        await this.checkPause();
-        return false;
-      }
-      this.log(`[CINEMATIC] [PROTECTED-REF] Eligibility-only resume did not clear the refresh (${eligibilityResult?.reason || 'unknown'}); running next full refresh attempt if available.`, 'warn');
+      const reason = eligibilityResult?.reason || 'protected-reference eligibility resume did not clear the refresh';
+      this.log(`[CINEMATIC] [PROTECTED-REF] Eligibility-only resume did not clear the refresh: ${reason}. Pausing without another delete/recreate cycle.`, 'error');
+      this.emit({
+        type: 'waiting',
+        gate: 'cinema-protected-reference-elements',
+        message: reason,
+      });
+      this.paused = true;
+      this.state.status = 'paused';
+      this.emit({ type: 'paused', reason: 'cinema-protected-reference-elements' });
+      await this.checkPause();
+      return false;
     }
 
     const refreshResult = await this._rebuildCinemaElementsAfterProtectedReferenceBlock(
