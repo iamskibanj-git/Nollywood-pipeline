@@ -11759,6 +11759,7 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
     this._clearCinematicElementProofsForProtectedReferenceRefresh(projectId);
 
     try {
+      await this._ensureHiggsfieldSessionAlive('protected-reference element refresh bubble');
       await this.automation.ensureBrowser();
       const page = this.automation.page;
       if (page && !page.isClosed?.() && this.state.higgsfield_project_id) {
@@ -14774,6 +14775,69 @@ OUTPUT FORMAT: Return the COMPLETE modified prompt (all shots, not just changed 
   }
 
   /**
+   * Pause the pipeline for Higgsfield re-authentication, then resume after
+   * the user logs in and clicks Resume.
+   */
+  async _pauseForHiggsfieldSessionRecovery(label, message) {
+    this.log(`[HIGGSFIELD] Session expired during ${label}. Relaunching browser for re-authentication...`, 'warn');
+    this.paused = true;
+    this.state.status = 'session_expired';
+    this.emit({ type: 'session-expired', message: message || `SESSION_EXPIRED during ${label}` });
+
+    if (this.automation) {
+      try {
+        await this.automation.close();
+        this.log('Closed old browser session');
+      } catch (_) { /* browser may already be dead */ }
+      await this.automation.ensureBrowser();
+      await this.automation.page.goto('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      this.log('Fresh browser opened — please log into Higgsfield, then click Resume.');
+    }
+
+    await new Promise((resolve) => { this._pauseResolver = resolve; });
+    this._pauseResolver = null;
+
+    if (this.cancelled) {
+      throw new Error('Pipeline cancelled during session recovery');
+    }
+
+    if (this.automation) {
+      try { await this.automation.saveSession(); } catch (_) { /* ignore */ }
+    }
+
+    this.paused = false;
+    this.state.status = 'running';
+    this.emit({ type: 'resumed' });
+    this.log(`[HIGGSFIELD] Resumed after re-authentication — continuing ${label}`);
+  }
+
+  async _ensureHiggsfieldSessionAlive(label) {
+    if (!this.automation) return;
+
+    await this.automation.ensureBrowser();
+    await this.automation.page?.goto?.('https://higgsfield.ai', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    if (typeof this.automation.preflightCheck !== 'function') return;
+
+    let preflight = await this.automation.preflightCheck();
+    if (preflight?.ok) return;
+
+    const reason = preflight?.reason || 'Higgsfield session could not be verified';
+    if (/verification/i.test(reason)) {
+      await this._pauseForHiggsfieldVerification(label, reason);
+    } else {
+      await this._pauseForHiggsfieldSessionRecovery(label, `SESSION_EXPIRED: ${reason}`);
+    }
+
+    if (this.cancelled) throw new Error('Pipeline cancelled during session preflight');
+    preflight = await this.automation.preflightCheck();
+    if (preflight?.ok) return;
+
+    throw new Error(`SESSION_EXPIRED: Higgsfield session still not ready after resume for ${label}: ${preflight?.reason || 'unknown session state'}`);
+  }
+
+  /**
+   * Wrap a Higgsfield automation call with SESSION_EXPIRED recovery.
+   * If the session expires mid-generation, pauses the pipeline, emits a
    * 'session-expired' event so the UI can prompt the user to log in,
    * then retries the same operation once after resume.
    *
