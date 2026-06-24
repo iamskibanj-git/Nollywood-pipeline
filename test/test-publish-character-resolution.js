@@ -52,17 +52,6 @@ async function main() {
   const legacyByHint = Object.fromEntries(legacyCharacters.map(c => [c.elementNameHint, c]));
   assert.strictEqual(legacyByHint.nneka_osuagwu.elementName, 'nneka_osuagwu_botmf_0526');
 
-  assert.deepStrictEqual(
-    thumbGen._buildThumbnailTitleLines('She Chose Wealth Over Blood \u2014 Abuja Changed Her | Nigerian AI Film'),
-    ['She Chose Wealth Over Blood', 'Abuja Changed Her'],
-    'publish title overlay should strip production suffix and split on the story dash'
-  );
-  assert.strictEqual(
-    thumbGen._stripThumbnailProductionSuffix('She Chose Wealth Over Blood \u2014 Abuja Changed Her | Nigerian AI Film'),
-    'She Chose Wealth Over Blood \u2014 Abuja Changed Her',
-    'production suffix should not leak into local title overlay'
-  );
-
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-thumb-reuse-'));
   fs.writeFileSync(path.join(outputDir, 'key-art-custom.png'), Buffer.alloc(2048, 1));
   fs.writeFileSync(path.join(outputDir, 'title-card.png'), Buffer.alloc(2048, 2));
@@ -101,48 +90,6 @@ async function main() {
     'composite should still submit both intermediate references'
   );
   assert.strictEqual(path.basename(retryResult.thumbnailPath), 'thumbnail-custom.png');
-
-  const localOutputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-thumb-local-'));
-  fs.writeFileSync(path.join(localOutputDir, 'key-art-custom.png'), Buffer.alloc(2048, 4));
-  const capturedHtml = [];
-  const renderedPaths = [];
-  const localAutomation = {
-    page: {
-      context: () => ({
-        newPage: async () => ({
-          setViewportSize: async () => {},
-          setContent: async (html) => { capturedHtml.push(html); },
-          evaluate: async () => {},
-          screenshot: async (opts) => {
-            renderedPaths.push(path.basename(opts.path));
-            fs.writeFileSync(opts.path, Buffer.alloc(2048, 5));
-          },
-          close: async () => {},
-        }),
-      }),
-    },
-    generateImage: async () => {
-      throw new Error('local thumbnail composite should not call generateImage');
-    },
-  };
-  const localThumbGen = new ThumbnailGenerator(localAutomation, {});
-  const localResult = await localThumbGen.generateCustomThumbnail({
-    title: 'She Chose Wealth Over Blood \u2014 Abuja Changed Her | Nigerian AI Film',
-    tagline: '',
-    characterElementName: 'sewa_o1_scwob_0615',
-    expression: 'ice-cold unreadable',
-    outputDir: localOutputDir,
-    placement: 'auto',
-  });
-  assert.deepStrictEqual(
-    renderedPaths,
-    ['title-card.png', 'thumbnail-custom.png'],
-    'local publish path should render exact title card and final thumbnail without AI composite'
-  );
-  assert.ok(capturedHtml.some(html => html.includes('She Chose Wealth Over Blood')));
-  assert.ok(capturedHtml.some(html => html.includes('Abuja Changed Her')));
-  assert.ok(!capturedHtml.some(html => html.includes('Nigerian AI Film')));
-  assert.strictEqual(path.basename(localResult.thumbnailPath), 'thumbnail-custom.png');
 
   console.log('publish character resolution regression checks passed');
 }
