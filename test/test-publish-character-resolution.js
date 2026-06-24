@@ -51,6 +51,11 @@ async function main() {
   const legacyCharacters = thumbGen.getCharactersForThumbnail(script, '_botmf_0526');
   const legacyByHint = Object.fromEntries(legacyCharacters.map(c => [c.elementNameHint, c]));
   assert.strictEqual(legacyByHint.nneka_osuagwu.elementName, 'nneka_osuagwu_botmf_0526');
+  assert.strictEqual(
+    thumbGen._detectImageMimeType(Buffer.from('524946460000000057454250', 'hex')),
+    'image/webp',
+    'vision calls should sniff WebP content even when files are saved with .png names'
+  );
 
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-thumb-reuse-'));
   fs.writeFileSync(path.join(outputDir, 'key-art-custom.png'), Buffer.alloc(2048, 1));
@@ -90,6 +95,88 @@ async function main() {
     'composite should still submit both intermediate references'
   );
   assert.strictEqual(path.basename(retryResult.thumbnailPath), 'thumbnail-custom.png');
+
+  const visionRetryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-thumb-vision-'));
+  fs.writeFileSync(path.join(visionRetryDir, 'key-art-custom.png'), Buffer.alloc(2048, 4));
+  fs.writeFileSync(path.join(visionRetryDir, 'title-card.png'), Buffer.alloc(2048, 5));
+
+  const oldFetch = global.fetch;
+  const visionGenerateCalls = [];
+  let visionFetchCalls = 0;
+  global.fetch = async () => {
+    visionFetchCalls += 1;
+    const failed = visionFetchCalls === 1;
+    return {
+      ok: true,
+      json: async () => ({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify(failed
+                ? {
+                    pass: false,
+                    title_match: false,
+                    tagline_match: true,
+                    text_found: 'Retry Tltle',
+                    readability_ok: true,
+                    face_clear: true,
+                    extra_text: false,
+                    notes: 'title misspelled',
+                  }
+                : {
+                    pass: true,
+                    title_match: true,
+                    tagline_match: true,
+                    text_found: 'Retry Title',
+                    readability_ok: true,
+                    face_clear: true,
+                    extra_text: false,
+                    notes: '',
+                  }),
+            }],
+          },
+        }],
+      }),
+    };
+  };
+
+  try {
+    const visionAutomation = {
+      page: { url: () => 'https://higgsfield.ai/ai/image?model=nano-banana-pro' },
+      isLoggedIn: async () => true,
+      generateImage: async (opts) => {
+        visionGenerateCalls.push({
+          output: path.basename(opts.outputPath),
+          prompt: opts.prompt,
+          references: (opts.references || []).map(ref => path.basename(ref)),
+        });
+        fs.writeFileSync(opts.outputPath, Buffer.alloc(2048, 6));
+        return { model: 'test' };
+      },
+    };
+    const visionThumbGen = new ThumbnailGenerator(visionAutomation, { geminiApiKey: 'test-key' });
+    await visionThumbGen.generateCustomThumbnail({
+      title: 'Retry Title',
+      tagline: '',
+      characterElementName: 'nneka_osuagwu_botmf_0526',
+      expression: 'intense determined',
+      outputDir: visionRetryDir,
+      placement: 'lower-third',
+    });
+
+    assert.strictEqual(visionFetchCalls, 2, 'composite vision check should run once per composite attempt');
+    assert.deepStrictEqual(
+      visionGenerateCalls.map(call => call.output),
+      ['thumbnail-custom.png', 'thumbnail-custom.png'],
+      'failed composite vision check should re-do Higgsfield composite'
+    );
+    assert.ok(
+      visionGenerateCalls[1].prompt.includes('Correction pass 2'),
+      'redo prompt should tell Higgsfield why the composite is being regenerated'
+    );
+  } finally {
+    global.fetch = oldFetch;
+  }
 
   console.log('publish character resolution regression checks passed');
 }

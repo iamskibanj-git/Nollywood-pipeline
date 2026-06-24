@@ -72,7 +72,7 @@ class ThumbnailGenerator {
     // Stage 3: Composite
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
     await this.compositeThumbnail({
-      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
+      keyArtPath, titleCardPath, title, tagline, placement, outputPath: thumbnailPath, aspectRatio,
     });
 
     return { thumbnailPath, keyArtPath, titleCardPath };
@@ -211,7 +211,7 @@ Requirements:
   /**
    * Stage 3: Composite title card over key art using both as references.
    */
-  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = true, referenceUploadWarmupMs = 12000, referenceUploadAllowAnyInput = false }) {
+  async compositeThumbnail({ keyArtPath, titleCardPath, title = '', tagline = '', placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = true, referenceUploadWarmupMs = 12000, referenceUploadAllowAnyInput = false, maxVisionAttempts = 3, visionAttempt = 1 }) {
     const placementInstructions = {
       'upper-third':    'Position the title text in the UPPER THIRD of the frame, spanning the full width',
       'lower-third':    'Position the title text in the LOWER THIRD of the frame, spanning the full width',
@@ -223,7 +223,7 @@ Requirements:
     };
     const placementInstruction = placementInstructions[placement] || placementInstructions['auto'];
 
-    const prompt = `Composite thumbnail: overlay the title card (second reference image) onto the key art (first reference image).
+    let prompt = `Composite thumbnail: overlay the title card (second reference image) onto the key art (first reference image).
 
 Requirements:
 - Use the EXACT key art as the background — do not modify the characters, lighting, or composition
@@ -235,8 +235,14 @@ Requirements:
 - Blend naturally: slight darkened gradient behind text area for readability
 - Final result should look like a professional YouTube thumbnail
 - NO additional text, NO watermarks, NO borders`;
+    if (visionAttempt > 1) {
+      prompt += `
 
-    console.log(`[THUMBNAIL] Stage 3: Compositing (placement: ${placement})...`);
+Correction pass ${visionAttempt}: The previous composite failed final thumbnail verification. Recreate the composite from the same two references, preserve the exact title-card spelling, and keep all text clear of faces.`;
+    }
+
+    const attemptLabel = this.geminiApiKey && title ? `, vision attempt ${visionAttempt}/${maxVisionAttempts}` : '';
+    console.log(`[THUMBNAIL] Stage 3: Compositing (placement: ${placement}${attemptLabel})...`);
     try {
       await this._ensureLoggedIn();
       await this._genImage({
@@ -285,6 +291,40 @@ Requirements:
         if (!recovered) throw genErr;
       }
     }
+    if (this.geminiApiKey && title) {
+      const visionResult = await this._verifyCompositeThumbnail(outputPath, {
+        expectedTitle: title,
+        expectedTagline: tagline,
+        placementInstruction,
+      });
+
+      if (!visionResult.pass) {
+        const reason = visionResult.notes || visionResult.textFound || 'unknown verification failure';
+        if (visionAttempt < maxVisionAttempts) {
+          console.warn(`[THUMBNAIL] Stage 3: Vision verification failed on attempt ${visionAttempt}/${maxVisionAttempts}: ${reason}. Re-doing composite.`);
+          return this.compositeThumbnail({
+            keyArtPath,
+            titleCardPath,
+            title,
+            tagline,
+            placement,
+            outputPath,
+            aspectRatio,
+            skipRecoveryOnReferenceFailure,
+            referenceUploadWarmupMs,
+            referenceUploadAllowAnyInput,
+            maxVisionAttempts,
+            visionAttempt: visionAttempt + 1,
+          });
+        }
+        throw new Error(`COMPOSITE_VERIFICATION_FAILED: ${reason}`);
+      }
+
+      console.log(`[THUMBNAIL] Stage 3: Vision verification passed on attempt ${visionAttempt}`);
+    } else if (!this.geminiApiKey && title) {
+      console.log('[THUMBNAIL] Stage 3: No Gemini key - skipping final composite vision verification');
+    }
+
     console.log(`[THUMBNAIL] Stage 3 complete: ${outputPath}`);
   }
 
@@ -426,9 +466,7 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
 
   async _verifyTitleCardOCR(imagePath, expectedTitle, expectedTagline) {
     try {
-      const imageBuffer = fs.readFileSync(imagePath);
-      const base64Image = imageBuffer.toString('base64');
-      const mimeType = 'image/png';
+      const { base64Image, mimeType } = this._imageInlineData(imagePath);
 
       const resp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.geminiApiKey}`,
@@ -471,9 +509,93 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
     }
   }
 
-  async _scoreImageForThumbnail(imagePath) {
+  _imageInlineData(imagePath) {
     const imageBuffer = fs.readFileSync(imagePath);
-    const base64Image = imageBuffer.toString('base64');
+    return {
+      base64Image: imageBuffer.toString('base64'),
+      mimeType: this._detectImageMimeType(imageBuffer),
+    };
+  }
+
+  _detectImageMimeType(buffer) {
+    const header = buffer.subarray(0, 12).toString('hex').toLowerCase();
+    if (header.startsWith('89504e47')) return 'image/png';
+    if (header.startsWith('ffd8ff')) return 'image/jpeg';
+    if (header.startsWith('52494646') && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+    return 'image/png';
+  }
+
+  async _verifyCompositeThumbnail(imagePath, { expectedTitle, expectedTagline = '', placementInstruction = '' } = {}) {
+    try {
+      const { base64Image, mimeType } = this._imageInlineData(imagePath);
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inlineData: { mimeType, data: base64Image } },
+                { text: `Inspect this final YouTube thumbnail composite. Expected title text: "${expectedTitle}".${expectedTagline ? ` Expected tagline text: "${expectedTagline}".` : ''} Placement requirement: ${placementInstruction || 'title must be readable and not cover faces'}.
+
+Check the ACTUAL VISIBLE FINAL IMAGE, not the prompt. Verify:
+- the expected title is present with exact spelling; ignore only line breaks and extra whitespace
+- the expected tagline is present with exact spelling when one is expected
+- no extra unrelated text, watermarks, or gibberish title variants are visible
+- title/card text is readable at thumbnail scale
+- no text, rule line, shadow, glow, or box covers any face/head/eyes/mouth/neck
+
+Reply strictly JSON: { "pass": boolean, "title_match": boolean, "tagline_match": boolean, "text_found": "all visible text you can read", "readability_ok": boolean, "face_clear": boolean, "extra_text": boolean, "notes": "specific reason if pass is false" }` },
+              ],
+            }],
+            generationConfig: { maxOutputTokens: 450 },
+          }),
+        }
+      );
+
+      if (!resp.ok) {
+        console.warn(`[THUMBNAIL] Composite vision verification returned ${resp.status}`);
+        return { pass: true, notes: 'Gemini unavailable - assuming composite pass' };
+      }
+
+      const data = await resp.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.warn('[THUMBNAIL] Composite vision verification returned unparsable text');
+        return { pass: true, notes: 'Could not parse composite verification - assuming pass' };
+      }
+
+      const result = JSON.parse(jsonMatch[0]);
+      const titleMatch = result.title_match === true || result.titleMatch === true;
+      const taglineExpected = !!String(expectedTagline || '').trim();
+      const taglineMatch = taglineExpected
+        ? (result.tagline_match === true || result.taglineMatch === true)
+        : result.tagline_match !== false && result.taglineMatch !== false;
+      const readabilityOk = result.readability_ok !== false && result.readabilityOk !== false;
+      const faceClear = result.face_clear !== false && result.faceClear !== false;
+      const extraText = result.extra_text === true || result.extraText === true;
+      const pass = result.pass === true && titleMatch && taglineMatch && readabilityOk && faceClear && !extraText;
+
+      return {
+        pass,
+        titleMatch,
+        taglineMatch,
+        readabilityOk,
+        faceClear,
+        extraText,
+        textFound: result.text_found || result.textFound || '',
+        notes: result.notes || '',
+      };
+    } catch (e) {
+      console.warn(`[THUMBNAIL] Composite vision verification failed: ${e.message}`);
+      return { pass: true, notes: `Composite verification error - assuming pass: ${e.message}` };
+    }
+  }
+
+  async _scoreImageForThumbnail(imagePath) {
+    const { base64Image, mimeType } = this._imageInlineData(imagePath);
 
     const resp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.geminiApiKey}`,
@@ -483,7 +605,7 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
         body: JSON.stringify({
           contents: [{
             parts: [
-              { inlineData: { mimeType: 'image/png', data: base64Image } },
+              { inlineData: { mimeType, data: base64Image } },
               { text: `Rate this image as a YouTube thumbnail candidate on a scale of 1-10. Consider: face visibility, emotional intensity, composition, color vibrancy, visual clarity, and whether it would grab attention in a YouTube feed. Reply strictly JSON: { "score": N, "reason": "one sentence explanation" }` },
             ],
           }],
@@ -557,7 +679,7 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
 
     // Stage 3: Composite (same as scene-based flow)
     await this.compositeThumbnail({
-      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
+      keyArtPath, titleCardPath, title, tagline, placement, outputPath: thumbnailPath, aspectRatio,
     });
 
     return { thumbnailPath, keyArtPath, titleCardPath };
