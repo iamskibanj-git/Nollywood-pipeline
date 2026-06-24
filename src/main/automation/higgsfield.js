@@ -1381,6 +1381,7 @@ class HiggsFieldAutomation {
           minSimilarity: promptMatchMinSimilarity,
           maxTilesToCheck: promptMatchMaxTilesToCheck,
           timeoutMs: promptMatchTimeoutMs,
+          detectedUrl,
         });
 
         if (!recovered) {
@@ -6189,12 +6190,206 @@ class HiggsFieldAutomation {
    * @param {number} [opts.timeoutMs=90000]   - total recovery timeout
    * @returns {Promise<{path, sourceGenId, assetUuid, similarity}|null>}
    */
+  _extractAssetUuidFromUrl(value) {
+    const raw = String(value || '');
+    if (!raw) return null;
+    const uuidRe = /([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+    const direct = raw.match(uuidRe);
+    if (direct) return direct[1];
+    try {
+      const decoded = decodeURIComponent(raw);
+      const decodedMatch = decoded.match(uuidRe);
+      if (decodedMatch) return decodedMatch[1];
+    } catch (_) {}
+    return null;
+  }
+
+  async _collectAssetTiles(page, type = 'image') {
+    if (!page) return [];
+    return await page.evaluate((assetType) => {
+      const uuidRe = /([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+      const byUuid = new Map();
+      const visible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      };
+      const readUuid = (value) => {
+        const text = String(value || '');
+        const direct = text.match(uuidRe);
+        if (direct) return direct[1];
+        try {
+          const decoded = decodeURIComponent(text);
+          const decodedMatch = decoded.match(uuidRe);
+          if (decodedMatch) return decodedMatch[1];
+        } catch (_) {}
+        return null;
+      };
+      const add = (uuid, el, source) => {
+        if (!uuid || byUuid.has(uuid)) return;
+        const anchor = el?.closest?.(`a[href*="/asset/${assetType}/"]`);
+        const target = anchor || el;
+        if (!visible(target) && !visible(el)) return;
+        const r = (visible(target) ? target : el).getBoundingClientRect();
+        if (r.width < 40 || r.height < 40) return;
+        byUuid.set(uuid, {
+          uuid,
+          source,
+          x: Math.round(r.x + r.width / 2),
+          y: Math.round(r.y + r.height / 2),
+        });
+      };
+
+      for (const el of document.querySelectorAll('figure[data-asset-id]')) {
+        add(el.getAttribute('data-asset-id'), el, 'figure[data-asset-id]');
+      }
+      for (const el of document.querySelectorAll('[data-asset-id]')) {
+        add(el.getAttribute('data-asset-id'), el, '[data-asset-id]');
+      }
+      for (const a of document.querySelectorAll(`a[href*="/asset/${assetType}/"]`)) {
+        add(readUuid(a.getAttribute('href') || a.href), a, 'asset-link');
+      }
+      for (const img of document.querySelectorAll('img[src]')) {
+        const r = img.getBoundingClientRect();
+        if (r.width < 80 || r.height < 80) continue;
+        const srcUuid = readUuid(img.getAttribute('src') || img.src);
+        const hrefUuid = readUuid(img.closest('a')?.getAttribute('href') || img.closest('a')?.href || '');
+        add(hrefUuid || srcUuid, img, hrefUuid ? 'image-parent-link' : 'image-src');
+      }
+
+      return Array.from(byUuid.values());
+    }, type).catch(() => []);
+  }
+
+  async _recoverImageAssetByUuid(page, uuid, submittedPrompt, outputPath, opts = {}) {
+    const fs = require('fs');
+    const minSimilarity = opts.minSimilarity || 80;
+    const label = opts.label || uuid;
+
+    try {
+      await page.goto(`https://higgsfield.ai/asset/image/${uuid}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
+      });
+      await page.waitForTimeout(2000);
+
+      let detailReady = false;
+      for (let wait = 0; wait < 8; wait++) {
+        detailReady = await page.evaluate(() => {
+          const bodyText = document.body?.innerText || '';
+          return bodyText.includes('PROMPT') &&
+                 (bodyText.includes('Copy') || bodyText.includes('INFORMATION'));
+        }).catch(() => false);
+        if (detailReady) break;
+        await page.waitForTimeout(1000);
+      }
+
+      if (!detailReady) {
+        console.log(`[IMG RECOVERY] Detail panel did not load for ${label} (${uuid})`);
+        return null;
+      }
+
+      await this._expandAssetPromptDetails(page);
+      const tilePrompt = await this._waitForAssetPromptText(page, {
+        minLength: Math.min(120, Math.max(20, submittedPrompt.length * 0.15)),
+        timeoutMs: 10000,
+        stableMs: 1500,
+      });
+
+      if (!tilePrompt || tilePrompt.length < 20) {
+        console.log(`[IMG RECOVERY] No prompt text for ${label} (${uuid})`);
+        return null;
+      }
+
+      const similarity = this._promptSimilarity(submittedPrompt, tilePrompt);
+      console.log(`[IMG RECOVERY] ${label} (${uuid}) similarity: ${similarity}% (need >=${minSimilarity}%)`);
+      console.log(`[IMG RECOVERY]   Submitted (first 80): "${submittedPrompt.slice(0, 80)}..."`);
+      console.log(`[IMG RECOVERY]   Tile      (first 80): "${tilePrompt.slice(0, 80)}..."`);
+
+      if (similarity < minSimilarity) return null;
+
+      console.log(`[IMG RECOVERY] MATCH at ${similarity}% - downloading ${uuid}...`);
+      try {
+        const dlBtn = await page.getByText('Download', { exact: true }).first();
+        const [download] = await Promise.all([
+          page.waitForEvent('download', { timeout: 20000 }),
+          dlBtn.click({ timeout: 5000 }),
+        ]);
+        fs.mkdirSync(require('path').dirname(outputPath), { recursive: true });
+        await download.saveAs(outputPath);
+        const stat = fs.statSync(outputPath);
+        if (stat.size < 10000) {
+          console.warn(`[IMG RECOVERY] Download too small (${stat.size} bytes) - trying matched CDN fallback`);
+          fs.unlinkSync(outputPath);
+        } else {
+          console.log(`[IMG RECOVERY] Downloaded to ${outputPath} (${(stat.size / 1024).toFixed(1)} KB)`);
+          return { path: outputPath, sourceGenId: uuid, assetUuid: uuid, similarity };
+        }
+      } catch (dlErr) {
+        console.warn(`[IMG RECOVERY] Download button failed for ${label}: ${dlErr.message.split('\n')[0]} - trying matched CDN fallback`);
+      }
+
+      const detailCdnUrl = await this._extractDetailPreviewCdnUrl(page);
+      if (!detailCdnUrl) return null;
+      const bytes = await this._downloadImageUrlToPath(page, detailCdnUrl, outputPath);
+      if (bytes < 10000) {
+        try { fs.unlinkSync(outputPath); } catch (_) {}
+        console.warn(`[IMG RECOVERY] Matched CDN fallback too small (${bytes} bytes)`);
+        return null;
+      }
+      console.log(`[IMG RECOVERY] Downloaded matched CDN fallback to ${outputPath} (${(bytes / 1024).toFixed(1)} KB)`);
+      return { path: outputPath, sourceGenId: uuid, assetUuid: uuid, similarity, cdnUrl: detailCdnUrl };
+    } catch (error) {
+      console.warn(`[IMG RECOVERY] Error checking ${label} (${uuid}): ${error.message.split('\n')[0]}`);
+      return null;
+    }
+  }
+
+  async _extractDetailPreviewCdnUrl(page = this.page) {
+    if (!page) return null;
+    return await page.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('img[src]'));
+      for (const img of imgs) {
+        const r = img.getBoundingClientRect();
+        const src = img.src || '';
+        if (r.width < 180 || r.height < 120) continue;
+        if (src.includes('higgs') || src.includes('cloudfront') || src.includes('cdn')) {
+          return src;
+        }
+      }
+      return null;
+    }).catch(() => null);
+  }
+
+  async _downloadImageUrlToPath(page, imageUrl, outputPath) {
+    let fetchUrl = imageUrl;
+    try {
+      const parsed = new URL(imageUrl);
+      const originalUrl = parsed.searchParams.get('url');
+      if (originalUrl) fetchUrl = originalUrl;
+    } catch (_) {}
+
+    const bytes = await page.evaluate(async (url) => {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const buffer = await blob.arrayBuffer();
+      return Array.from(new Uint8Array(buffer));
+    }, fetchUrl);
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, Buffer.from(bytes));
+    return bytes.length;
+  }
+
   async recoverTimedOutImage(submittedPrompt, outputPath, opts = {}) {
     const fs = require('fs');
     const minSimilarity = opts.minSimilarity || 80;
     const maxTilesToCheck = opts.maxTilesToCheck || 8;
     const timeoutMs = opts.timeoutMs || 90000;
     const startedAt = Date.now();
+    const detectedUrl = opts.detectedUrl || opts.cdnUrl || null;
+    const directAssetUuid = this._extractAssetUuidFromUrl(detectedUrl);
 
     console.log('[IMG RECOVERY] Starting image recovery from Asset library...');
 
@@ -6214,6 +6409,16 @@ class HiggsFieldAutomation {
     if (!page) {
       console.warn('[IMG RECOVERY] No page after context recreate');
       return null;
+    }
+
+    if (directAssetUuid) {
+      console.log(`[IMG RECOVERY] Detected CDN URL contains asset/job UUID ${directAssetUuid} - trying detail page first`);
+      const directRecovered = await this._recoverImageAssetByUuid(page, directAssetUuid, submittedPrompt, outputPath, {
+        minSimilarity,
+        label: 'detected-url',
+      });
+      if (directRecovered) return directRecovered;
+      console.warn(`[IMG RECOVERY] Direct detail recovery did not verify ${directAssetUuid} - falling back to Asset grid scan`);
     }
 
     // ── 2. Navigate to Asset/Image grid ──
@@ -6250,6 +6455,19 @@ class HiggsFieldAutomation {
       if (imageTiles.length > 0) break;
       console.log(`[IMG RECOVERY] No image tiles yet (poll ${poll + 1}/4) — waiting 2s...`);
       await page.waitForTimeout(2000);
+    }
+
+    if (imageTiles.length === 0) {
+      const gridWaitMs = detectedUrl ? Math.min(60000, Math.max(8000, timeoutMs - (Date.now() - startedAt))) : 8000;
+      const gridWaitStartedAt = Date.now();
+      let broadPoll = 0;
+      while (Date.now() - gridWaitStartedAt <= gridWaitMs) {
+        broadPoll++;
+        imageTiles = await this._collectAssetTiles(page, 'image');
+        if (imageTiles.length > 0) break;
+        console.log(`[IMG RECOVERY] Broad asset scan found no tiles (poll ${broadPoll}, waited ${Math.round((Date.now() - gridWaitStartedAt) / 1000)}s/${Math.round(gridWaitMs / 1000)}s) - waiting 2s...`);
+        await page.waitForTimeout(2000);
+      }
     }
 
     if (imageTiles.length === 0) {
@@ -6404,6 +6622,10 @@ class HiggsFieldAutomation {
       }).catch(() => []);
       if (tiles.length > 0) break;
       await page.waitForTimeout(2000);
+    }
+
+    if (tiles.length === 0) {
+      tiles = await this._collectAssetTiles(page, type);
     }
 
     if (tiles.length === 0) {
