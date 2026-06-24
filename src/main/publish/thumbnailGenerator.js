@@ -63,16 +63,24 @@ class ThumbnailGenerator {
       });
     }
 
-    // Stage 2: Title card (transparent PNG with OCR verify)
+    // Stage 2: Title card. Publish thumbnails prefer the local renderer so
+    // final title pixels stay exact; the Higgsfield path remains the fallback
+    // for contexts that do not have a Playwright page.
     const titleCardPath = path.join(outputDir, 'title-card.png');
-    await this.generateTitleCard({
-      title, tagline, preset, outputPath: titleCardPath, aspectRatio,
-    });
+    if (this._canRenderLocalComposite()) {
+      await this._renderLocalTitleCard({
+        title, tagline, preset, outputPath: titleCardPath, aspectRatio,
+      });
+    } else {
+      await this.generateTitleCard({
+        title, tagline, preset, outputPath: titleCardPath, aspectRatio,
+      });
+    }
 
     // Stage 3: Composite
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
     await this.compositeThumbnail({
-      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
+      keyArtPath, titleCardPath, title, tagline, preset, placement, outputPath: thumbnailPath, aspectRatio,
     });
 
     return { thumbnailPath, keyArtPath, titleCardPath };
@@ -211,7 +219,22 @@ Requirements:
   /**
    * Stage 3: Composite title card over key art using both as references.
    */
-  async compositeThumbnail({ keyArtPath, titleCardPath, placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = true, referenceUploadWarmupMs = 12000, referenceUploadAllowAnyInput = false }) {
+  async compositeThumbnail({ keyArtPath, titleCardPath, title = '', tagline = '', preset = null, placement, outputPath, aspectRatio = '16:9', skipRecoveryOnReferenceFailure = true, referenceUploadWarmupMs = 12000, referenceUploadAllowAnyInput = false }) {
+    if (title && this._canRenderLocalComposite()) {
+      console.log(`[THUMBNAIL] Stage 3: Local deterministic composite (placement: ${placement})...`);
+      await this._renderLocalThumbnailComposite({
+        keyArtPath,
+        title,
+        tagline,
+        preset,
+        placement,
+        outputPath,
+        aspectRatio,
+      });
+      console.log(`[THUMBNAIL] Stage 3 complete: ${outputPath}`);
+      return;
+    }
+
     const placementInstructions = {
       'upper-third':    'Position the title text in the UPPER THIRD of the frame, spanning the full width',
       'lower-third':    'Position the title text in the LOWER THIRD of the frame, spanning the full width',
@@ -424,6 +447,365 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
     return prompt;
   }
 
+  _canRenderLocalComposite() {
+    const page = this.automation?.page;
+    return !!(page && typeof page.context === 'function');
+  }
+
+  async _renderLocalTitleCard({ title, tagline, preset, outputPath, aspectRatio = '16:9' }) {
+    const { width, height } = this._thumbnailDimensions(aspectRatio);
+    const html = this._buildLocalTitleCardHtml({
+      title,
+      tagline,
+      preset,
+      aspectRatio,
+      width,
+      height,
+    });
+
+    console.log(`[THUMBNAIL] Stage 2: Rendering local exact-text title card: ${outputPath}`);
+    await this._renderHtmlToPng({
+      html,
+      outputPath,
+      width,
+      height,
+      omitBackground: true,
+    });
+    return { outputPath, verified: true, local: true };
+  }
+
+  async _renderLocalThumbnailComposite({ keyArtPath, title, tagline, preset, placement, outputPath, aspectRatio = '16:9' }) {
+    if (!this._fileReady(keyArtPath)) {
+      throw new Error(`LOCAL_THUMBNAIL_KEY_ART_MISSING: ${keyArtPath}`);
+    }
+
+    const { width, height } = this._thumbnailDimensions(aspectRatio);
+    const imageDataUri = this._imageDataUri(keyArtPath);
+    const html = this._buildLocalThumbnailHtml({
+      imageDataUri,
+      title,
+      tagline,
+      preset,
+      placement,
+      aspectRatio,
+      width,
+      height,
+    });
+
+    await this._renderHtmlToPng({
+      html,
+      outputPath,
+      width,
+      height,
+      omitBackground: false,
+    });
+  }
+
+  async _renderHtmlToPng({ html, outputPath, width, height, omitBackground = false }) {
+    if (!this._canRenderLocalComposite()) {
+      throw new Error('LOCAL_THUMBNAIL_RENDER_UNAVAILABLE: no Playwright page context');
+    }
+
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const context = this.automation.page.context();
+    const page = await context.newPage();
+    try {
+      await page.setViewportSize({ width, height });
+      await page.setContent(html, { waitUntil: 'load' });
+      await page.evaluate(async () => {
+        if (document.fonts?.ready) await document.fonts.ready;
+      });
+      await page.evaluate(() => {
+        if (typeof window.fitLocalThumbnailText === 'function') {
+          window.fitLocalThumbnailText();
+        }
+      });
+      await page.screenshot({
+        path: outputPath,
+        type: 'png',
+        omitBackground,
+      });
+    } finally {
+      await page.close().catch(() => {});
+    }
+
+    if (!this._fileReady(outputPath)) {
+      throw new Error(`LOCAL_THUMBNAIL_RENDER_EMPTY: ${outputPath}`);
+    }
+  }
+
+  _thumbnailDimensions(aspectRatio) {
+    if (aspectRatio === '9:16') return { width: 1080, height: 1920 };
+    if (aspectRatio === '1:1') return { width: 1600, height: 1600 };
+    return { width: 1920, height: 1080 };
+  }
+
+  _imageDataUri(filePath) {
+    const buffer = fs.readFileSync(filePath);
+    const mime = this._sniffImageMime(buffer);
+    return `data:${mime};base64,${buffer.toString('base64')}`;
+  }
+
+  _sniffImageMime(buffer) {
+    const header = buffer.subarray(0, 12).toString('hex').toLowerCase();
+    if (header.startsWith('89504e47')) return 'image/png';
+    if (header.startsWith('ffd8ff')) return 'image/jpeg';
+    if (header.startsWith('52494646') && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+    return 'image/png';
+  }
+
+  _buildLocalThumbnailHtml({ imageDataUri, title, tagline, preset, placement, aspectRatio, width, height }) {
+    const text = this._buildThumbnailTextModel(title, tagline);
+    const resolvedPlacement = this._resolveLocalThumbnailPlacement(placement, aspectRatio);
+    const colors = this._thumbnailColors(preset);
+    const baseSize = aspectRatio === '9:16' ? 88 : 84;
+    const subSize = aspectRatio === '9:16' ? 112 : 116;
+    const singleSize = aspectRatio === '9:16' ? 112 : 126;
+    const textLines = text.lines.map((line, index) => (
+      `<div class="title-line line-${index + 1}">${this._escapeHtml(line)}</div>`
+    )).join('\n');
+    const rule = text.lines.length > 1 ? '<div class="title-rule"></div>' : '';
+    const kicker = text.kicker ? `<div class="kicker">${this._escapeHtml(text.kicker)}</div>` : '';
+
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+${this._localThumbnailCss({ colors, width, height })}
+.bg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.scrim { position:absolute; inset:0; background:linear-gradient(90deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.22) 44%, rgba(0,0,0,0.72) 100%); }
+.text-block { position:absolute; z-index:2; box-sizing:border-box; }
+.text-block.right-side { left:49%; right:5.5%; top:46%; transform:translateY(-50%); max-height:72%; text-align:left; }
+.text-block.left-side { left:5.5%; right:49%; top:46%; transform:translateY(-50%); max-height:72%; text-align:left; }
+.text-block.upper-third { left:7%; right:7%; top:7%; max-height:34%; text-align:center; }
+.text-block.lower-third { left:7%; right:7%; bottom:7%; max-height:34%; text-align:center; }
+.text-block.bottom-bar { left:0; right:0; bottom:0; max-height:30%; padding:34px 8%; text-align:center; background:linear-gradient(180deg, rgba(5,7,7,0) 0%, rgba(5,7,7,0.72) 24%, rgba(5,7,7,0.92) 100%); }
+.text-block.split-diagonal { left:5%; right:44%; bottom:11%; max-height:40%; transform:rotate(-5deg); text-align:left; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <img class="bg" src="${imageDataUri}" alt="">
+  <div class="scrim"></div>
+  <div class="text-block ${resolvedPlacement}" data-fit-block data-base="${baseSize}" data-sub="${subSize}" data-single="${singleSize}">
+    ${textLines}
+    ${rule}
+    ${kicker}
+  </div>
+</div>
+${this._localThumbnailFitScript()}
+</body>
+</html>`;
+  }
+
+  _buildLocalTitleCardHtml({ title, tagline, preset, aspectRatio, width, height }) {
+    const text = this._buildThumbnailTextModel(title, tagline);
+    const colors = this._thumbnailColors(preset);
+    const baseSize = aspectRatio === '9:16' ? 92 : 88;
+    const subSize = aspectRatio === '9:16' ? 116 : 122;
+    const singleSize = aspectRatio === '9:16' ? 120 : 132;
+    const textLines = text.lines.map((line, index) => (
+      `<div class="title-line line-${index + 1}">${this._escapeHtml(line)}</div>`
+    )).join('\n');
+    const rule = text.lines.length > 1 ? '<div class="title-rule"></div>' : '';
+    const kicker = text.kicker ? `<div class="kicker">${this._escapeHtml(text.kicker)}</div>` : '';
+
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+${this._localThumbnailCss({ colors, width, height })}
+body { background:transparent; }
+.stage { background:transparent; }
+.title-card-block { position:absolute; left:8%; right:8%; top:50%; transform:translateY(-50%); max-height:70%; text-align:center; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="title-card-block" data-fit-block data-base="${baseSize}" data-sub="${subSize}" data-single="${singleSize}">
+    ${textLines}
+    ${rule}
+    ${kicker}
+  </div>
+</div>
+${this._localThumbnailFitScript()}
+</body>
+</html>`;
+  }
+
+  _localThumbnailCss({ colors, width, height }) {
+    return `
+html, body { margin:0; width:${width}px; height:${height}px; overflow:hidden; }
+body { background:#050707; }
+.stage { position:relative; width:${width}px; height:${height}px; overflow:hidden; background:#050707; }
+.title-line {
+  margin:0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight:900;
+  line-height:0.92;
+  letter-spacing:0;
+  color:${colors.primary};
+  background:linear-gradient(180deg, ${colors.highlight} 0%, ${colors.primary} 48%, ${colors.shadow} 100%);
+  -webkit-background-clip:text;
+  background-clip:text;
+  -webkit-text-fill-color:transparent;
+  -webkit-text-stroke:2px rgba(13,9,2,0.95);
+  text-shadow:0 3px 0 rgba(0,0,0,0.82), 0 9px 20px rgba(0,0,0,0.68), 0 0 24px rgba(211,168,65,0.28);
+  white-space:normal;
+  overflow-wrap:normal;
+}
+.line-2 { margin-top:10px; }
+.title-rule {
+  width:100%;
+  height:4px;
+  margin:18px 0 14px;
+  border-radius:999px;
+  background:linear-gradient(90deg, rgba(0,0,0,0), ${colors.primary} 18%, ${colors.highlight} 50%, ${colors.primary} 82%, rgba(0,0,0,0));
+  box-shadow:0 3px 10px rgba(0,0,0,0.58);
+}
+.kicker {
+  margin-top:18px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-weight:800;
+  line-height:1.05;
+  letter-spacing:0;
+  text-transform:uppercase;
+  color:${colors.secondary};
+  text-shadow:0 3px 10px rgba(0,0,0,0.82);
+}`;
+  }
+
+  _localThumbnailFitScript() {
+    return `<script>
+window.fitLocalThumbnailText = function fitLocalThumbnailText() {
+  var blocks = document.querySelectorAll('[data-fit-block]');
+  blocks.forEach(function(block) {
+    var lines = Array.prototype.slice.call(block.querySelectorAll('.title-line'));
+    var kicker = block.querySelector('.kicker');
+    var base = Number(block.dataset.base || 86);
+    var sub = Number(block.dataset.sub || 112);
+    var single = Number(block.dataset.single || 124);
+    var scale = 1;
+    function applyScale() {
+      lines.forEach(function(line, index) {
+        var target = lines.length === 1 ? single : (index === 0 ? base : sub);
+        line.style.fontSize = Math.max(38, Math.floor(target * scale)) + 'px';
+      });
+      if (kicker) kicker.style.fontSize = Math.max(26, Math.floor(38 * scale)) + 'px';
+    }
+    for (var i = 0; i < 42; i += 1) {
+      applyScale();
+      if (block.scrollWidth <= block.clientWidth + 2 && block.scrollHeight <= block.clientHeight + 2) break;
+      scale -= 0.025;
+    }
+  });
+};
+</script>`;
+  }
+
+  _buildThumbnailTextModel(title, tagline = '') {
+    const lines = this._buildThumbnailTitleLines(title, tagline);
+    const cleanTitle = this._stripThumbnailProductionSuffix(title).toLowerCase();
+    const cleanTagline = this._stripThumbnailProductionSuffix(tagline);
+    const kicker = cleanTagline && cleanTagline.toLowerCase() !== cleanTitle
+      ? cleanTagline
+      : '';
+    return { lines, kicker };
+  }
+
+  _buildThumbnailTitleLines(title, tagline = '') {
+    const cleaned = this._stripThumbnailProductionSuffix(title)
+      || this._stripThumbnailProductionSuffix(tagline)
+      || 'Untitled';
+
+    const parts = cleaned
+      .split(/\s+(?:\u2014|\u2013|--|-)\s+|\s*:\s*/)
+      .map(part => part.trim())
+      .filter(Boolean);
+
+    if (parts.length >= 2 && parts[0].length >= 3 && parts[1].length >= 3) {
+      return [parts[0], parts.slice(1).join(' - ')];
+    }
+
+    if (cleaned.length <= 34) return [cleaned];
+    return this._balancedTitleSplit(cleaned);
+  }
+
+  _balancedTitleSplit(title) {
+    const words = String(title || '').trim().split(/\s+/).filter(Boolean);
+    if (words.length <= 1) return [String(title || '').trim() || 'Untitled'];
+
+    const midpoint = Math.ceil(words.join(' ').length / 2);
+    let bestIndex = 1;
+    let bestDistance = Infinity;
+    for (let i = 1; i < words.length; i += 1) {
+      const leftLength = words.slice(0, i).join(' ').length;
+      const distance = Math.abs(leftLength - midpoint);
+      if (distance < bestDistance) {
+        bestIndex = i;
+        bestDistance = distance;
+      }
+    }
+
+    return [
+      words.slice(0, bestIndex).join(' '),
+      words.slice(bestIndex).join(' '),
+    ];
+  }
+
+  _stripThumbnailProductionSuffix(value) {
+    let text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+
+    const pipeIndex = text.indexOf('|');
+    if (pipeIndex >= 0) {
+      const suffix = text.slice(pipeIndex + 1).trim();
+      if (!suffix || /\b(nigerian|nollywood|african|ai|film|movie|drama|series)\b/i.test(suffix)) {
+        text = text.slice(0, pipeIndex).trim();
+      }
+    }
+
+    return text.replace(/\s+\|\s*$/, '').trim();
+  }
+
+  _resolveLocalThumbnailPlacement(placement, aspectRatio) {
+    const normalized = String(placement || 'auto').toLowerCase();
+    if (aspectRatio === '9:16') {
+      return ['upper-third', 'lower-third', 'bottom-bar'].includes(normalized)
+        ? normalized
+        : 'bottom-bar';
+    }
+    if (aspectRatio === '1:1' && normalized === 'auto') return 'bottom-bar';
+    const allowed = ['upper-third', 'lower-third', 'left-side', 'right-side', 'bottom-bar', 'split-diagonal'];
+    if (normalized === 'auto') return 'right-side';
+    return allowed.includes(normalized) ? normalized : 'right-side';
+  }
+
+  _thumbnailColors(preset = {}) {
+    return {
+      primary: this._validHexColor(preset?.primary_hex, '#C9A84C'),
+      secondary: this._validHexColor(preset?.secondary_hex, '#F5EDD6'),
+      highlight: '#FFF0A8',
+      shadow: '#8E651C',
+    };
+  }
+
+  _validHexColor(value, fallback) {
+    const text = String(value || '').trim();
+    return /^#[0-9a-f]{6}$/i.test(text) ? text : fallback;
+  }
+
+  _escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   async _verifyTitleCardOCR(imagePath, expectedTitle, expectedTagline) {
     try {
       const imageBuffer = fs.readFileSync(imagePath);
@@ -530,7 +912,8 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
     fs.mkdirSync(outputDir, { recursive: true });
     const preset = this.presets[genre] || this.presets.drama;
     const thumbnailPath = path.join(outputDir, 'thumbnail-custom.png');
-    const canReuseIntermediates = !this._fileReady(thumbnailPath);
+    const useLocalComposite = this._canRenderLocalComposite();
+    const canReuseIntermediates = !this._fileReady(thumbnailPath) || useLocalComposite;
 
     // Stage 1: Custom close-up key art
     const keyArtPath = path.join(outputDir, 'key-art-custom.png');
@@ -547,7 +930,11 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
 
     // Stage 2: Title card (same as scene-based flow)
     const titleCardPath = path.join(outputDir, 'title-card.png');
-    if (canReuseIntermediates && this._fileReady(titleCardPath)) {
+    if (useLocalComposite) {
+      await this._renderLocalTitleCard({
+        title, tagline, preset, outputPath: titleCardPath, aspectRatio,
+      });
+    } else if (canReuseIntermediates && this._fileReady(titleCardPath)) {
       console.log(`[THUMBNAIL] Stage 2: Reusing existing title card: ${titleCardPath}`);
     } else {
       await this.generateTitleCard({
@@ -557,7 +944,7 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
 
     // Stage 3: Composite (same as scene-based flow)
     await this.compositeThumbnail({
-      keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
+      keyArtPath, titleCardPath, title, tagline, preset, placement, outputPath: thumbnailPath, aspectRatio,
     });
 
     return { thumbnailPath, keyArtPath, titleCardPath };
