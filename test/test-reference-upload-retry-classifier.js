@@ -20,6 +20,30 @@ function main() {
 
   assert.strictEqual(
     automation._isRetryableReferenceUploadError(new Error(
+      'REFERENCE_UPLOAD_FAILED: Could not upload reference 2/2 (title-card.png). All trusted-click approaches failed. Aborting to prevent generation without face consistency.'
+    )),
+    true,
+    'trusted-click reference upload failure should be retryable before Generate'
+  );
+
+  assert.strictEqual(
+    automation._isRetryableReferenceUploadError(new Error(
+      'REFERENCE_GATE_FAILED: Expected 2 reference thumbnails but only 1 visible in UI.'
+    )),
+    true,
+    'visible thumbnail gate failure should be retryable before Generate'
+  );
+
+  assert.strictEqual(
+    automation._isRetryableReferenceUploadError(new Error(
+      'REFERENCE_REGRESSION: After 30s extra wait, only 1/2 reference slots still filled.'
+    )),
+    true,
+    'post-upload reference regression should be retryable before Generate'
+  );
+
+  assert.strictEqual(
+    automation._isRetryableReferenceUploadError(new Error(
       'Reference did not register on backend within 90s'
     )),
     true,

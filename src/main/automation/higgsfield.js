@@ -514,7 +514,10 @@ class HiggsFieldAutomation {
   _isRetryableReferenceUploadError(err) {
     const message = err?.message || '';
     return (
+      message.includes('REFERENCE_UPLOAD_FAILED') ||
       message.includes('REFERENCE_UPLOAD_UNCONFIRMED') ||
+      message.includes('REFERENCE_GATE_FAILED') ||
+      message.includes('REFERENCE_REGRESSION') ||
       message.includes('did not register on backend') ||
       (message.includes('No successful upload response') && message.includes('no CDN URL swap'))
     );
@@ -3007,6 +3010,19 @@ class HiggsFieldAutomation {
       return uploadResponses.filter(r => r.ts >= ts && r.status >= 200 && r.status < 300).length;
     };
 
+    const countFreshUploadTransferSince = (ts) => {
+      return uploadResponses.filter((r) => {
+        if (r.ts < ts || r.status < 200 || r.status >= 300) return false;
+        if (r.method === 'PUT') return true;
+        return (
+          r.url.includes('/reference-media') ||
+          r.url.includes('/media/batch') ||
+          r.url.includes('/asset') ||
+          r.url.includes('/image')
+        );
+      }).length;
+    };
+
     // ── PERSISTENT FILECHOOSER HANDLER ──
     // Catches ANY filechooser event that fires during this function, regardless
     // of when or why. The handler attaches the CURRENT upload's file to whatever
@@ -3047,6 +3063,7 @@ class HiggsFieldAutomation {
 
       // Timestamp: network responses after this count toward this upload
       const uploadStartTs = Date.now();
+      let firstTrustedClickAt = 0;
 
       // Snapshot the current thumbnail count BEFORE upload attempt
       const beforeCount = await countFilledThumbnails();
@@ -3096,6 +3113,16 @@ class HiggsFieldAutomation {
         return false;
       };
 
+      const waitForTrustedUploadProof = async (sinceTs, timeoutMs) => {
+        const startWait = Date.now();
+        while (Date.now() - startWait < timeoutMs) {
+          const netHits = countFreshUploadTransferSince(sinceTs);
+          if (netHits > 0) return netHits;
+          await page.waitForTimeout(250);
+        }
+        return 0;
+      };
+
       // Approach 1: Real mouse click on clickable
       if (!uploaded && trigger.clickable) {
         try {
@@ -3116,6 +3143,8 @@ class HiggsFieldAutomation {
             console.log(`[REF]   Real mouse click at (${Math.round(finalX)}, ${Math.round(finalY)})...`);
             await page.mouse.move(finalX, finalY);
             await page.waitForTimeout(200);
+            const trustedClickAt = Date.now();
+            if (!firstTrustedClickAt) firstTrustedClickAt = trustedClickAt;
             await page.mouse.click(finalX, finalY);
 
             // The persistent handler attaches files automatically when fc fires.
@@ -3151,6 +3180,8 @@ class HiggsFieldAutomation {
                 const optY = uploadOption.y + uploadOption.h / 2;
                 await page.mouse.move(optX, optY);
                 await page.waitForTimeout(200);
+                const modalClickAt = Date.now();
+                if (!firstTrustedClickAt) firstTrustedClickAt = modalClickAt;
                 await page.mouse.click(optX, optY);
                 await page.evaluate(() => {
                   const el = document.querySelector('[data-ref-upload-option="true"]');
@@ -3176,9 +3207,19 @@ class HiggsFieldAutomation {
         }
       }
 
+      if (!uploaded && firstTrustedClickAt) {
+        const trustedNetHits = await waitForTrustedUploadProof(firstTrustedClickAt, 3000);
+        if (trustedNetHits > 0) {
+          uploadMethod = `trusted click backend upload proof (${trustedNetHits} transfer response(s))`;
+          uploaded = true;
+        }
+      }
+
       // Approach 2: elementHandle.click as fallback
       if (!uploaded && trigger.clickable) {
         try {
+          const trustedClickAt = Date.now();
+          if (!firstTrustedClickAt) firstTrustedClickAt = trustedClickAt;
           await trigger.clickable.click({ force: true });
           if (await waitForFcFire(8000)) {
             uploadMethod = 'elementHandle click → persistent handler';
@@ -3186,6 +3227,14 @@ class HiggsFieldAutomation {
           }
         } catch (e) {
           console.warn(`[REF]   elementHandle.click() failed: ${e.message.split('\n')[0]}`);
+        }
+      }
+
+      if (!uploaded && firstTrustedClickAt) {
+        const trustedNetHits = await waitForTrustedUploadProof(firstTrustedClickAt, 3000);
+        if (trustedNetHits > 0) {
+          uploadMethod = `trusted fallback click backend upload proof (${trustedNetHits} transfer response(s))`;
+          uploaded = true;
         }
       }
 
@@ -3211,6 +3260,8 @@ class HiggsFieldAutomation {
             console.log(`[REF]   Real mouse click on input parent at (${Math.round(clickX)}, ${Math.round(clickY)})...`);
             await page.mouse.move(clickX, clickY);
             await page.waitForTimeout(150);
+            const trustedClickAt = Date.now();
+            if (!firstTrustedClickAt) firstTrustedClickAt = trustedClickAt;
             await page.mouse.click(clickX, clickY);
             if (await waitForFcFire(8000)) {
               uploadMethod = 'parent click → persistent handler';
@@ -3228,6 +3279,15 @@ class HiggsFieldAutomation {
       // upload, so the file stays local forever — we end up timing out waiting
       // for a CDN URL that will never come.
       // Better to fail loudly here and abort than generate without references.
+
+      if (!uploaded) {
+        const trustedProofStart = firstTrustedClickAt || uploadStartTs;
+        const lateTrustedNetHits = await waitForTrustedUploadProof(trustedProofStart, 3000);
+        if (lateTrustedNetHits > 0) {
+          uploadMethod = `trusted click late backend upload proof (${lateTrustedNetHits} transfer response(s))`;
+          uploaded = true;
+        }
+      }
 
       if (!uploaded) {
         console.error(`[REF]   ALL trusted-click upload approaches failed for ref ${i + 1}`);

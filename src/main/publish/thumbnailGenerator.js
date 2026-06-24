@@ -374,6 +374,14 @@ Requirements:
     }
   }
 
+  _fileReady(filePath, minBytes = 1024) {
+    try {
+      return fs.existsSync(filePath) && fs.statSync(filePath).size > minBytes;
+    } catch (_) {
+      return false;
+    }
+  }
+
   _splitTitle(title) {
     if (title.length <= 30) return [title];
     // Try splitting at natural break points
@@ -521,24 +529,33 @@ Centered text composition. Line 1: "${titleLine1}" — ${fontFamilyHint}, heavyw
 
     fs.mkdirSync(outputDir, { recursive: true });
     const preset = this.presets[genre] || this.presets.drama;
+    const thumbnailPath = path.join(outputDir, 'thumbnail-custom.png');
+    const canReuseIntermediates = !this._fileReady(thumbnailPath);
 
     // Stage 1: Custom close-up key art
     const keyArtPath = path.join(outputDir, 'key-art-custom.png');
-    await this.generateCustomKeyArt({
-      characterElementName,
-      expression,
-      outputPath: keyArtPath,
-      aspectRatio,
-    });
+    if (canReuseIntermediates && this._fileReady(keyArtPath)) {
+      console.log(`[THUMBNAIL] Custom Stage 1: Reusing existing close-up: ${keyArtPath}`);
+    } else {
+      await this.generateCustomKeyArt({
+        characterElementName,
+        expression,
+        outputPath: keyArtPath,
+        aspectRatio,
+      });
+    }
 
     // Stage 2: Title card (same as scene-based flow)
     const titleCardPath = path.join(outputDir, 'title-card.png');
-    await this.generateTitleCard({
-      title, tagline, preset, outputPath: titleCardPath, aspectRatio,
-    });
+    if (canReuseIntermediates && this._fileReady(titleCardPath)) {
+      console.log(`[THUMBNAIL] Stage 2: Reusing existing title card: ${titleCardPath}`);
+    } else {
+      await this.generateTitleCard({
+        title, tagline, preset, outputPath: titleCardPath, aspectRatio,
+      });
+    }
 
     // Stage 3: Composite (same as scene-based flow)
-    const thumbnailPath = path.join(outputDir, 'thumbnail-custom.png');
     await this.compositeThumbnail({
       keyArtPath, titleCardPath, placement, outputPath: thumbnailPath, aspectRatio,
     });
