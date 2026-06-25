@@ -120,8 +120,8 @@ class ShortsScheduler {
   planCalendar(projectId, options = {}) {
     const {
       mode = 'standalone_impact',
-      calendarDays = CALENDAR_DAYS,
     } = options;
+    const calendarDays = normalizePositiveInteger(options.calendarDays, CALENDAR_DAYS);
 
     // Resolve start date: explicit > day after durable scheduled short > tomorrow.
     // Draft planned rows are replaced after this calculation, so ignore them here.
@@ -159,15 +159,22 @@ class ShortsScheduler {
 
     this.log(`[SHORTS] Total clip duration: ${totalDuration.toFixed(1)}s | ${calendarDays} day calendar | Target per short: ${targetPerShort.toFixed(1)}s`);
 
-    // Group clips into shorts using real durations
-    const shorts = this._groupClipsIntoShorts(clips, targetPerShort);
+    // Prefer one whole-clip short per calendar day when the clip inventory supports it.
+    let groupingMode = 'duration-target';
+    let shorts = this._groupClipsForCalendarWindow(clips, calendarDays);
+    if (shorts) {
+      groupingMode = 'calendar-window';
+      this.log(`[SHORTS] Calendar-aware grouping: ${clips.length} clips -> ${shorts.length} shorts (${calendarDays} requested day(s))`);
+    } else {
+      shorts = this._groupClipsIntoShorts(clips, targetPerShort);
+    }
 
     // Compute posts per day from how many shorts vs calendar days
     const postsPerDay = Math.max(1, Math.ceil(shorts.length / calendarDays));
 
     // Assign schedule dates — spread shorts evenly across calendar
     const calendar = shorts.map((short, idx) => {
-      const dayOffset = Math.floor(idx / postsPerDay);
+      const dayOffset = this._getScheduleDayOffset(idx, shorts.length, calendarDays, postsPerDay);
 
       return {
         shortNumber: idx + 1,
@@ -188,6 +195,8 @@ class ShortsScheduler {
       totalShorts: shorts.length,
       targetPerShort: Math.round(targetPerShort),
       postsPerDay,
+      groupingMode,
+      requestedCalendarDays: calendarDays,
       startDate,
       endDate,
       calendarDays: actualDays,
@@ -557,6 +566,46 @@ Reply with ONLY valid JSON:
    * @param {Array} clips - Clips with _duration attached
    * @param {number} targetDuration - Target seconds per short (computed from calendar)
    */
+  _groupClipsForCalendarWindow(clips, calendarDays) {
+    if (!Number.isInteger(calendarDays) || calendarDays <= 0) return null;
+    if (clips.length < calendarDays * CLIPS_PER_SHORT_MIN) return null;
+    if (clips.length > calendarDays * CLIPS_PER_SHORT_MAX) return null;
+
+    const baseClipCount = Math.floor(clips.length / calendarDays);
+    const extraClipDays = clips.length % calendarDays;
+    if (baseClipCount < CLIPS_PER_SHORT_MIN) return null;
+    if (baseClipCount > CLIPS_PER_SHORT_MAX) return null;
+    if (extraClipDays > 0 && baseClipCount + 1 > CLIPS_PER_SHORT_MAX) return null;
+
+    const shorts = [];
+    let cursor = 0;
+    for (let day = 0; day < calendarDays; day++) {
+      const extraForDay = Math.floor(((day + 1) * extraClipDays) / calendarDays)
+        - Math.floor((day * extraClipDays) / calendarDays);
+      const clipCount = baseClipCount + extraForDay;
+      const group = clips.slice(cursor, cursor + clipCount);
+      cursor += clipCount;
+
+      shorts.push({
+        clips: group,
+        duration: this._sumClipDurations(group),
+      });
+    }
+
+    return cursor === clips.length ? shorts : null;
+  }
+
+  _getScheduleDayOffset(index, totalShorts, calendarDays, postsPerDay) {
+    if (totalShorts >= calendarDays) {
+      return Math.min(calendarDays - 1, Math.floor((index * calendarDays) / totalShorts));
+    }
+    return Math.floor(index / postsPerDay);
+  }
+
+  _sumClipDurations(clips) {
+    return clips.reduce((sum, clip) => sum + (clip._duration || FALLBACK_CLIP_DURATION), 0);
+  }
+
   _groupClipsIntoShorts(clips, targetDuration) {
     const shorts = [];
     let currentGroup = [];
@@ -682,6 +731,12 @@ Reply with ONLY valid JSON:
 }
 
 // Date-only helpers keep schedule math out of UTC/local timezone edge cases.
+function normalizePositiveInteger(value, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 1) return fallback;
+  return Math.floor(number);
+}
+
 function normalizeDateOnly(value, fieldName = 'date') {
   if (value == null || value === '') return null;
   const text = String(value).trim();
