@@ -41,7 +41,12 @@ const UPLOAD_TIMEOUT = 180000; // Video upload can take a while (3 min for large
 const POST_UPLOAD_SETTLE = 15000; // Wait for FB to process uploaded video
 const POST_CLICK_SETTLE = 4000;  // Standard settle after a UI click
 const POST_NAV_SETTLE = 6000;    // Settle after navigation/page load
-const POST_SCHEDULE_CONFIRM = 15000; // Wait for FB to confirm scheduled post
+const POST_SCHEDULE_CONFIRM = 15000; // Legacy toast/dialog confirmation wait
+const POST_SCHEDULE_MIN_SETTLE = 15000; // Let FB finish the schedule action before any forced navigation
+const POST_SCHEDULE_SETTLE_TIMEOUT = 45000;
+const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
+const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
+const POST_SCHEDULE_REFRESH_EVERY = 15000;
 
 // ── Dynamic readiness — adaptive wait based on FB DOM hydration ──
 // Adapted from Kling automation's DYNAMIC READINESS WAIT pattern.
@@ -342,7 +347,10 @@ class FacebookUploader {
       this.log('[FB-UPLOAD] Step 11: Clicking Schedule post');
       await this._clickComposerSubmitButton();
       this.log('[FB-UPLOAD] Step 11b: Waiting for schedule confirmation...');
-      await this._waitForReelScheduleConfirmation(description, scheduledRowBaseline);
+      await this._waitForReelScheduleConfirmation(description, scheduledRowBaseline, {
+        scheduledDate,
+        scheduledTime,
+      });
       this.onStepComplete('scheduled');
 
       this.log('[FB-UPLOAD] ✓ Reel scheduled successfully');
@@ -795,6 +803,78 @@ class FacebookUploader {
     ].map(s => s.trim()).filter(s => s.length >= 12))];
   }
 
+  _scheduledDateNeedles(dateStr) {
+    if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr))) return [];
+    const [year, monthRaw, dayRaw] = String(dateStr).split('-');
+    const month = parseInt(monthRaw, 10);
+    const day = parseInt(dayRaw, 10);
+    if (!year || month < 1 || month > 12 || day < 1 || day > 31) return [];
+    const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const longMonths = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const shortMonth = shortMonths[month - 1];
+    const longMonth = longMonths[month - 1];
+    return [
+      `${year}-${monthRaw}-${dayRaw}`,
+      `${shortMonth} ${day}`,
+      `${shortMonth} ${day}, ${year}`,
+      `${longMonth} ${day}`,
+      `${longMonth} ${day}, ${year}`,
+      `${month}/${day}/${year}`,
+      `${month}/${day}`,
+      `${day} ${shortMonth}`,
+      `${day} ${longMonth}`,
+    ].filter(Boolean);
+  }
+
+  _scheduledTimeNeedles(timeStr) {
+    if (!timeStr || !/^\d{1,2}:\d{2}$/.test(String(timeStr))) return [];
+    const [hoursRaw, minutes] = String(timeStr).split(':');
+    const hours = parseInt(hoursRaw, 10);
+    if (Number.isNaN(hours) || hours < 0 || hours > 23 || parseInt(minutes, 10) > 59) return [];
+    const period = hours >= 12 ? 'PM' : 'AM';
+    const h12 = hours > 12 ? hours - 12 : (hours === 0 ? 12 : hours);
+    return [
+      `${hoursRaw.padStart(2, '0')}:${minutes}`,
+      `${hours}:${minutes}`,
+      `${h12}:${minutes} ${period}`,
+      `${h12}:${minutes}${period}`,
+      minutes === '00' ? `${h12} ${period}` : null,
+      minutes === '00' ? `${h12}${period}` : null,
+    ].filter(Boolean);
+  }
+
+  _textHasAnyNeedle(text, needles) {
+    const compactText = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const spacelessText = compactText.replace(/\s+/g, '');
+    return needles.some(needle => {
+      const compactNeedle = String(needle || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!compactNeedle) return false;
+      return compactText.includes(compactNeedle) || spacelessText.includes(compactNeedle.replace(/\s+/g, ''));
+    });
+  }
+
+  _findScheduledReelMatch(rows, description, scheduledDate = '', scheduledTime = '') {
+    const needles = this._captionNeedles(description);
+    if (!needles.length) return null;
+    const dateNeedles = this._scheduledDateNeedles(scheduledDate);
+    const timeNeedles = this._scheduledTimeNeedles(scheduledTime);
+
+    for (const row of rows || []) {
+      const text = row?.text || '';
+      if (!this._textHasAnyNeedle(text, needles)) continue;
+      const dateMatch = dateNeedles.length ? this._textHasAnyNeedle(text, dateNeedles) : false;
+      const timeMatch = timeNeedles.length ? this._textHasAnyNeedle(text, timeNeedles) : false;
+      const proof = [
+        'caption',
+        dateMatch ? 'date' : null,
+        timeMatch ? 'time' : null,
+      ].filter(Boolean).join('+');
+      return { row, proof, dateMatch, timeMatch };
+    }
+
+    return null;
+  }
+
   async _getScheduledPostRows() {
     return this.page.evaluate(() => {
       const visible = el => {
@@ -836,35 +916,143 @@ class FacebookUploader {
   }
 
   async _hasScheduledReel(description) {
-    const needles = this._captionNeedles(description);
-    if (!needles.length) return false;
     const rows = await this._getScheduledPostRows();
-    const match = rows.find(row => needles.some(needle => row.text.includes(needle)));
-    if (match) this.log(`[FB-UPLOAD] Existing scheduled Reel row matched: "${match.text.slice(0, 120)}"`);
+    const match = this._findScheduledReelMatch(rows, description);
+    if (match) this.log(`[FB-UPLOAD] Existing scheduled Reel row matched: "${match.row.text.slice(0, 120)}"`);
     return !!match;
   }
 
-  async _waitForReelScheduleConfirmation(expectedDescription = '', baselineCount = 0) {
-    const needles = this._captionNeedles(expectedDescription);
+  async _getScheduleSubmissionState(expectedDescription = '') {
+    const captionNeedle = this._captionNeedle(expectedDescription, 80);
+    return this.page.evaluate((caption) => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+      const bodyText = norm(document.body.innerText || document.body.textContent || '');
+      const url = location.href;
+      const hasSuccessText = /post has been scheduled|reel has been scheduled|your reel.*scheduled|scheduled your reel|successfully scheduled/i.test(bodyText);
+      const hasProgressText = /\b(Scheduling|Posting|Processing|Finishing up|Publishing)\b/i.test(bodyText);
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(visible);
+      const hasComposerDialog = dialogs.some(dialog => {
+        const text = norm(dialog.innerText || dialog.textContent || '');
+        return /Create reel|Describe your reel|Schedule for later|Schedule post|Reel details/i.test(text);
+      });
+      const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(visible);
+      const hasFinalScheduleButton = buttons.some(button => {
+        const text = norm(button.innerText || button.textContent || button.getAttribute('aria-label') || '');
+        const rect = button.getBoundingClientRect();
+        return /^(Schedule post|Post)$/i.test(text) && rect.y > window.innerHeight * 0.55;
+      });
+      const onScheduledSurface = /professional_dashboard\/content\/content_library|planner|scheduled/i.test(url) ||
+        /Content Library|Planner|Scheduled posts/i.test(bodyText);
+      const hasCaptionText = !!caption && bodyText.includes(caption);
+      return {
+        url,
+        hasSuccessText,
+        hasProgressText,
+        hasComposerDialog,
+        hasFinalScheduleButton,
+        onScheduledSurface,
+        hasCaptionText,
+      };
+    }, captionNeedle).catch(() => ({
+      url: '',
+      hasSuccessText: false,
+      hasProgressText: false,
+      hasComposerDialog: false,
+      hasFinalScheduleButton: false,
+      onScheduledSurface: false,
+      hasCaptionText: false,
+    }));
+  }
+
+  async _waitForScheduleSubmissionSettle(expectedDescription = '') {
     const start = Date.now();
-    const timeoutMs = 60000;
-    await this.page.waitForTimeout(5000);
-    while (Date.now() - start < timeoutMs) {
-      await this._reloadScheduledLibrary();
-      const rows = await this._getScheduledPostRows();
-      const captionMatch = rows.find(row => needles.some(needle => row.text.includes(needle)));
-      if (captionMatch) {
-        this.log(`[FB-UPLOAD] Schedule confirmed for Reel by row match: "${captionMatch.text.slice(0, 120)}"`);
-        return;
+    let lastState = null;
+    while (Date.now() - start < POST_SCHEDULE_SETTLE_TIMEOUT) {
+      lastState = await this._getScheduleSubmissionState(expectedDescription);
+      const elapsed = Date.now() - start;
+      if (lastState.hasSuccessText && elapsed >= POST_CLICK_SETTLE) {
+        this.log('[FB-UPLOAD] Schedule submit settle: Facebook displayed scheduled success text');
+        return lastState;
       }
-      if (rows.length > baselineCount) {
-        this.log(`[FB-UPLOAD] Schedule confirmed for Reel by row-count fallback (${baselineCount} -> ${rows.length})`);
-        return;
+      const composerGone = !lastState.hasComposerDialog && !lastState.hasFinalScheduleButton && !lastState.hasProgressText;
+      if (composerGone && elapsed >= POST_SCHEDULE_MIN_SETTLE) {
+        this.log(`[FB-UPLOAD] Schedule submit settle: composer no longer active after ${Math.round(elapsed / 1000)}s`);
+        return lastState;
       }
-      this.log(`[FB-UPLOAD] Schedule confirmation pending: ${rows.length} row(s), need caption match or >${baselineCount}`);
-      await this.page.waitForTimeout(2000);
+      await this.page.waitForTimeout(3000);
     }
-    throw new Error('Schedule confirmation timed out; scheduled Reel row did not appear in Content Library.');
+    this.log(`[FB-UPLOAD] Schedule submit settle timed out; continuing to confirmation checks (state=${JSON.stringify(lastState)})`);
+    return lastState;
+  }
+
+  async _checkScheduledRowsForMatch(expectedDescription, scheduledDate, scheduledTime, baselineCount, phase) {
+    const rows = await this._getScheduledPostRows();
+    const match = this._findScheduledReelMatch(rows, expectedDescription, scheduledDate, scheduledTime);
+    if (match) {
+      this.log(`[FB-UPLOAD] Schedule confirmed for Reel by ${phase} row match (${match.proof}): "${match.row.text.slice(0, 120)}"`);
+      return true;
+    }
+
+    if (rows.length > baselineCount) {
+      this.log(`[FB-UPLOAD] ${phase}: row count increased (${baselineCount} -> ${rows.length}), but no caption proof yet`);
+    } else {
+      this.log(`[FB-UPLOAD] ${phase}: ${rows.length} scheduled row(s), waiting for caption proof`);
+    }
+    return false;
+  }
+
+  async _pollScheduledRowsForMatch({ expectedDescription, scheduledDate, scheduledTime, baselineCount, timeoutMs, phase, reloadEveryMs = 0 }) {
+    const start = Date.now();
+    let nextReloadAt = reloadEveryMs ? start : Number.POSITIVE_INFINITY;
+    while (Date.now() - start < timeoutMs) {
+      if (Date.now() >= nextReloadAt) {
+        this.log(`[FB-UPLOAD] ${phase}: refreshing scheduled confirmation page`);
+        await this._reloadScheduledLibrary();
+        nextReloadAt = Date.now() + reloadEveryMs;
+      }
+      if (await this._checkScheduledRowsForMatch(expectedDescription, scheduledDate, scheduledTime, baselineCount, phase)) {
+        return true;
+      }
+      await this.page.waitForTimeout(5000);
+    }
+    return false;
+  }
+
+  async _waitForReelScheduleConfirmation(expectedDescription = '', baselineCount = 0, options = {}) {
+    const scheduledDate = options?.scheduledDate || '';
+    const scheduledTime = options?.scheduledTime || '';
+
+    await this._waitForScheduleSubmissionSettle(expectedDescription);
+
+    const inPlaceMatched = await this._pollScheduledRowsForMatch({
+      expectedDescription,
+      scheduledDate,
+      scheduledTime,
+      baselineCount,
+      timeoutMs: POST_SCHEDULE_IN_PLACE_CONFIRM,
+      phase: 'in-place confirmation',
+      reloadEveryMs: 0,
+    });
+    if (inPlaceMatched) return;
+
+    this.log('[FB-UPLOAD] 3b: forcing scheduled confirmation page refresh before final checks');
+    const refreshedMatched = await this._pollScheduledRowsForMatch({
+      expectedDescription,
+      scheduledDate,
+      scheduledTime,
+      baselineCount,
+      timeoutMs: POST_SCHEDULE_REFRESH_CONFIRM,
+      phase: 'post-refresh confirmation',
+      reloadEveryMs: POST_SCHEDULE_REFRESH_EVERY,
+    });
+    if (refreshedMatched) return;
+
+    throw new Error('Schedule confirmation timed out; matching scheduled Reel row did not appear after settle and refresh checks.');
   }
 
   /**
