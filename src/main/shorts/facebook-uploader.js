@@ -42,8 +42,9 @@ const POST_UPLOAD_SETTLE = 15000; // Wait for FB to process uploaded video
 const POST_CLICK_SETTLE = 4000;  // Standard settle after a UI click
 const POST_NAV_SETTLE = 6000;    // Settle after navigation/page load
 const POST_SCHEDULE_CONFIRM = 15000; // Legacy toast/dialog confirmation wait
-const POST_SCHEDULE_MIN_SETTLE = 15000; // Let FB finish the schedule action before any forced navigation
-const POST_SCHEDULE_SETTLE_TIMEOUT = 45000;
+const POST_SCHEDULE_POST_CLICK_SETTLE = 30000; // Quiet period after final Schedule click
+const POST_SCHEDULE_MIN_SETTLE = 30000; // Let FB finish the schedule action before confirmation probes
+const POST_SCHEDULE_SETTLE_TIMEOUT = 60000;
 const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
 const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
 const POST_SCHEDULE_REFRESH_EVERY = 15000;
@@ -346,10 +347,13 @@ class FacebookUploader {
 
       this.log('[FB-UPLOAD] Step 11: Clicking Schedule post');
       await this._clickComposerSubmitButton();
-      this.log('[FB-UPLOAD] Step 11b: Waiting for schedule confirmation...');
+      this.log(`[FB-UPLOAD] Step 11b: Waiting ${POST_SCHEDULE_POST_CLICK_SETTLE / 1000}s after Schedule click for Facebook to settle...`);
+      await this.page.waitForTimeout(POST_SCHEDULE_POST_CLICK_SETTLE);
+      this.log('[FB-UPLOAD] Step 11c: Waiting for schedule confirmation...');
       await this._waitForReelScheduleConfirmation(description, scheduledRowBaseline, {
         scheduledDate,
         scheduledTime,
+        alreadySettledMs: POST_SCHEDULE_POST_CLICK_SETTLE,
       });
       this.onStepComplete('scheduled');
 
@@ -969,13 +973,13 @@ class FacebookUploader {
     }));
   }
 
-  async _waitForScheduleSubmissionSettle(expectedDescription = '') {
+  async _waitForScheduleSubmissionSettle(expectedDescription = '', alreadySettledMs = 0) {
     const start = Date.now();
     let lastState = null;
     while (Date.now() - start < POST_SCHEDULE_SETTLE_TIMEOUT) {
       lastState = await this._getScheduleSubmissionState(expectedDescription);
-      const elapsed = Date.now() - start;
-      if (lastState.hasSuccessText && elapsed >= POST_CLICK_SETTLE) {
+      const elapsed = alreadySettledMs + (Date.now() - start);
+      if (lastState.hasSuccessText && elapsed >= POST_SCHEDULE_MIN_SETTLE) {
         this.log('[FB-UPLOAD] Schedule submit settle: Facebook displayed scheduled success text');
         return lastState;
       }
@@ -1026,8 +1030,9 @@ class FacebookUploader {
   async _waitForReelScheduleConfirmation(expectedDescription = '', baselineCount = 0, options = {}) {
     const scheduledDate = options?.scheduledDate || '';
     const scheduledTime = options?.scheduledTime || '';
+    const alreadySettledMs = options?.alreadySettledMs || 0;
 
-    await this._waitForScheduleSubmissionSettle(expectedDescription);
+    await this._waitForScheduleSubmissionSettle(expectedDescription, alreadySettledMs);
 
     const inPlaceMatched = await this._pollScheduledRowsForMatch({
       expectedDescription,
