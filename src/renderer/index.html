@@ -798,7 +798,7 @@
           </div>
 
           <h2>Shorts — Facebook Reels</h2>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Repurpose completed project clips into a 30-day Reel calendar.</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Repurpose completed project clips into a Reel calendar.</p>
 
           <!-- Shorts tools (hidden until project selected) -->
           <div id="shorts-tools" style="display:none;">
@@ -811,7 +811,9 @@
                   <option value="standalone_impact">Best clips first</option>
                   <option value="chronological">Chronological order</option>
                 </select>
-                <label style="font-size:11px;color:var(--muted);">Calendar days:</label>
+                <label style="font-size:11px;color:var(--muted);">Start:</label>
+                <input id="shorts-start-date" type="date" onchange="updateShortsCalendarDaysFromStartDate()" style="width:132px;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px;font-size:12px;">
+                <label style="font-size:11px;color:var(--muted);">Days:</label>
                 <input id="shorts-calendar-days" type="number" min="1" max="90" style="width:55px;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px;font-size:12px;">
                 <button class="btn btn-primary" onclick="planShortsCalendar()" id="btn-plan-shorts" style="font-size:12px;">Plan Calendar</button>
                 <button class="btn btn-primary" onclick="assembleShortsAndSEO()" id="btn-assemble-shorts" style="font-size:12px;background:#e67e22;border-color:#e67e22;" disabled>Assemble + SEO</button>
@@ -3022,17 +3024,51 @@
 
     let shortsProjectId = null;
 
+    function formatShortsDateValue(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function parseShortsDateValue(value) {
+      const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return null;
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      if (
+        date.getFullYear() !== Number(match[1]) ||
+        date.getMonth() !== Number(match[2]) - 1 ||
+        date.getDate() !== Number(match[3])
+      ) {
+        return null;
+      }
+      return date;
+    }
+
+    function updateShortsCalendarDaysFromStartDate() {
+      const startInput = document.getElementById('shorts-start-date');
+      const daysInput = document.getElementById('shorts-calendar-days');
+      const startDate = parseShortsDateValue(startInput.value);
+      if (!startDate || daysInput.disabled) return;
+
+      const monthEnd = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0);
+      const remainingDays = Math.round((monthEnd - startDate) / (1000 * 60 * 60 * 24)) + 1;
+      daysInput.value = Math.max(1, Math.min(90, remainingDays));
+    }
+
+    function setDefaultShortsScheduleWindow() {
+      const startInput = document.getElementById('shorts-start-date');
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      startInput.value = formatShortsDateValue(tomorrow);
+      updateShortsCalendarDaysFromStartDate();
+    }
+
     async function openShortsTab() {
       document.getElementById('stepper').style.display = 'none';
       showView('view-shorts');
       document.getElementById('shorts-tools').style.display = 'none';
-
-      // Default calendar days = remaining days in the month (starting from tomorrow)
-      const now = new Date();
-      const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-      const today = now.getDate();
-      const remaining = lastDayOfMonth - today; // tomorrow through end of month
-      document.getElementById('shorts-calendar-days').value = Math.max(remaining, 1);
+      setDefaultShortsScheduleWindow();
 
       const selector = document.getElementById('shorts-project-selector');
       selector.innerHTML = '<option value="">Select a project...</option>';
@@ -3097,6 +3133,7 @@
           planBtn.disabled = assembled > 0;
           planBtn.title = assembled > 0 ? 'Calendar is locked — shorts have been assembled' : '';
           document.getElementById('shorts-mode').disabled = assembled > 0;
+          document.getElementById('shorts-start-date').disabled = assembled > 0;
           document.getElementById('shorts-calendar-days').disabled = assembled > 0;
           // Enable assemble if there are planned shorts
           document.getElementById('btn-assemble-shorts').disabled = planned === 0;
@@ -3107,6 +3144,12 @@
           if (data.stats) renderShortsStats(data.stats);
         } else {
           statusEl.textContent = 'No shorts planned yet. Click "Plan Calendar" to start.';
+          const planBtn = document.getElementById('btn-plan-shorts');
+          planBtn.disabled = false;
+          planBtn.title = '';
+          document.getElementById('shorts-mode').disabled = false;
+          document.getElementById('shorts-start-date').disabled = false;
+          document.getElementById('shorts-calendar-days').disabled = false;
           document.getElementById('btn-assemble-shorts').disabled = true;
           document.getElementById('btn-upload-all').disabled = true;
           document.getElementById('shorts-stats').style.display = 'none';
@@ -3149,7 +3192,8 @@
       try {
         const mode = document.getElementById('shorts-mode').value;
         const calendarDays = parseInt(document.getElementById('shorts-calendar-days').value) || 30;
-        const result = await window.api.planShortsCalendar(shortsProjectId, { mode, calendarDays });
+        const startDate = document.getElementById('shorts-start-date').value || undefined;
+        const result = await window.api.planShortsCalendar(shortsProjectId, { mode, startDate, calendarDays });
         renderShortsStats(result.stats);
         renderPlannedCalendar(result.calendar);
         progressEl.innerHTML = `<span style="color:var(--green);">Planned ${result.stats.totalShorts} shorts. Review the calendar, then click Assemble + SEO.</span>`;

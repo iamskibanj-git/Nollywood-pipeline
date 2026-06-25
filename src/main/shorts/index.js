@@ -49,8 +49,8 @@ class ShortsController {
    * No assembly or SEO — just the math. Plan survives app restarts.
    */
   planCalendar(projectId, options = {}) {
-    const { mode = 'standalone_impact', calendarDays = 30 } = options;
-    const result = this.scheduler.planCalendar(projectId, { mode, calendarDays });
+    const { mode = 'standalone_impact', startDate, calendarDays = 30 } = options;
+    const result = this.scheduler.planCalendar(projectId, { mode, startDate, calendarDays });
     this.scheduler.savePlan(projectId, result.calendar);
     return result;
   }

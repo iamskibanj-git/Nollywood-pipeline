@@ -123,22 +123,21 @@ class ShortsScheduler {
       calendarDays = CALENDAR_DAYS,
     } = options;
 
-    // Resolve start date: explicit > day after last scheduled short > tomorrow
-    // Always starts tomorrow at earliest — today's date is already gone for scheduling.
-    let startDate = options.startDate;
+    // Resolve start date: explicit > day after durable scheduled short > tomorrow.
+    // Draft planned rows are replaced after this calculation, so ignore them here.
+    let startDate = normalizeDateOnly(options.startDate, 'startDate');
     if (!startDate) {
       const lastShort = db.queryOne(`
         SELECT scheduled_date FROM shorts
-        WHERE project_id = ? ORDER BY scheduled_date DESC LIMIT 1
+        WHERE project_id = ?
+          AND scheduled_date IS NOT NULL
+          AND status <> 'planned'
+        ORDER BY scheduled_date DESC LIMIT 1
       `, [projectId]);
       if (lastShort?.scheduled_date) {
-        const d = new Date(lastShort.scheduled_date);
-        d.setDate(d.getDate() + 1);
-        startDate = d.toISOString().split('T')[0];
+        startDate = addDaysDateOnly(lastShort.scheduled_date, 1);
       } else {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        startDate = tomorrow.toISOString().split('T')[0];
+        startDate = getTomorrowDateOnly();
       }
     }
 
@@ -169,23 +168,19 @@ class ShortsScheduler {
     // Assign schedule dates — spread shorts evenly across calendar
     const calendar = shorts.map((short, idx) => {
       const dayOffset = Math.floor(idx / postsPerDay);
-      const date = new Date(startDate);
-      date.setDate(date.getDate() + dayOffset);
 
       return {
         shortNumber: idx + 1,
         clips: short.clips,
         clipIds: short.clips.map(c => c.id),
         duration: short.duration,
-        scheduledDate: date.toISOString().split('T')[0],
+        scheduledDate: addDaysDateOnly(startDate, dayOffset),
         scheduledTime: DEFAULT_SCHEDULE_TIME,
       };
     });
 
     const endDate = calendar.length > 0 ? calendar[calendar.length - 1].scheduledDate : startDate;
-    const actualDays = calendar.length > 0
-      ? Math.round((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1
-      : 0;
+    const actualDays = calendar.length > 0 ? diffDaysInclusive(startDate, endDate) : 0;
 
     const stats = {
       totalClips: clips.length,
@@ -686,7 +681,65 @@ Reply with ONLY valid JSON:
   }
 }
 
-// ── FFmpeg discovery (same pattern as assembler.js) ──
+// Date-only helpers keep schedule math out of UTC/local timezone edge cases.
+function normalizeDateOnly(value, fieldName = 'date') {
+  if (value == null || value === '') return null;
+  const text = String(value).trim();
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    throw new Error(`Invalid ${fieldName}: expected YYYY-MM-DD`);
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    throw new Error(`Invalid ${fieldName}: ${text}`);
+  }
+
+  return formatDateOnly(date);
+}
+
+function addDaysDateOnly(value, days) {
+  const date = parseDateOnly(value);
+  date.setDate(date.getDate() + days);
+  return formatDateOnly(date);
+}
+
+function diffDaysInclusive(startDate, endDate) {
+  const start = parseDateOnly(startDate);
+  const end = parseDateOnly(endDate);
+  return Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1;
+}
+
+function getTomorrowDateOnly() {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return formatDateOnly(tomorrow);
+}
+
+function parseDateOnly(value) {
+  const normalized = normalizeDateOnly(value);
+  if (!normalized) {
+    throw new Error('Invalid date: expected YYYY-MM-DD');
+  }
+  const [year, month, day] = normalized.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function formatDateOnly(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// FFmpeg discovery (same pattern as assembler.js)
 function findFFmpeg() {
   const candidates = [
     'ffmpeg',
