@@ -756,10 +756,10 @@ class HiggsFieldAutomation {
           if (referenceUploadWarmupMs > 0) {
             await this._warmupReferenceUploadControls(referenceUploadWarmupMs);
           }
-          await this.uploadImageReferences(validRefs);
+          const referenceUploadProof = await this.uploadImageReferences(validRefs);
 
           // ── HARD GATE: Verify reference thumbnails are visible (local preview) ──
-          await this.verifyReferenceThumbnails(validRefs.length, validRefs);
+          await this.verifyReferenceThumbnails(validRefs.length, validRefs, referenceUploadProof);
 
           // ── POST-UPLOAD SPINNER-WAIT GATE ──
           // Each upload is already network-confirmed inside uploadImageReferences()
@@ -2937,7 +2937,7 @@ class HiggsFieldAutomation {
    * 5. After first upload, new upload slots appear dynamically
    *
    * @param {string[]} references - Array of absolute file paths to upload
-   * @returns {number} Number of successfully confirmed uploads
+   * @returns {object} Backend upload proof for the uploaded references
    */
   async uploadImageReferences(references) {
     const page = this.page;
@@ -2945,6 +2945,7 @@ class HiggsFieldAutomation {
     const INTER_UPLOAD_WAIT_MS = 2500;
 
     let successCount = 0;
+    const confirmedRefs = [];
     const toUpload = references.slice(0, maxSlots);
 
     // ── NETWORK RESPONSE TRACKER ──
@@ -3387,6 +3388,16 @@ class HiggsFieldAutomation {
 
       successCount++;
       const elapsed = Math.round((Date.now() - perUploadStart) / 1000);
+      confirmedRefs.push({
+        index: i,
+        path: toUpload[i],
+        basename: path.basename(toUpload[i]),
+        confirmedBy,
+        uploadMethod,
+        networkHits: countSuccessfulUploadsSince(perUploadStart),
+        thumbnailConfirmed,
+        elapsedSeconds: elapsed,
+      });
       console.log(`[REF] Reference ${i + 1} upload CONFIRMED via ${confirmedBy} after ${elapsed}s`);
 
       // Clear current upload file so any spurious filechooser doesn't get this file
@@ -3410,7 +3421,12 @@ class HiggsFieldAutomation {
     page.off('response', responseListener);
     page.off('filechooser', fileChooserHandler);
 
-    return successCount;
+    return {
+      successCount,
+      expectedCount: toUpload.length,
+      complete: successCount >= toUpload.length && toUpload.length > 0,
+      confirmedRefs,
+    };
   }
 
   /**
@@ -3896,6 +3912,15 @@ class HiggsFieldAutomation {
     return null;
   }
 
+  _hasCompleteReferenceUploadProof(uploadProof, expectedCount) {
+    if (!uploadProof || expectedCount <= 0) return false;
+    const successCount = Number(uploadProof.successCount || 0);
+    const confirmedCount = Array.isArray(uploadProof.confirmedRefs)
+      ? uploadProof.confirmedRefs.length
+      : 0;
+    return uploadProof.complete === true && successCount >= expectedCount && confirmedCount >= expectedCount;
+  }
+
   /**
    * HARD GATE: Verify that the expected number of reference thumbnails
    * are actually visible in the Higgsfield UI reference slots.
@@ -3908,9 +3933,10 @@ class HiggsFieldAutomation {
    * @param {string[]} references - The reference file paths (for retry)
    * @returns {number} Actual count of visible thumbnails
    */
-  async verifyReferenceThumbnails(expectedCount, references = []) {
+  async verifyReferenceThumbnails(expectedCount, references = [], uploadProof = null) {
     const page = this.page;
     const sel = this.selectors.imageGeneration;
+    const backendProofComplete = this._hasCompleteReferenceUploadProof(uploadProof, expectedCount);
 
     // Count visible thumbnails in 56x56 reference slots
     // Count reference thumbnails in .size-14 containers inside the form
@@ -3950,11 +3976,26 @@ class HiggsFieldAutomation {
       return actual;
     }
 
-    // Still mismatched — retry the full upload once
+    // Backend-confirmed uploads are enough here; the UI preview can lag or fail
+    // to paint one slot, and clearing would risk replacing a good title-card ref.
+    if (backendProofComplete) {
+      const names = (uploadProof.confirmedRefs || [])
+        .slice(0, expectedCount)
+        .map(ref => ref.basename || path.basename(ref.path || 'reference'))
+        .join(', ');
+      console.warn(
+        `[GATE] UI thumbnail count still mismatched (${actual}/${expectedCount}), ` +
+        `but backend upload proof is complete for ${names || `${expectedCount} refs`}. ` +
+        `Proceeding without destructive clear/reupload.`
+      );
+      return actual;
+    }
+
+    // Backend proof is incomplete; retry the full upload once.
     console.warn(`[GATE] Still mismatched (${actual}/${expectedCount}). Clearing and re-uploading references...`);
     await this.clearImageReferences();
     await page.waitForTimeout(1000);
-    await this.uploadImageReferences(references);
+    const retryUploadProof = await this.uploadImageReferences(references);
     await page.waitForTimeout(2000);
 
     // Final check after retry
@@ -3967,6 +4008,19 @@ class HiggsFieldAutomation {
     }
 
     // Hard fail — do NOT proceed with generation
+    if (this._hasCompleteReferenceUploadProof(retryUploadProof, expectedCount)) {
+      const names = (retryUploadProof.confirmedRefs || [])
+        .slice(0, expectedCount)
+        .map(ref => ref.basename || path.basename(ref.path || 'reference'))
+        .join(', ');
+      console.warn(
+        `[GATE] UI thumbnail count still mismatched after retry (${actual}/${expectedCount}), ` +
+        `but retry backend upload proof is complete for ${names || `${expectedCount} refs`}. ` +
+        `Proceeding without another destructive clear/reupload.`
+      );
+      return actual;
+    }
+
     throw new Error(
       `REFERENCE_GATE_FAILED: Expected ${expectedCount} reference thumbnails but only ${actual} visible in UI. ` +
       `References may not be uploading correctly. Aborting generation to prevent images without face consistency.`
