@@ -73,13 +73,13 @@ class ShortsController {
     const project = db.queryOne('SELECT * FROM projects WHERE id = ?', [projectId]);
     if (!project) throw new Error(`Project not found: ${projectId}`);
 
-    // Get planned shorts from DB
     const planned = this.scheduler.getPlannedShorts(projectId);
-    if (planned.length === 0) {
-      throw new Error('No planned shorts to assemble. Run Plan Calendar first.');
+    const assembledBeforeRun = this.scheduler.getAssembledShortsNeedingSEO(projectId);
+    if (planned.length === 0 && assembledBeforeRun.length === 0) {
+      throw new Error('No planned shorts or assembled shorts needing SEO. Run Plan Calendar first.');
     }
 
-    this.log(`[SHORTS] Assembling ${planned.length} planned shorts for "${project.title}"`);
+    this.log(`[SHORTS] Processing ${planned.length} planned shorts and ${assembledBeforeRun.length} SEO-only retry shorts for "${project.title}"`);
 
     const projectDir = project.project_dir || path.join(process.cwd(), 'output', projectId);
     const shortsDir = path.join(projectDir, 'shorts');
@@ -89,6 +89,8 @@ class ShortsController {
     const clipById = new Map(allClipAssets.map(a => [a.id, a]));
 
     let assembled = 0;
+    let seoRecovered = 0;
+    let seoFailed = 0;
     let skipped = 0;
     const total = planned.length;
     const startTime = Date.now();
@@ -134,10 +136,45 @@ class ShortsController {
       this._emitProgress({ phase: 'assembly', current: assembled + skipped, total, shortNumber: short.short_number, status: 'done', elapsed: Math.round(elapsed), eta: remaining });
     }
 
+    const seoRetryShorts = this.scheduler.getAssembledShortsNeedingSEO(projectId);
+    if (seoRetryShorts.length > 0) {
+      this.log(`[SHORTS] Retrying SEO for ${seoRetryShorts.length} assembled short(s)`);
+    }
+
+    for (const short of seoRetryShorts) {
+      const clipIds = JSON.parse(short.source_clips || '[]');
+      const clips = clipIds.map(id => clipById.get(id)).filter(Boolean);
+      if (clips.length === 0) {
+        const message = 'No valid source clips found for SEO retry';
+        this.scheduler.markShortSEOFailed(short.id, message);
+        this.log(`[SHORTS] SEO retry skipped for short #${short.short_number}: ${message}`);
+        seoFailed++;
+        continue;
+      }
+
+      const current = seoRecovered + seoFailed + 1;
+      this._emitProgress({ phase: 'seo', current, total: seoRetryShorts.length, shortNumber: short.short_number, status: 'retrying_seo', startTime });
+
+      const plan = { clips, shortNumber: short.short_number };
+      try {
+        const seo = await this.scheduler.generateSEO(plan, project);
+        this.scheduler.updateShortSEO(short.id, seo);
+        seoRecovered++;
+        this.log(`[SHORTS] SEO recovered ${seoRecovered}/${seoRetryShorts.length}: short #${short.short_number}`);
+      } catch (e) {
+        this.scheduler.markShortSEOFailed(short.id, e.message);
+        seoFailed++;
+        this.log(`[SHORTS] SEO retry failed for short #${short.short_number}: ${e.message}`);
+      }
+    }
+
     return {
       shorts: this.scheduler.getShortsForProject(projectId),
       assembled,
-      total: planned.length,
+      seoRecovered,
+      seoFailed,
+      skipped,
+      total: planned.length + seoRetryShorts.length,
     };
   }
 
@@ -151,6 +188,18 @@ class ShortsController {
    * @returns {object} { uploaded, failed, total }
    */
   async uploadAll(projectId, onProgress) {
+    const incomplete = this.scheduler.getIncompleteShortsBeforeUpload(projectId);
+    if (incomplete.length > 0) {
+      const pending = incomplete.filter(s => s.status === 'pending');
+      const assembled = incomplete.filter(s => s.status === 'assembled');
+      const planned = incomplete.filter(s => s.status === 'planned');
+      const parts = [];
+      if (pending.length > 0) parts.push(`${pending.length} pending short(s) still need planning`);
+      if (planned.length > 0) parts.push(`${planned.length} planned short(s) still need assembly`);
+      if (assembled.length > 0) parts.push(`${assembled.length} assembled short(s) still need SEO`);
+      throw new Error(`SHORTS_NOT_READY: ${parts.join('; ')}. Finish Assemble + SEO before upload.`);
+    }
+
     // Backup DB before upload session — status changes are hard to undo
     db.backup('pre-upload');
 
@@ -218,9 +267,12 @@ class ShortsController {
       }
 
       // All done — mark project as repurposed if everything uploaded
-      if (failed === 0 && uploaded > 0) {
+      const unscheduled = this.scheduler.getUnscheduledShorts(projectId);
+      if (failed === 0 && uploaded > 0 && unscheduled.length === 0) {
         this.scheduler.markProjectRepurposed(projectId);
         this.log(`[SHORTS] All ${uploaded} shorts scheduled. Project marked as repurposed.`);
+      } else if (failed === 0 && uploaded > 0) {
+        this.log(`[SHORTS] Uploaded ${uploaded} shorts, but ${unscheduled.length} short(s) remain unscheduled. Project not marked repurposed.`);
       }
     } finally {
       // Always close browser when done

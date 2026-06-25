@@ -444,11 +444,71 @@ Reply with ONLY valid JSON:
   }
 
   /**
+   * Update SEO metadata for an already-assembled short without re-encoding video.
+   */
+  updateShortSEO(shortId, seo) {
+    if (!seo) throw new Error('SEO metadata is required');
+    db.runSql(`
+      UPDATE shorts SET title = ?,
+                        description = ?,
+                        hashtags = ?,
+                        status = 'seo_done',
+                        error_message = NULL,
+                        updated_at = datetime('now')
+      WHERE id = ?
+    `, [
+      seo.title || null,
+      seo.description || null,
+      JSON.stringify(seo.hashtags || []),
+      shortId,
+    ]);
+  }
+
+  markShortSEOFailed(shortId, errorMessage) {
+    db.runSql(`
+      UPDATE shorts SET error_message = ?,
+                        updated_at = datetime('now')
+      WHERE id = ? AND status = 'assembled'
+    `, [errorMessage || 'SEO generation failed', shortId]);
+  }
+
+  /**
    * Get all planned (not yet assembled) shorts for a project.
    */
   getPlannedShorts(projectId) {
     return db.queryAll(`
       SELECT * FROM shorts WHERE project_id = ? AND status = 'planned'
+      ORDER BY short_number
+    `, [projectId]);
+  }
+
+  /**
+   * Get assembled shorts that have video files but still need SEO metadata.
+   */
+  getAssembledShortsNeedingSEO(projectId) {
+    return db.queryAll(`
+      SELECT * FROM shorts
+      WHERE project_id = ?
+        AND status = 'assembled'
+        AND file_path IS NOT NULL
+      ORDER BY short_number
+    `, [projectId]);
+  }
+
+  getIncompleteShortsBeforeUpload(projectId) {
+    return db.queryAll(`
+      SELECT * FROM shorts
+      WHERE project_id = ?
+        AND status IN ('pending', 'planned', 'assembled')
+      ORDER BY short_number
+    `, [projectId]);
+  }
+
+  getUnscheduledShorts(projectId) {
+    return db.queryAll(`
+      SELECT * FROM shorts
+      WHERE project_id = ?
+        AND status <> 'scheduled'
       ORDER BY short_number
     `, [projectId]);
   }

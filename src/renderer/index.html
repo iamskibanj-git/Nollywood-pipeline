@@ -3123,10 +3123,13 @@
         const statusEl = document.getElementById('shorts-project-status');
         if (data.summary && data.summary.total > 0) {
           const s = data.summary;
+          const pending = s.pending || 0;
           const planned = s.planned || 0;
+          const assembledOnly = s.assembled || 0;
           const uploadFailed = s.upload_failed || 0;
           const assembled = (s.assembled || 0) + (s.seo_done || 0) + (s.scheduled || 0) + uploadFailed;
           statusEl.textContent = `${s.total} shorts — ${planned} planned, ${s.scheduled} scheduled, ${s.seo_done} ready` + (uploadFailed > 0 ? `, ${uploadFailed} upload failed` : '');
+          if (assembledOnly > 0) statusEl.textContent += `, ${assembledOnly} need SEO`;
           // Disable Plan Calendar once any shorts have been assembled/uploaded
           // Re-planning would orphan assembled files from their schedule slots
           const planBtn = document.getElementById('btn-plan-shorts');
@@ -3136,10 +3139,12 @@
           document.getElementById('shorts-start-date').disabled = assembled > 0;
           document.getElementById('shorts-calendar-days').disabled = assembled > 0;
           // Enable assemble if there are planned shorts
-          document.getElementById('btn-assemble-shorts').disabled = planned === 0;
+          document.getElementById('btn-assemble-shorts').disabled = planned === 0 && assembledOnly === 0;
           // Enable upload when there are uploadable shorts (seo_done or upload_failed needing retry)
           const uploadable = (s.seo_done || 0) + uploadFailed;
-          document.getElementById('btn-upload-all').disabled = uploadable === 0;
+          const uploadBtn = document.getElementById('btn-upload-all');
+          uploadBtn.disabled = uploadable === 0 || pending > 0 || planned > 0 || assembledOnly > 0;
+          uploadBtn.title = (pending > 0 || planned > 0 || assembledOnly > 0) ? 'Finish Assemble + SEO before upload' : '';
           // Render stats from DB (survives restart)
           if (data.stats) renderShortsStats(data.stats);
         } else {
@@ -3151,7 +3156,9 @@
           document.getElementById('shorts-start-date').disabled = false;
           document.getElementById('shorts-calendar-days').disabled = false;
           document.getElementById('btn-assemble-shorts').disabled = true;
-          document.getElementById('btn-upload-all').disabled = true;
+          const uploadBtn = document.getElementById('btn-upload-all');
+          uploadBtn.disabled = true;
+          uploadBtn.title = '';
           document.getElementById('shorts-stats').style.display = 'none';
         }
       } catch (e) {
@@ -3258,7 +3265,11 @@
       try {
         progressEl.textContent = 'Starting assembly...';
         const result = await window.api.assembleShorts(shortsProjectId);
-        progressEl.innerHTML = `<span style="color:var(--green);">Done! ${result.assembled}/${result.total} shorts assembled.</span>`;
+        const recovered = result.seoRecovered || 0;
+        const failed = result.seoFailed || 0;
+        const recoveryText = recovered > 0 ? `, ${recovered} SEO recovered` : '';
+        const failedText = failed > 0 ? `, ${failed} SEO failed` : '';
+        progressEl.innerHTML = `<span style="color:var(--green);">Done! ${result.assembled}/${result.total} shorts assembled${recoveryText}${failedText}.</span>`;
         await refreshShortsCalendar();
       } catch (e) {
         progressEl.innerHTML = `<span style="color:var(--red);">Error: ${e.message}</span>`;
