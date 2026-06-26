@@ -10,6 +10,7 @@ class SocialPostsController {
     this.apiKey = options.apiKey || '';
     this.log = options.log || console.log;
     this.onProgress = options.onProgress || null;
+    this.nowProvider = options.nowProvider || (() => new Date());
     this.planner = new SocialPlanner(db, { log: this.log });
     this.generator = this.apiKey ? new SocialCopyGenerator(this.apiKey) : null;
     this.uploader = null;
@@ -17,8 +18,10 @@ class SocialPostsController {
       userDataDir: options.userDataDir || null,
       headless: false,
       log: this.log,
+      nowProvider: this.nowProvider,
       onStepComplete: (step) => this._emitProgress({ phase: 'upload', status: 'step', step }),
     };
+    this.uploaderFactory = options.uploaderFactory || ((uploaderOptions) => new SocialFacebookUploader(uploaderOptions));
   }
 
   getProjects() {
@@ -136,18 +139,33 @@ class SocialPostsController {
 
   async scheduleAll(projectId, options = {}) {
     const targetDate = this._normalizeDate(options.targetDate);
-    this.db.backup('pre-social-upload');
-
-    const posts = this.db.getPendingSocialUploads(projectId)
+    const scheduleWindow = SocialFacebookUploader.getScheduleWindow(this.nowProvider());
+    const allPosts = this.db.getPendingSocialUploads(projectId)
       .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type))
       .filter(p => p.status === 'content_done' || p.status === 'upload_failed')
       .filter(p => !targetDate || p.scheduled_date === targetDate);
+    const posts = allPosts.filter(p => SocialFacebookUploader.isWithinScheduleWindow(p.scheduled_date, this.nowProvider()));
+    let deferred = allPosts.length - posts.length;
     if (posts.length === 0) {
-      return { uploaded: 0, failed: 0, total: 0, posts: this.getStatus(projectId).posts };
+      if (deferred > 0) {
+        const message = `Facebook schedule window is ${scheduleWindow.today} through ${scheduleWindow.maxDate} (${scheduleWindow.maxDaysAhead} days ahead).`;
+        this.log(`[SOCIAL] ${deferred} engagement post(s) deferred. ${message}`);
+        this._emitProgress({
+          phase: 'upload',
+          status: 'deferred',
+          projectId,
+          deferred,
+          maxScheduleDate: scheduleWindow.maxDate,
+          message,
+        });
+      }
+      const status = this.getStatus(projectId);
+      return { uploaded: 0, failed: 0, deferred, total: allPosts.length, maxScheduleDate: scheduleWindow.maxDate, posts: status.posts, summary: status.summary, stats: status.stats };
     }
 
+    this.db.backup('pre-social-upload');
     if (this.uploader) await this.closeUploadSession();
-    this.uploader = new SocialFacebookUploader(this.uploaderOptions);
+    this.uploader = this.uploaderFactory(this.uploaderOptions);
 
     this._emitProgress({
       phase: 'upload',
@@ -161,6 +179,10 @@ class SocialPostsController {
     let failed = 0;
 
     try {
+      if (deferred > 0) {
+        this.log(`[SOCIAL] Scheduling ${posts.length} engagement post(s); ${deferred} deferred beyond ${scheduleWindow.maxDate}.`);
+      }
+
       for (let i = 0; i < posts.length; i++) {
         const post = posts[i];
         this._emitProgress({
@@ -185,6 +207,9 @@ class SocialPostsController {
           this.db.markSocialPostScheduled(post.id, result.facebookPostId || null);
           uploaded++;
           this.log(`[SOCIAL] Post ${post.id} scheduled for ${post.scheduled_date} ${post.scheduled_time}`);
+        } else if (result.deferred) {
+          deferred++;
+          this.log(`[SOCIAL] Post ${post.id} deferred: ${result.error}`);
         } else {
           this.db.markSocialPostFailed(post.id, result.error);
           failed++;
@@ -196,8 +221,8 @@ class SocialPostsController {
     }
 
     const status = this.getStatus(projectId);
-    this._emitProgress({ phase: 'upload', status: 'done', projectId, uploaded, failed });
-    return { uploaded, failed, total: posts.length, posts: status.posts, summary: status.summary, stats: status.stats };
+    this._emitProgress({ phase: 'upload', status: 'done', projectId, uploaded, failed, deferred, maxScheduleDate: scheduleWindow.maxDate });
+    return { uploaded, failed, deferred, total: uploaded + failed + deferred, maxScheduleDate: scheduleWindow.maxDate, posts: status.posts, summary: status.summary, stats: status.stats };
   }
 
   async closeUploadSession() {

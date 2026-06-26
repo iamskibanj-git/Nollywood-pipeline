@@ -6,6 +6,12 @@ const CLICK_TIMEOUT = 20000;
 const POST_CLICK_SETTLE = 3000;
 const IMAGE_UPLOAD_TIMEOUT = 90000;
 const SCHEDULE_MODAL_SETTLE = 3000;
+const POST_SCHEDULE_POST_CLICK_SETTLE = 30000;
+const POST_SCHEDULE_SETTLE_TIMEOUT = 60000;
+const POST_SCHEDULE_MIN_SETTLE = 30000;
+const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
+const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
+const POST_SCHEDULE_REFRESH_EVERY = 15000;
 
 class SocialFacebookUploader extends FacebookUploader {
   async _dismissPopups() {
@@ -37,6 +43,9 @@ class SocialFacebookUploader extends FacebookUploader {
 
   async scheduleImagePost(post) {
     const { mediaPath, caption, scheduledDate, scheduledTime } = post;
+    if (!FacebookUploader.isWithinScheduleWindow(scheduledDate, this.nowProvider())) {
+      return { success: false, deferred: true, error: FacebookUploader.getScheduleWindowError(scheduledDate, this.nowProvider()) };
+    }
     if (!mediaPath || !fs.existsSync(mediaPath)) {
       return { success: false, error: `Image file not found: ${mediaPath || '(empty)'}` };
     }
@@ -54,6 +63,8 @@ class SocialFacebookUploader extends FacebookUploader {
       await this._dismissPopups();
       await this._dismissLeavePageGuard();
       this.onStepComplete('navigate');
+      const scheduledRowBaseline = (await this._getScheduledPostRows()).length;
+      this.log(`[FB-SOCIAL] Scheduled row baseline before image post: ${scheduledRowBaseline}`);
 
       this.log('[FB-SOCIAL] Step 2: Opening Create Post');
       await this._openCreatePostDialog();
@@ -89,7 +100,14 @@ class SocialFacebookUploader extends FacebookUploader {
 
       this.log('[FB-SOCIAL] Step 9: Clicking Schedule post to submit scheduled post');
       await this._clickComposerSubmitButton();
-      await this._waitForScheduleConfirmation(caption);
+      this.log(`[FB-SOCIAL] Step 9b: Waiting ${POST_SCHEDULE_POST_CLICK_SETTLE / 1000}s after Schedule click for Facebook to settle...`);
+      await this.page.waitForTimeout(POST_SCHEDULE_POST_CLICK_SETTLE);
+      this.log('[FB-SOCIAL] Step 9c: Waiting for schedule confirmation...');
+      await this._waitForScheduleConfirmation(caption, scheduledRowBaseline, {
+        scheduledDate,
+        scheduledTime,
+        alreadySettledMs: POST_SCHEDULE_POST_CLICK_SETTLE,
+      });
       this.onStepComplete('scheduled');
 
       this.log('[FB-SOCIAL] Image post scheduled successfully');
@@ -592,7 +610,7 @@ class SocialFacebookUploader extends FacebookUploader {
     await this._clickWithFallback('div[role="button"][aria-label="Schedule post"], div[role="button"]:has-text("Schedule post"), div[role="button"][aria-label="Post"], div[role="button"]:has-text("Post")');
   }
 
-  async _waitForScheduleConfirmation(expectedCaption = '') {
+  async _waitForScheduleConfirmationLegacy(expectedCaption = '') {
     const captionNeedle = String(expectedCaption || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     const start = Date.now();
     const timeoutMs = 30000;
@@ -620,6 +638,135 @@ class SocialFacebookUploader extends FacebookUploader {
     }
 
     throw new Error('Schedule confirmation timed out; scheduled row did not appear in Content Library.');
+  }
+
+  async _waitForScheduleConfirmation(expectedCaption = '', baselineCount = 0, options = {}) {
+    if (baselineCount && typeof baselineCount === 'object') {
+      options = baselineCount;
+      baselineCount = 0;
+    }
+
+    const scheduledDate = options?.scheduledDate || '';
+    const scheduledTime = options?.scheduledTime || '';
+    const alreadySettledMs = options?.alreadySettledMs || 0;
+
+    await this._waitForImageScheduleSubmissionSettle(expectedCaption, alreadySettledMs);
+
+    const inPlaceMatched = await this._pollSocialScheduledRowsForMatch({
+      expectedCaption,
+      scheduledDate,
+      scheduledTime,
+      baselineCount,
+      timeoutMs: POST_SCHEDULE_IN_PLACE_CONFIRM,
+      phase: 'in-place confirmation',
+      reloadEveryMs: 0,
+    });
+    if (inPlaceMatched) return;
+
+    this.log('[FB-SOCIAL] 3b: forcing scheduled confirmation page refresh before final checks');
+    const refreshedMatched = await this._pollSocialScheduledRowsForMatch({
+      expectedCaption,
+      scheduledDate,
+      scheduledTime,
+      baselineCount,
+      timeoutMs: POST_SCHEDULE_REFRESH_CONFIRM,
+      phase: 'post-refresh confirmation',
+      reloadEveryMs: POST_SCHEDULE_REFRESH_EVERY,
+    });
+    if (refreshedMatched) return;
+
+    throw new Error('Schedule confirmation timed out; matching scheduled image post row did not appear after settle and refresh checks.');
+  }
+
+  async _waitForImageScheduleSubmissionSettle(expectedCaption = '', alreadySettledMs = 0) {
+    const captionNeedle = String(expectedCaption || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const start = Date.now();
+    let lastState = null;
+    while (Date.now() - start < POST_SCHEDULE_SETTLE_TIMEOUT) {
+      lastState = await this.page.evaluate((caption) => {
+        const visible = el => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const text = document.body.innerText || document.body.textContent || '';
+        const url = location.href;
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(visible);
+        const hasSuccessText = /post has been scheduled|your post.*scheduled|scheduled your post|successfully scheduled/i.test(text);
+        const hasProgressText = /scheduling|posting|publishing|please wait|your post is being scheduled/i.test(text);
+        const hasComposerDialog = dialogs.some(dialog => /Create post|What's on your mind|Add photos or videos|Posting to|Schedule post/i.test(dialog.innerText || dialog.textContent || ''));
+        const hasFinalScheduleButton = [...document.querySelectorAll('button, [role="button"]')]
+          .filter(visible)
+          .some(el => /^(Schedule post|Post)$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim()));
+        const onScheduledSurface = /Content Library|Scheduled posts|Published Scheduled Drafts/i.test(text) ||
+          /professional_dashboard\/content\/content_library/.test(url);
+        const hasCaptionText = !!caption && text.replace(/\s+/g, ' ').includes(caption);
+        return {
+          url,
+          hasSuccessText,
+          hasProgressText,
+          hasComposerDialog,
+          hasFinalScheduleButton,
+          onScheduledSurface,
+          hasCaptionText,
+        };
+      }, captionNeedle).catch(() => ({
+        url: '',
+        hasSuccessText: false,
+        hasProgressText: false,
+        hasComposerDialog: false,
+        hasFinalScheduleButton: false,
+        onScheduledSurface: false,
+        hasCaptionText: false,
+      }));
+
+      const elapsed = alreadySettledMs + (Date.now() - start);
+      if (lastState.hasSuccessText && elapsed >= POST_SCHEDULE_MIN_SETTLE) {
+        this.log('[FB-SOCIAL] Schedule submit settle: Facebook displayed scheduled success text');
+        return lastState;
+      }
+      const composerGone = !lastState.hasComposerDialog && !lastState.hasFinalScheduleButton && !lastState.hasProgressText;
+      if (composerGone && elapsed >= POST_SCHEDULE_MIN_SETTLE) {
+        this.log(`[FB-SOCIAL] Schedule submit settle: composer no longer active after ${Math.round(elapsed / 1000)}s`);
+        return lastState;
+      }
+      await this.page.waitForTimeout(3000);
+    }
+    this.log(`[FB-SOCIAL] Schedule submit settle timed out; continuing to confirmation checks (state=${JSON.stringify(lastState)})`);
+    return lastState;
+  }
+
+  async _checkSocialScheduledRowsForMatch(expectedCaption, scheduledDate, scheduledTime, baselineCount, phase) {
+    const rows = await this._getScheduledPostRows();
+    const match = this._findScheduledReelMatch(rows, expectedCaption, scheduledDate, scheduledTime);
+    if (match) {
+      this.log(`[FB-SOCIAL] Schedule confirmed for image post by ${phase} row match (${match.proof}): "${match.row.text.slice(0, 120)}"`);
+      return true;
+    }
+
+    if (rows.length > baselineCount) {
+      this.log(`[FB-SOCIAL] ${phase}: row count increased (${baselineCount} -> ${rows.length}), but no caption proof yet`);
+    } else {
+      this.log(`[FB-SOCIAL] ${phase}: ${rows.length} scheduled row(s), waiting for caption proof`);
+    }
+    return false;
+  }
+
+  async _pollSocialScheduledRowsForMatch({ expectedCaption, scheduledDate, scheduledTime, baselineCount, timeoutMs, phase, reloadEveryMs = 0 }) {
+    const start = Date.now();
+    let nextReloadAt = reloadEveryMs ? start : Number.POSITIVE_INFINITY;
+    while (Date.now() - start < timeoutMs) {
+      if (Date.now() >= nextReloadAt) {
+        this.log(`[FB-SOCIAL] ${phase}: refreshing scheduled confirmation page`);
+        await this._reloadScheduledLibrary();
+        nextReloadAt = Date.now() + reloadEveryMs;
+      }
+      if (await this._checkSocialScheduledRowsForMatch(expectedCaption, scheduledDate, scheduledTime, baselineCount, phase)) {
+        return true;
+      }
+      await this.page.waitForTimeout(5000);
+    }
+    return false;
   }
 
   async _hasVisibleComposerScheduleButton() {

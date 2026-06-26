@@ -3570,8 +3570,11 @@
       try {
         const targetDate = document.getElementById('social-target-date')?.value || '';
         const result = await window.api.scheduleAllSocialPosts(socialProjectId, { targetDate });
-        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
-        progressEl.innerHTML = `<span style="color:${color};">Scheduled ${result.uploaded} post${result.uploaded === 1 ? '' : 's'}${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        const deferredText = result.deferred > 0
+          ? `, ${result.deferred} deferred${result.maxScheduleDate ? ` beyond ${escapeHtml(result.maxScheduleDate)}` : ''}`
+          : '';
+        const color = result.failed > 0 || result.deferred > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Scheduled ${result.uploaded} post${result.uploaded === 1 ? '' : 's'}${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}${deferredText}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
         renderSocialPosts(result.posts || []);
         await refreshSocialPosts();
       } catch (e) {
