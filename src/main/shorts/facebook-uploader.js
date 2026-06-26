@@ -48,6 +48,7 @@ const POST_SCHEDULE_SETTLE_TIMEOUT = 60000;
 const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
 const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
 const POST_SCHEDULE_REFRESH_EVERY = 15000;
+const FACEBOOK_MAX_SCHEDULE_DAYS_AHEAD = 29;
 
 // ── Dynamic readiness — adaptive wait based on FB DOM hydration ──
 // Adapted from Kling automation's DYNAMIC READINESS WAIT pattern.
@@ -128,9 +129,52 @@ class FacebookUploader {
     this.headless = options.headless || false;
     this.log = options.log || console.log;
     this.onStepComplete = options.onStepComplete || (() => {});
+    this.nowProvider = options.nowProvider || (() => new Date());
     this.browser = null;
     this.context = null;
     this.page = null;
+  }
+
+  static _parseDateOnly(dateStr) {
+    if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr))) return null;
+    const [year, month, day] = String(dateStr).split('-').map(n => parseInt(n, 10));
+    if (!year || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return new Date(year, month - 1, day);
+  }
+
+  static _formatDateOnly(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  static _addDaysDateOnly(date, days) {
+    const copy = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    copy.setDate(copy.getDate() + days);
+    return copy;
+  }
+
+  static getScheduleWindow(now = new Date()) {
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const maxDate = FacebookUploader._addDaysDateOnly(today, FACEBOOK_MAX_SCHEDULE_DAYS_AHEAD);
+    return {
+      today: FacebookUploader._formatDateOnly(today),
+      maxDate: FacebookUploader._formatDateOnly(maxDate),
+      maxDaysAhead: FACEBOOK_MAX_SCHEDULE_DAYS_AHEAD,
+    };
+  }
+
+  static getScheduleWindowError(scheduledDate, now = new Date()) {
+    const window = FacebookUploader.getScheduleWindow(now);
+    return `FACEBOOK_SCHEDULE_WINDOW: Facebook allows scheduling up to ${window.maxDaysAhead} days in advance. Today ${window.today}; max schedule date ${window.maxDate}; ${scheduledDate} must be deferred.`;
+  }
+
+  static isWithinScheduleWindow(scheduledDate, now = new Date()) {
+    const target = FacebookUploader._parseDateOnly(scheduledDate);
+    if (!target) return false;
+    const { maxDate } = FacebookUploader.getScheduleWindow(now);
+    return FacebookUploader._formatDateOnly(target) <= maxDate;
   }
 
   /**
@@ -247,6 +291,10 @@ class FacebookUploader {
    */
   async scheduleReel(short) {
     const { filePath, description, scheduledDate, scheduledTime } = short;
+
+    if (!FacebookUploader.isWithinScheduleWindow(scheduledDate, this.nowProvider())) {
+      return { success: false, deferred: true, error: FacebookUploader.getScheduleWindowError(scheduledDate, this.nowProvider()) };
+    }
 
     if (!fs.existsSync(filePath)) {
       return { success: false, error: `Video file not found: ${filePath}` };

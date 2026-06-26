@@ -3305,7 +3305,10 @@
 
       try {
         const result = await window.api.uploadAllShorts(shortsProjectId);
-        if (result.failed === 0) {
+        if ((result.deferred || 0) > 0) {
+          const uploadedText = result.uploaded > 0 ? `${result.uploaded} scheduled, ` : '';
+          statusEl.innerHTML = `<span style="color:var(--yellow);">${uploadedText}${result.deferred} deferred until Facebook allows dates after ${escapeHtml(result.maxScheduleDate || 'the current window')}.</span>`;
+        } else if (result.failed === 0) {
           statusEl.innerHTML = `<span style="color:var(--green);">All ${result.uploaded} shorts scheduled on Facebook! Project marked as repurposed.</span>`;
         } else {
           statusEl.innerHTML = `<span style="color:var(--yellow);">${result.uploaded} uploaded, ${result.failed} failed. Click "Upload All" again to retry failed shorts.</span>`;

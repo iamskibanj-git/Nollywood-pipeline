@@ -32,7 +32,10 @@ class ShortsController {
       userDataDir: options.userDataDir || null,
       headless: false, // Always visible — user confirms each upload
       log: options.log || console.log,
+      nowProvider: options.nowProvider || (() => new Date()),
     };
+    this.uploaderFactory = options.uploaderFactory || (uploaderOptions => new FacebookUploader(uploaderOptions));
+    this.nowProvider = options.nowProvider || (() => new Date());
     this.log = options.log || console.log;
     this.onProgress = options.onProgress || null;
   }
@@ -200,6 +203,26 @@ class ShortsController {
       throw new Error(`SHORTS_NOT_READY: ${parts.join('; ')}. Finish Assemble + SEO before upload.`);
     }
 
+    const scheduleWindow = FacebookUploader.getScheduleWindow(this.nowProvider());
+    const uploadableNow = this._countPendingUploads(projectId, { maxScheduledDate: scheduleWindow.maxDate });
+    const pendingUploads = this._countPendingUploads(projectId);
+    const deferred = Math.max(0, pendingUploads - uploadableNow);
+    const deferredMessage = `Facebook schedule window is ${scheduleWindow.today} through ${scheduleWindow.maxDate} (${scheduleWindow.maxDaysAhead} days ahead).`;
+
+    if (uploadableNow === 0) {
+      if (deferred > 0) {
+        this.log(`[SHORTS] ${deferred} short(s) deferred. ${deferredMessage}`);
+        this._emitProgress({
+          phase: 'upload',
+          status: 'deferred',
+          deferred,
+          maxScheduleDate: scheduleWindow.maxDate,
+          message: deferredMessage,
+        });
+      }
+      return { uploaded: 0, failed: 0, deferred, total: pendingUploads, maxScheduleDate: scheduleWindow.maxDate };
+    }
+
     // Backup DB before upload session — status changes are hard to undo
     db.backup('pre-upload');
 
@@ -207,10 +230,10 @@ class ShortsController {
     if (this.uploader) {
       await this.uploader.close();
     }
-    this.uploader = new FacebookUploader(this.uploaderOptions);
+    this.uploader = this.uploaderFactory(this.uploaderOptions);
     this._emitProgress({ phase: 'upload', status: 'logging_in', message: 'Waiting for Facebook login + 2FA...' });
     await this.uploader.launch(); // Waits for login + 2FA before returning
-    this.log('[SHORTS] Upload session started — uploading all shorts');
+    this.log(`[SHORTS] Upload session started — uploading ${uploadableNow} short(s). ${deferred > 0 ? `${deferred} deferred beyond ${scheduleWindow.maxDate}.` : ''}`);
 
     let uploaded = 0;
     let failed = 0;
@@ -219,7 +242,9 @@ class ShortsController {
 
     try {
       while (true) {
-        const nextShort = this.scheduler.getNextPendingUpload(projectId, [...failedThisSession]);
+        const nextShort = this.scheduler.getNextPendingUpload(projectId, [...failedThisSession], {
+          maxScheduledDate: scheduleWindow.maxDate,
+        });
         if (!nextShort) break;
 
         current++;
@@ -227,8 +252,9 @@ class ShortsController {
         const exclusionSql = failedIds.length ? ` AND id NOT IN (${failedIds.map(() => '?').join(',')})` : '';
         const remainingRow = db.queryOne(
           `SELECT COUNT(*) as cnt FROM shorts
-           WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')${exclusionSql}`,
-          [projectId, ...failedIds]
+           WHERE project_id = ? AND status IN ('seo_done', 'upload_failed')${exclusionSql}
+             AND scheduled_date <= ?`,
+          [projectId, ...failedIds, scheduleWindow.maxDate]
         );
         const total = current + (remainingRow?.cnt || 0);
 
@@ -248,6 +274,9 @@ class ShortsController {
           this.scheduler.markUploaded(nextShort.id, result.facebookPostId || null);
           uploaded++;
           this.log(`[SHORTS] Short #${nextShort.short_number} scheduled for ${nextShort.scheduled_date}`);
+        } else if (result.deferred) {
+          failedThisSession.add(nextShort.id);
+          this.log(`[SHORTS] Short #${nextShort.short_number} deferred: ${result.error}`);
         } else {
           this.scheduler.markFailed(nextShort.id, result.error);
           failedThisSession.add(nextShort.id);
@@ -262,6 +291,7 @@ class ShortsController {
             scheduledDate: nextShort.scheduled_date,
             success: result.success,
             error: result.error || null,
+            deferred: result.deferred === true,
           });
         }
       }
@@ -272,14 +302,14 @@ class ShortsController {
         this.scheduler.markProjectRepurposed(projectId);
         this.log(`[SHORTS] All ${uploaded} shorts scheduled. Project marked as repurposed.`);
       } else if (failed === 0 && uploaded > 0) {
-        this.log(`[SHORTS] Uploaded ${uploaded} shorts, but ${unscheduled.length} short(s) remain unscheduled. Project not marked repurposed.`);
+        this.log(`[SHORTS] Uploaded ${uploaded} shorts, ${deferred} deferred, ${unscheduled.length} short(s) remain unscheduled. Project not marked repurposed.`);
       }
     } finally {
       // Always close browser when done
       await this.closeUploadSession();
     }
 
-    return { uploaded, failed, total: uploaded + failed };
+    return { uploaded, failed, deferred, total: uploaded + failed + deferred, maxScheduleDate: scheduleWindow.maxDate };
   }
 
   /**
@@ -351,6 +381,19 @@ class ShortsController {
 
   _emitProgress(data) {
     if (this.onProgress) this.onProgress(data);
+  }
+
+  _countPendingUploads(projectId, options = {}) {
+    const maxDateSql = options.maxScheduledDate ? ' AND scheduled_date <= ?' : '';
+    const params = [projectId];
+    if (options.maxScheduledDate) params.push(options.maxScheduledDate);
+    const row = db.queryOne(
+      `SELECT COUNT(*) as cnt FROM shorts
+       WHERE project_id = ?
+         AND status IN ('seo_done', 'upload_failed')${maxDateSql}`,
+      params
+    );
+    return row?.cnt || 0;
   }
 
   _buildFullDescription(short) {
