@@ -77,10 +77,12 @@ class SocialFacebookUploader extends FacebookUploader {
 
       this.log('[FB-SOCIAL] Step 4: Entering caption');
       await this._enterPostCaption(caption);
+      await this._dismissCaptionSuggestions();
       this.onStepComplete('caption');
 
       this.log('[FB-SOCIAL] Step 5: Opening scheduling modal');
       await this._scrollComposerToBottom();
+      await this._advanceImagePostComposerIfNeeded();
       await this._clickComposerScheduleButton();
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
       this.onStepComplete('scheduling_options');
@@ -187,13 +189,20 @@ class SocialFacebookUploader extends FacebookUploader {
 
   async _waitForCreatePostDialog() {
     await this.page.waitForFunction(() => {
-      const dialogs = [...document.querySelectorAll('[role="dialog"]')];
-      const text = document.body.innerText || document.body.textContent || '';
-      return location.href.includes('/post/create') ||
-        dialogs.some(d => /Create post|What's on your mind|Posting to|Add photos or videos/i.test(d.textContent || '')) ||
-        /What's on your mind|Posting to|Add photos or videos/i.test(text);
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 100 && rect.height > 100 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(visible);
+      return dialogs.some(dialog => {
+        const text = dialog.innerText || dialog.textContent || '';
+        const hasComposerText = /Create post|What's on your mind|Posting to|Add photos or videos|Photo\/video/i.test(text);
+        const hasComposerControl = !!dialog.querySelector('div[contenteditable="true"], [role="textbox"], input[type="file"]');
+        return hasComposerText || hasComposerControl;
+      });
     }, { timeout: CLICK_TIMEOUT });
-    await this._waitForComposerHydration();
+    await this._waitForComposerHydration({ required: true });
   }
 
   _activeDialog() {
@@ -292,6 +301,25 @@ class SocialFacebookUploader extends FacebookUploader {
     await this.page.keyboard.type(caption, { delay: 2 });
   }
 
+  async _dismissCaptionSuggestions() {
+    try {
+      const hasSuggestions = await this.page.evaluate(() => {
+        const visible = el => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 20 && rect.height > 20 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        return [...document.querySelectorAll('[role="listbox"], [role="option"], div')]
+          .filter(visible)
+          .some(el => /posts\b|#\w+/i.test(el.innerText || el.textContent || ''));
+      }).catch(() => false);
+      if (hasSuggestions) {
+        await this.page.keyboard.press('Escape');
+        await this.page.waitForTimeout(700);
+      }
+    } catch (_) {}
+  }
+
   async _readComposerCaption() {
     await this.page.waitForTimeout(500);
     return await this.page.evaluate(() => {
@@ -331,10 +359,17 @@ class SocialFacebookUploader extends FacebookUploader {
     return actualText === expectedText || actualText.includes(expectedText);
   }
 
-  async _waitForComposerHydration() {
+  async _waitForComposerHydration(options = {}) {
     try {
       await this.page.waitForFunction(() => {
-        const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+        const visible = el => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 100 && rect.height > 100 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+          .filter(visible)
+          .filter(dialog => /Create post|What's on your mind|Posting to|Add to your post|Photo\/video/i.test(dialog.innerText || dialog.textContent || ''));
         const dialog = dialogs[dialogs.length - 1];
         if (!dialog) return false;
         const text = dialog.textContent || '';
@@ -343,6 +378,7 @@ class SocialFacebookUploader extends FacebookUploader {
         return hasComposerBody || hasEditor;
       }, { timeout: 8000 });
     } catch (_) {
+      if (options.required) throw new Error('Create post composer did not hydrate.');
       this.log('[FB-SOCIAL] Composer hydration wait timed out; continuing with click fallback');
     }
     await this.page.waitForTimeout(3500);
@@ -351,6 +387,9 @@ class SocialFacebookUploader extends FacebookUploader {
   async _uploadImage(mediaPath) {
     await this._dismissLeavePageGuard();
     const dialog = this._activeDialog();
+    if (await dialog.count().catch(() => 0) === 0) {
+      throw new Error('Create post dialog is not open; refusing to upload image.');
+    }
 
     const triggerClick = async () => {
       const clickedNewDropZone = await this._clickAddPhotosDropZone();
@@ -549,6 +588,15 @@ class SocialFacebookUploader extends FacebookUploader {
     } catch (_) {}
   }
 
+  async _advanceImagePostComposerIfNeeded() {
+    const clickedNext = await this._clickVisibleControlByText(/^Next$/i, { preferRole: 'button', bottomOnly: true });
+    if (!clickedNext) return false;
+    this.log('[FB-SOCIAL] Clicked Next in image post composer');
+    await this.page.waitForTimeout(5000);
+    await this._dismissPopups();
+    return true;
+  }
+
   async _clickScheduleForLater() {
     await this._waitForSchedulingModalOpen();
     const dialog = this._schedulingDialog();
@@ -570,6 +618,12 @@ class SocialFacebookUploader extends FacebookUploader {
   }
 
   async _clickComposerScheduleButton() {
+    const clickedSchedulingOptions = await this._clickVisibleControlByText(/Scheduling options/i, { preferRole: 'button' });
+    if (clickedSchedulingOptions) {
+      await this._waitForSchedulingModalOpen();
+      return;
+    }
+
     for (let attempt = 1; attempt <= 3; attempt++) {
       await this._scrollComposerToBottom();
       const clicked = await this._clickVisibleControlByText(/^Schedule$/i, { preferRole: 'button', bottomOnly: true });
@@ -605,9 +659,9 @@ class SocialFacebookUploader extends FacebookUploader {
   }
 
   async _clickComposerSubmitButton() {
-    const clicked = await this._clickVisibleControlByText(/^(Schedule post|Post)$/i, { preferRole: 'button', bottomOnly: true });
+    const clicked = await this._clickVisibleControlByText(/^(Schedule post|Schedule|Post)$/i, { preferRole: 'button', bottomOnly: true });
     if (clicked) return;
-    await this._clickWithFallback('div[role="button"][aria-label="Schedule post"], div[role="button"]:has-text("Schedule post"), div[role="button"][aria-label="Post"], div[role="button"]:has-text("Post")');
+    await this._clickWithFallback('div[role="button"][aria-label="Schedule post"], div[role="button"]:has-text("Schedule post"), div[role="button"][aria-label="Schedule"], div[role="button"]:has-text("Schedule"), div[role="button"][aria-label="Post"], div[role="button"]:has-text("Post")');
   }
 
   async _waitForScheduleConfirmationLegacy(expectedCaption = '') {

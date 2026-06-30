@@ -1,0 +1,26 @@
+{
+  "name": "how-to-facebook-content-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone weekly research pipeline for eight Facebook how-to pages.",
+  "scripts": {
+    "run": "node run.js",
+    "scrape": "node run.js --skip-score --skip-queue",
+    "score": "node run.js --skip-scrape --skip-queue",
+    "queue": "node run.js --skip-scrape --skip-score",
+    "review": "node review.js",
+    "image": "node image.js",
+    "content": "node content.js",
+    "qa": "node qa.js",
+    "dedup": "node dedup.js",
+    "weekly": "node weekly.js",
+    "facebook": "node facebook.js",
+    "check": "node --check config.js && node --check credentials.js && node --check db.js && node --check logger.js && node --check scraper.js && node --check scorer.js && node --check queue.js && node --check run.js && node --check review.js && node --check image.js && node --check content-quality.js && node --check dedup.js && node --check content.js && node --check qa.js && node --check weekly.js && node --check facebook.js && node --check adapters/higgsfield-image-generator.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "playwright": "^1.49.0",
+    "sql.js": "^1.11.0"
+  }
+}
