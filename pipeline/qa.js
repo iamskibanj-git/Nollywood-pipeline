@@ -557,6 +557,23 @@ function nicheSpecificQaRules(nicheId) {
       'Flag review_needed or blocked for guaranteed savings, income claims, investment/debt/credit/legal/tax advice, or named products/organizations not supported by the source signals.',
       'General budgeting tips can pass when framed as educational and realistic.',
     ],
+    'make-it': [
+      'For DIY cleaners or household mixtures, block any instruction that mixes bleach with vinegar, ammonia, acids, or other cleaners.',
+      'Flag review_needed if vinegar and castile soap are combined in the same cleaner; they should be kept as separate recipes.',
+      'For household cleaner posts, a pass should include surface spot-testing, ventilation, labeling, and keep-away-from-children/pets guidance when relevant.',
+      'Flag disinfectant kill claims, mold-remediation claims, pest-control claims, or medical/sanitizing guarantees unless they are narrowly sourced and safely framed.',
+    ],
+    'tech-it': [
+      'Flag review_needed or blocked for unsupported named AI tools, current/recent launch claims, "free forever" claims, or absolute claims that AI replaces every paid app.',
+      'Flag privacy-risk advice that encourages uploading sensitive personal, client, legal, medical, or financial files without caveats.',
+      'A pass should frame AI tools as task helpers, include current pricing/terms/privacy checks, and avoid guaranteeing results or savings.',
+    ],
+    'look-good': [
+      'For skincare, flag review_needed or blocked for cure/treatment promises, guaranteed clear skin, anti-aging result promises, unsafe exfoliation/acid stacking, or advice that ignores irritation/allergy risk.',
+      'A pass should use generic product categories, include patch testing or one-new-product-at-a-time guidance, and advise stopping if irritation occurs.',
+      'Persistent acne, rashes, severe irritation, allergies, or skin conditions should be framed as reasons to ask a qualified dermatologist or clinician.',
+      'Do not require medical caveats to dominate a simple beginner routine, but medicalized certainty should not pass.',
+    ],
   };
   return (rules[nicheId] || ['Apply general production-quality and safety checks for a practical public how-to post.'])
     .map(rule => `- ${rule}`)

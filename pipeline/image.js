@@ -381,7 +381,8 @@ function selectPosts(db, runId, argv) {
 function buildPromptPayload(post, { provider, model }) {
   const visualPrompt = cleanText(post.image_prompt);
   const style = cleanText(pipelineConfig.image.promptStyle);
-  const prompt = `${visualPrompt}. ${style}.`;
+  const visualGuard = 'No readable words, labels, logos, app icons, brand marks, watermarks, UI text, captions, posters, or printed text anywhere in the image; use generic blank props and abstract interface shapes only; avoid color palettes or geometry that resemble real brand logos';
+  const prompt = `${visualPrompt}. ${style}. ${visualGuard}.`;
   return {
     provider,
     model,
@@ -390,8 +391,15 @@ function buildPromptPayload(post, { provider, model }) {
     prompt,
     negative_prompt: [
       'text overlay',
+      'readable words',
+      'readable labels',
       'watermark',
       'brand logos',
+      'app logos',
+      'real company logos',
+      'brand-like color blocks',
+      'UI text',
+      'printed text',
       'distorted hands',
       'extra fingers',
       'unsafe repair steps',

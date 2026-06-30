@@ -2,8 +2,13 @@ import { pipelineConfig } from './config.js';
 
 const TOOL_SECTION_PATTERN = /\b(what you need|you(?:'|')ll need|you will need|tools?|materials?|ingredients?)\b/i;
 const STEP_LINE_PATTERN = /^\s*(?:\d{1,2}[.)]|step\s+\d{1,2}\b)\s+/i;
-const SAFETY_PATTERN = /\b(safety|caution|careful|warning|quick check|call a pro|call a professional|when to call|do not|don't|avoid|medical|doctor|trainer|licensed|unplug|turn off|shut off|test first|patch test|discard|spoil|spoiled|food safety|refrigerate|raw|undercooked)\b/i;
+const SAFETY_PATTERN = /\b(safety|caution|careful|warning|quick check|call a pro|call a professional|when to call|do not|don't|avoid|medical|doctor|trainer|licensed|unplug|turn off|shut off|test first|patch test|spot test|label|ventilate|discard|spoil|spoiled|food safety|refrigerate|raw|undercooked)\b/i;
 const CTA_PATTERN = /\b(save this|try this|bookmark|follow|share|comment|tell us|send this|keep this)\b/i;
+const UNSAFE_MIXING_PATTERNS = [
+  /\b(?:mix|combine|add|blend)\b[^.\n]{0,80}\bbleach\b[^.\n]{0,80}\b(?:vinegar|ammonia)\b/i,
+  /\b(?:mix|combine|add|blend)\b[^.\n]{0,80}\b(?:vinegar|ammonia)\b[^.\n]{0,80}\bbleach\b/i,
+];
+const NEGATED_SAFETY_WARNING_PATTERN = /\b(?:never|do not|don't|dont|avoid|should not|must not|without)\b/i;
 const PLACEHOLDER_PATTERNS = [
   /\bsave this one for later\b/i,
   /\bhow to .+\.\s*save this\b/i,
@@ -11,6 +16,16 @@ const PLACEHOLDER_PATTERNS = [
   /\bcoming soon\b/i,
   /\bcaption goes here\b/i,
   /\bdrop a\s+(?:below|in the comments)\b/i,
+];
+const ABSOLUTE_TECH_CLAIM_PATTERNS = [
+  /\bfree forever\b/i,
+  /\breplace (?:all|every) paid apps?\b/i,
+  /\bnever pay for software again\b/i,
+  /\bdoes (?:it|this|everything) better than paid\b/i,
+];
+const SKINCARE_OVERCLAIM_PATTERNS = [
+  /\b(?:cure|treat|erase|get rid of)\b[^.\n]{0,80}\b(?:acne|eczema|rosacea|wrinkles|dark spots|hyperpigmentation)\b/i,
+  /\b(?:clear skin|glass skin|younger skin|wrinkle-free)\b[^.\n]{0,80}\b(?:guaranteed|overnight|fast|in \d+\s*(?:days?|weeks?))\b/i,
 ];
 
 export function validateCaptionForScheduling(caption, { config = pipelineConfig } = {}) {
@@ -25,6 +40,9 @@ export function validateCaptionForScheduling(caption, { config = pipelineConfig 
     has_safety_note: SAFETY_PATTERN.test(cleaned),
     has_cta: CTA_PATTERN.test(cleaned),
     has_placeholder_phrase: PLACEHOLDER_PATTERNS.some(pattern => pattern.test(cleaned)),
+    has_unsafe_cleaner_mix: hasUnsafeCleanerMix(cleaned),
+    has_absolute_tech_claim: ABSOLUTE_TECH_CLAIM_PATTERNS.some(pattern => pattern.test(cleaned)),
+    has_skincare_overclaim: SKINCARE_OVERCLAIM_PATTERNS.some(pattern => pattern.test(cleaned)),
     max_chars: Number(contentConfig.maxCaptionChars || 1800),
     min_chars: Number(contentConfig.minCaptionChars || 450),
     min_step_count: Number(contentConfig.minStepCount || 3),
@@ -37,6 +55,9 @@ export function validateCaptionForScheduling(caption, { config = pipelineConfig 
   if (metrics.step_count < metrics.min_step_count) reasons.push(`caption has fewer than ${metrics.min_step_count} numbered steps`);
   if (!metrics.has_tools_section) reasons.push('caption is missing a tools/materials/ingredients section');
   if (!metrics.has_safety_note) reasons.push('caption is missing a safety/caution/pro note');
+  if (metrics.has_unsafe_cleaner_mix) reasons.push('caption suggests an unsafe cleaner mixture');
+  if (metrics.has_absolute_tech_claim) reasons.push('caption contains an absolute/free-forever tech claim');
+  if (metrics.has_skincare_overclaim) reasons.push('caption contains a skincare treatment/result overclaim');
   if (metrics.has_placeholder_phrase && metrics.step_count < metrics.min_step_count) {
     reasons.push('caption looks like placeholder teaser copy');
   }
@@ -78,6 +99,17 @@ function countStepLines(lines) {
   return lines.filter(line => STEP_LINE_PATTERN.test(line) && hasActionVerb(line)).length;
 }
 
+function hasUnsafeCleanerMix(cleaned) {
+  const chunks = cleaned
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map(chunk => chunk.trim())
+    .filter(Boolean);
+  return chunks.some(chunk => (
+    UNSAFE_MIXING_PATTERNS.some(pattern => pattern.test(chunk)) &&
+    !NEGATED_SAFETY_WARNING_PATTERN.test(chunk)
+  ));
+}
+
 function hasActionVerb(line) {
-  return /\b(add|apply|attach|bake|blend|boil|cancel|check|choose|clean|clip|combine|cover|cut|disconnect|drain|dry|ease|fill|find|fit|fold|heat|hold|increase|install|lift|limit|loosen|mark|measure|mix|open|patch|pause|pick|place|plan|plant|press|pull|push|reduce|remove|replace|rinse|roll|rub|sand|save|scrub|seal|set|shut|slide|spray|start|stir|stop|stretch|tighten|track|trim|turn|unplug|use|vary|wait|walk|wash|water|wipe|wrap|write)\b/i.test(line);
+  return /\b(add|apply|attach|bake|blend|boil|cancel|check|choose|clean|clip|combine|compare|cover|cut|disconnect|drain|dry|ease|fill|find|fit|fold|heat|hold|increase|install|label|lift|limit|log|loosen|mark|measure|mix|note|open|patch|pause|pick|place|plan|plant|press|pull|push|reduce|remove|replace|review|rinse|roll|rub|sand|save|scrub|search|seal|set|shut|sign|slide|spray|start|stir|stop|stretch|test|tighten|track|trim|turn|unplug|upload|use|vary|verify|wait|walk|wash|water|wipe|wrap|write)\b/i.test(line);
 }

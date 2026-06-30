@@ -376,6 +376,26 @@ function nicheSpecificContentRules(nicheId) {
       'Avoid naming apps, lenders, platforms, websites, or organizations unless they appear in the source signals.',
       'Frame money advice as general educational tips, not financial/legal/tax advice.',
     ],
+    'make-it': [
+      'For DIY cleaners or household mixtures, never tell readers to mix bleach with vinegar, ammonia, acids, or other cleaners.',
+      'Do not combine vinegar and castile soap in the same cleaner; keep vinegar sprays and soap-based cleaners as separate recipes.',
+      'For household cleaning projects, include safe labeling, ventilation, surface spot-testing, and keep-out-of-reach guidance when relevant.',
+      'Prefer simple low-risk recipes and avoid medical, pest-control, mold-remediation, or disinfectant kill-claim promises.',
+    ],
+    'tech-it': [
+      'Do not claim tools are free forever, better than paid tools, or able to replace every paid app.',
+      'Do not name specific AI tools, apps, companies, or platforms unless they appear in the source signals.',
+      'Frame AI tools as options for specific tasks, not as guaranteed replacements for professional software or human expertise.',
+      'Include a quick check to verify current pricing, privacy settings, data retention, and terms before uploading sensitive files.',
+      'Avoid current-news, launch-date, or "just released" claims unless they are directly supported by the source signals.',
+    ],
+    'look-good': [
+      'For skincare, do not promise clear skin, anti-aging results, acne cures, treatment outcomes, or results for every skin type.',
+      'Keep advice beginner-safe: start with a simple routine, introduce one new product at a time, patch test, and stop if irritation occurs.',
+      'Avoid naming brands or products unless they appear in the source signals; use generic categories such as gentle cleanser, moisturizer, and sunscreen.',
+      'Tell readers with persistent acne, rashes, severe irritation, allergies, or skin conditions to ask a qualified dermatologist or clinician.',
+      'Avoid body-shaming or appearance-shaming language.',
+    ],
   };
   return (rules[nicheId] || ['Use practical, low-risk advice appropriate for a general audience.'])
     .map(rule => `- ${rule}`)
