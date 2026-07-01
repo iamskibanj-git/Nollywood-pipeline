@@ -30,11 +30,11 @@ if (!runId) throw new Error('No run found in how-to content DB.');
 
 const plan = readPlan(planPath);
 const slots = selectPlanSlots(plan, rawArgs);
-if (slots.length === 0) throw new Error('No ready slots matched the batch filters.');
+if (slots.length === 0) throw new Error('No ready/prepared slots matched the batch filters.');
 
 console.log(`${execute ? live ? 'Live' : 'Execute' : 'Dry-run'} batch for run ${runId}`);
 console.log(`Plan: ${path.relative(pipelineDir, planPath)}`);
-console.log(`Selected ${slots.length} ready slot(s).`);
+console.log(`Selected ${slots.length} ready/prepared slot(s).`);
 for (const slot of slots) {
   console.log(`- ${slot.scheduled_date} ${slot.scheduled_time} ${slot.facebook_page_name} #${slot.post_id}: ${slot.topic}`);
 }
@@ -422,7 +422,7 @@ function selectPlanSlots(plan, argv) {
   const postId = readInteger(parseArgValue(argv, '--id') || parseArgValue(argv, '--post-id'), 0);
   const limit = readInteger(parseArgValue(argv, '--limit'), 0);
   let slots = Array.isArray(plan.calendar) ? plan.calendar : [];
-  slots = slots.filter(slot => slot.plan_status === 'ready');
+  slots = slots.filter(slot => ['ready', 'prepared'].includes(slot.plan_status));
   if (day) slots = slots.filter(slot => slot.scheduled_date === day);
   if (dayIndex > 0) slots = slots.filter(slot => Number(slot.day_index) === dayIndex);
   if (niche) slots = slots.filter(slot => String(slot.niche_id).toLowerCase() === niche.toLowerCase());

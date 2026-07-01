@@ -96,7 +96,7 @@ npm.cmd run batch -- --execute --day 2026-07-02 --limit 8
 npm.cmd run batch -- --live --day 2026-07-02 --limit 8 --user-data-dir .browser-profile
 ```
 
-Batch mode is plan-only by default. `--execute` runs the existing stage CLIs for each selected post: approve, Higgsfield image, content generation, QA, Facebook page-context verification, local schedule preparation, and schedule dry-run. `--live` does the same thing plus final Facebook scheduling. The runner processes one post at a time, reuses the same DB-backed image/content/QA/Facebook gates as manual orchestration, and stops the batch on external/session/scheduling-confirmation failures.
+Batch mode is plan-only by default. It selects `ready` and `prepared` plan rows, so a non-live rehearsal can be followed by a live batch without regenerating new posts. `--execute` runs the existing stage CLIs for each selected post: approve, Higgsfield image, content generation, QA, Facebook page-context verification, local schedule preparation, and schedule dry-run. `--live` does the same thing plus final Facebook scheduling. The runner processes one post at a time, reuses the same DB-backed image/content/QA/Facebook gates as manual orchestration, and stops the batch on external/session/scheduling-confirmation failures.
 
 Repair policy in batch mode:
 
