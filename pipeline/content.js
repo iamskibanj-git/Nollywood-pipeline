@@ -339,6 +339,9 @@ ${parseJson(post.sources_json, []).join(', ') || 'n/a'}
 IMAGE ALREADY GENERATED
 ${post.image_path || 'n/a'}
 
+REPAIR FEEDBACK
+${post.error_message || 'n/a'}
+
 NICHE-SPECIFIC SAFETY RULES
 ${nicheSpecificContentRules(post.niche_id)}
 

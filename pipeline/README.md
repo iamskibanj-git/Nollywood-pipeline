@@ -86,7 +86,24 @@ npm.cmd run weekly -- --dry-run --days 7 --posts-per-page 7
 npm.cmd run weekly -- --dry-run --days 1
 ```
 
-The weekly planner builds a page-by-day calendar. By default it plans 7 days with one daily slot per page: Fix It at 15:00, Cook It at 16:00, Grow It at 17:00, Money it at 18:00, Get Fit at 19:00, Make It at 20:00, Tech It at 21:00, and Look Good at 22:00. Existing scheduled/scheduling posts in the window become `already_scheduled`; empty requested slots are filled from eligible queued posts after duplicate checks. The planner writes `weekly_plan.json` and prints the next commands for each selected post. It is intentionally dry-run only for now.
+The weekly planner builds a page-by-day calendar. By default it plans 7 days with one daily slot per page: Fix It at 15:00, Cook It at 16:00, Grow It at 17:00, Money it at 18:00, Get Fit at 19:00, Make It at 20:00, Tech It at 21:00, and Look Good at 22:00. Existing scheduled/scheduling posts in the window become `already_scheduled`; empty requested slots are filled from eligible queued posts after duplicate checks. The planner writes `weekly_plan.json` and prints the next commands for each selected post. The planner itself does not run generation or Facebook scheduling.
+
+Run a guarded batch from `weekly_plan.json`:
+
+```powershell
+npm.cmd run batch -- --day 2026-07-02 --limit 8
+npm.cmd run batch -- --execute --day 2026-07-02 --limit 8
+npm.cmd run batch -- --live --day 2026-07-02 --limit 8 --user-data-dir .browser-profile
+```
+
+Batch mode is plan-only by default. `--execute` runs the existing stage CLIs for each selected post: approve, Higgsfield image, content generation, QA, Facebook page-context verification, local schedule preparation, and schedule dry-run. `--live` does the same thing plus final Facebook scheduling. The runner processes one post at a time, reuses the same DB-backed image/content/QA/Facebook gates as manual orchestration, and stops the batch on external/session/scheduling-confirmation failures.
+
+Repair policy in batch mode:
+
+- Image QA failures regenerate through Higgsfield without a fixed numeric retry cap while the post stays inside `--post-wall-clock-min`; repeated image failures mutate the image prompt from QA feedback and eventually switch visual strategy.
+- Caption/content QA failures regenerate from QA feedback up to `--caption-retries` times, default `3`, then the post is marked `review_needed` and skipped.
+- Posts are never scheduled unless the latest QA row is `passed/pass` for the exact generated image path and caption hash.
+- `review_needed` posts with a QA row resume through the repair loop; posts already marked `Batch skipped:` are not auto-approved on rerun.
 
 Prepare image-generation payloads after approval:
 
@@ -175,4 +192,4 @@ YouTube scraping uses a fresh browser context by default and captures autocomple
 
 Quora scraping runs two topic pages plus two question-search queries per niche. It keeps only clean question titles ending in `?`, uses `quora_topic` and `quora_search` source labels, and treats those titles as hook-writing fuel rather than numeric engagement.
 
-Do not batch live Facebook scheduling until one-post live scheduling has been visually monitored and proven with the standalone DB state. The first live scheduled Fix It post (#91) proved the browser/scheduler path but used placeholder copy, so it is marked as a test/proof rather than production-quality content.
+Use `npm.cmd run batch -- --live ...` for weekly live scheduling only after checking the dry selection. The first live scheduled Fix It post (`#91`) proved the browser/scheduler path but used placeholder copy and was later deleted/test-marked; production posts now require content generation plus the passed QA row before scheduling.
