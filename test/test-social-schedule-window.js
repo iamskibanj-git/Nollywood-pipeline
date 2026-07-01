@@ -155,14 +155,43 @@ async function testMixedBatchSkipsDeferredRows() {
   assert.strictEqual(result.maxScheduleDate, '2026-07-24');
 }
 
-async function testConfirmationUsesSettleAndRefreshPhases() {
+async function testConfirmationUsesCalendarFirst() {
   const uploader = new SocialFacebookUploader({ log: () => {} });
   let settleArgs = null;
-  const pollCalls = [];
+  let calendarArgs = null;
 
   uploader._waitForImageScheduleSubmissionSettle = async (...args) => {
     settleArgs = args;
   };
+  uploader._confirmImagePostInCalendar = async options => {
+    calendarArgs = options;
+    return true;
+  };
+  uploader._pollSocialScheduledRowsForMatch = async () => {
+    throw new Error('Content Library fallback should not run when Calendar confirms');
+  };
+
+  await uploader._waitForScheduleConfirmation('Caption body for match', 3, {
+    scheduledDate: '2026-07-24',
+    scheduledTime: '15:00',
+    alreadySettledMs: 30000,
+  });
+
+  assert.deepStrictEqual(settleArgs, ['Caption body for match', 30000]);
+  assert.strictEqual(calendarArgs.expectedCaption, 'Caption body for match');
+  assert.strictEqual(calendarArgs.scheduledDate, '2026-07-24');
+  assert.strictEqual(calendarArgs.scheduledTime, '15:00');
+  assert.strictEqual(calendarArgs.phase, 'calendar confirmation');
+}
+
+async function testConfirmationFallsBackToContentLibraryAfterCalendarMiss() {
+  const uploader = new SocialFacebookUploader({ log: () => {} });
+  const pollCalls = [];
+  let reloaded = false;
+
+  uploader._waitForImageScheduleSubmissionSettle = async () => {};
+  uploader._confirmImagePostInCalendar = async () => false;
+  uploader._reloadScheduledLibrary = async () => { reloaded = true; };
   uploader._pollSocialScheduledRowsForMatch = async options => {
     pollCalls.push(options);
     return pollCalls.length === 2;
@@ -174,7 +203,7 @@ async function testConfirmationUsesSettleAndRefreshPhases() {
     alreadySettledMs: 30000,
   });
 
-  assert.deepStrictEqual(settleArgs, ['Caption body for match', 30000]);
+  assert.strictEqual(reloaded, true);
   assert.strictEqual(pollCalls.length, 2);
   assert.strictEqual(pollCalls[0].phase, 'in-place confirmation');
   assert.strictEqual(pollCalls[0].reloadEveryMs, 0);
@@ -183,11 +212,86 @@ async function testConfirmationUsesSettleAndRefreshPhases() {
   assert.strictEqual(pollCalls[1].baselineCount, 3);
 }
 
+async function testUploadFailedPreSubmitCalendarRecoverySkipsCreate() {
+  const uploader = new SocialFacebookUploader({
+    nowProvider: () => NOW,
+    log: () => {},
+  });
+  let createOpened = false;
+  let calendarArgs = null;
+  uploader.page = {
+    goto: async () => {},
+    waitForTimeout: async () => {},
+  };
+  uploader._waitForPageReady = async () => {};
+  uploader._dismissPopups = async () => {};
+  uploader._dismissLeavePageGuard = async () => {};
+  uploader._confirmImagePostInCalendar = async options => {
+    calendarArgs = options;
+    return true;
+  };
+  uploader._openCreatePostDialog = async () => {
+    createOpened = true;
+    throw new Error('should not create duplicate post');
+  };
+
+  const result = await uploader.scheduleImagePost({
+    mediaPath: __filename,
+    caption: 'Caption for existing Facebook post.',
+    scheduledDate: '2026-07-24',
+    scheduledTime: '15:00',
+    status: 'upload_failed',
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.recovered, true);
+  assert.strictEqual(createOpened, false);
+  assert.strictEqual(calendarArgs.phase, 'pre-submit calendar recovery');
+}
+
+async function testCalendarDialogRequiresCaptionAndTimeProof() {
+  const uploader = new SocialFacebookUploader({ log: () => {} });
+  const matching = uploader._calendarDialogMatchesExpectedPost({
+    dialogText: 'She sent money. He wanted her presence. #NollywoodDrama',
+    candidate: { text: '3:00 PM' },
+    expectedCaption: 'She sent money. He wanted her presence.',
+    scheduledDate: '2026-07-24',
+    scheduledTime: '15:00',
+    headerText: 'Friday, Jul 24, 2026',
+  });
+  assert.strictEqual(matching.matched, true);
+
+  const timeOnly = uploader._calendarDialogMatchesExpectedPost({
+    dialogText: 'A different post caption entirely.',
+    candidate: { text: '3:00 PM' },
+    expectedCaption: 'She sent money. He wanted her presence.',
+    scheduledDate: '2026-07-24',
+    scheduledTime: '15:00',
+    headerText: 'Friday, Jul 24, 2026',
+  });
+  assert.strictEqual(timeOnly.matched, false);
+  assert.match(timeOnly.proof, /missing-caption/);
+
+  const captionOnly = uploader._calendarDialogMatchesExpectedPost({
+    dialogText: 'She sent money. He wanted her presence.',
+    candidate: { text: '4:00 PM' },
+    expectedCaption: 'She sent money. He wanted her presence.',
+    scheduledDate: '2026-07-24',
+    scheduledTime: '15:00',
+    headerText: 'Friday, Jul 24, 2026',
+  });
+  assert.strictEqual(captionOnly.matched, false);
+  assert.match(captionOnly.proof, /missing-time/);
+}
+
 async function main() {
   await testUploaderDefersBeforeFileCheck();
   await testFutureOnlyBatchDoesNotLaunchFacebook();
   await testMixedBatchSkipsDeferredRows();
-  await testConfirmationUsesSettleAndRefreshPhases();
+  await testConfirmationUsesCalendarFirst();
+  await testConfirmationFallsBackToContentLibraryAfterCalendarMiss();
+  await testUploadFailedPreSubmitCalendarRecoverySkipsCreate();
+  await testCalendarDialogRequiresCaptionAndTimeProof();
   console.log('test-social-schedule-window passed');
 }
 

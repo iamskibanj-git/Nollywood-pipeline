@@ -201,6 +201,7 @@ class SocialPostsController {
           caption,
           scheduledDate: post.scheduled_date,
           scheduledTime: post.scheduled_time,
+          status: post.status,
         });
 
         if (result.success) {

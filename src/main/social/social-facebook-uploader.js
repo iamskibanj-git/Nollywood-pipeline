@@ -12,6 +12,9 @@ const POST_SCHEDULE_MIN_SETTLE = 30000;
 const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
 const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
 const POST_SCHEDULE_REFRESH_EVERY = 15000;
+const CALENDAR_CONFIRM_TIMEOUT = 90000;
+const CALENDAR_CONFIRM_SCROLLS = 12;
+const SOCIAL_CALENDAR_DAY_URL = 'https://www.facebook.com/professional_dashboard/content_calendar/';
 
 class SocialFacebookUploader extends FacebookUploader {
   async _dismissPopups() {
@@ -42,7 +45,7 @@ class SocialFacebookUploader extends FacebookUploader {
   }
 
   async scheduleImagePost(post) {
-    const { mediaPath, caption, scheduledDate, scheduledTime } = post;
+    const { mediaPath, caption, scheduledDate, scheduledTime, status } = post;
     if (!FacebookUploader.isWithinScheduleWindow(scheduledDate, this.nowProvider())) {
       return { success: false, deferred: true, error: FacebookUploader.getScheduleWindowError(scheduledDate, this.nowProvider()) };
     }
@@ -63,6 +66,26 @@ class SocialFacebookUploader extends FacebookUploader {
       await this._dismissPopups();
       await this._dismissLeavePageGuard();
       this.onStepComplete('navigate');
+
+      if (status === 'upload_failed') {
+        const recovered = await this._confirmImagePostInCalendar({
+          expectedCaption: caption,
+          scheduledDate,
+          scheduledTime,
+          phase: 'pre-submit calendar recovery',
+        }).catch(error => {
+          this.log(`[FB-SOCIAL] Pre-submit calendar recovery warning: ${error.message || error}`);
+          return false;
+        });
+        if (recovered) {
+          this.log('[FB-SOCIAL] Existing scheduled image post recovered from Calendar; skipping duplicate create');
+          return { success: true, recovered: true, facebookPostId: null };
+        }
+
+        this.log('[FB-SOCIAL] No existing Calendar match found for retry; returning to Content Library to create post');
+        await this._reloadScheduledLibrary();
+      }
+
       const scheduledRowBaseline = (await this._getScheduledPostRows()).length;
       this.log(`[FB-SOCIAL] Scheduled row baseline before image post: ${scheduledRowBaseline}`);
 
@@ -706,6 +729,20 @@ class SocialFacebookUploader extends FacebookUploader {
 
     await this._waitForImageScheduleSubmissionSettle(expectedCaption, alreadySettledMs);
 
+    const calendarMatched = await this._confirmImagePostInCalendar({
+      expectedCaption,
+      scheduledDate,
+      scheduledTime,
+      phase: 'calendar confirmation',
+    }).catch(error => {
+      this.log(`[FB-SOCIAL] Calendar confirmation warning: ${error.message || error}`);
+      return false;
+    });
+    if (calendarMatched) return;
+
+    this.log('[FB-SOCIAL] Calendar confirmation missed; falling back to Content Library row checks');
+    await this._reloadScheduledLibrary();
+
     const inPlaceMatched = await this._pollSocialScheduledRowsForMatch({
       expectedCaption,
       scheduledDate,
@@ -821,6 +858,355 @@ class SocialFacebookUploader extends FacebookUploader {
       await this.page.waitForTimeout(5000);
     }
     return false;
+  }
+
+  async _confirmImagePostInCalendar({ expectedCaption = '', scheduledDate = '', scheduledTime = '', phase = 'calendar confirmation' } = {}) {
+    if (!expectedCaption || !scheduledDate) return false;
+
+    await this._openSocialCalendarDay(scheduledDate, phase);
+    const headerText = await this._readCalendarDayHeader();
+    if (headerText) {
+      const headerOk = this._calendarHeaderMatchesDate(headerText, scheduledDate);
+      this.log(`[FB-SOCIAL] ${phase}: calendar header "${headerText}"${headerOk ? '' : ` does not visibly match ${scheduledDate}`}`);
+    }
+
+    await this._scrollCalendarToScheduledTime(scheduledTime);
+
+    const start = Date.now();
+    const inspected = new Set();
+    for (let pass = 0; pass < CALENDAR_CONFIRM_SCROLLS && Date.now() - start < CALENDAR_CONFIRM_TIMEOUT; pass++) {
+      const candidates = await this._getVisibleCalendarPostCandidates(scheduledTime);
+      if (candidates.length > 0) {
+        this.log(`[FB-SOCIAL] ${phase}: inspecting ${candidates.length} visible calendar candidate(s), pass ${pass + 1}`);
+      }
+
+      for (const candidate of candidates) {
+        const key = candidate.key || `${candidate.x},${candidate.y},${candidate.text}`;
+        if (inspected.has(key)) continue;
+        inspected.add(key);
+
+        if (await this._inspectCalendarPostCandidate(candidate, {
+          expectedCaption,
+          scheduledDate,
+          scheduledTime,
+          headerText,
+          phase,
+        })) {
+          return true;
+        }
+      }
+
+      await this.page.mouse.wheel(0, pass < 2 ? 420 : 760).catch(() => {});
+      await this.page.waitForTimeout(1000);
+    }
+
+    this.log(`[FB-SOCIAL] ${phase}: no matching calendar post found after inspecting ${inspected.size} candidate(s)`);
+    return false;
+  }
+
+  async _openSocialCalendarDay(scheduledDate, phase = 'calendar confirmation') {
+    const url = this._buildSocialCalendarDayUrl(scheduledDate);
+    this.log(`[FB-SOCIAL] ${phase}: opening Calendar day view ${url}`);
+    await this.page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    await this._waitForPageReady().catch(error => {
+      this.log(`[FB-SOCIAL] ${phase}: calendar page readiness warning (${error.message || error})`);
+    });
+    await this._dismissPopups();
+    await this._dismissLeavePageGuard();
+    await this.page.waitForTimeout(2500);
+  }
+
+  _buildSocialCalendarDayUrl(scheduledDate) {
+    const offset = this._calendarDayOffsetFromToday(scheduledDate);
+    return `${SOCIAL_CALENDAR_DAY_URL}?time_offset=${offset}&view=DAY`;
+  }
+
+  _calendarDayOffsetFromToday(scheduledDate) {
+    const target = this._parseLocalDateOnly(scheduledDate);
+    if (!target) return 0;
+    const now = this.nowProvider();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((target.getTime() - today.getTime()) / 86400000);
+  }
+
+  _parseLocalDateOnly(value) {
+    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return null;
+    const [year, month, day] = String(value).split('-').map(n => parseInt(n, 10));
+    if (!year || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return new Date(year, month - 1, day);
+  }
+
+  async _readCalendarDayHeader() {
+    return await this.page.evaluate(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const candidates = [...document.querySelectorAll('h1, h2, [role="heading"], span, div')]
+        .filter(visible)
+        .map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(text => /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(text))
+        .sort((a, b) => a.length - b.length);
+      return candidates[0] || '';
+    }).catch(() => '');
+  }
+
+  _calendarHeaderMatchesDate(headerText, scheduledDate) {
+    if (!scheduledDate) return true;
+    const needles = this._scheduledDateNeedles(scheduledDate);
+    return this._textHasAnyNeedle(headerText || '', needles);
+  }
+
+  async _scrollCalendarToScheduledTime(scheduledTime) {
+    const labels = this._calendarTimeLabels(scheduledTime);
+    const hour = this._parseScheduledHour(scheduledTime);
+    const scrolledToLabel = await this.page.evaluate(({ labels, hour }) => {
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const labelSet = new Set(labels.map(norm));
+      const nodes = [...document.querySelectorAll('span, div')]
+        .filter(el => {
+          const text = norm(el.innerText || el.textContent || '');
+          if (!labelSet.has(text)) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width < 120 && rect.height < 80;
+        });
+      if (nodes[0]) {
+        nodes[0].scrollIntoView({ block: 'center', inline: 'nearest' });
+        return nodes[0].innerText || nodes[0].textContent || '';
+      }
+
+      const scrollables = [document.scrollingElement, ...document.querySelectorAll('*')]
+        .filter(Boolean)
+        .filter(el => {
+          const style = window.getComputedStyle(el);
+          return /(auto|scroll)/i.test(style.overflowY || '') && el.scrollHeight > el.clientHeight + 50;
+        });
+      const approx = Math.max(0, (Number.isFinite(hour) ? hour : 12) * 155);
+      for (const el of scrollables.slice(0, 8)) {
+        el.scrollTop = approx;
+      }
+      if (document.scrollingElement) document.scrollingElement.scrollTop = approx;
+      return '';
+    }, { labels, hour }).catch(() => '');
+
+    if (scrolledToLabel) {
+      this.log(`[FB-SOCIAL] Calendar scrolled to time label "${String(scrolledToLabel).trim()}"`);
+    }
+    await this.page.waitForTimeout(1200);
+  }
+
+  _parseScheduledHour(timeStr) {
+    const match = String(timeStr || '').match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return NaN;
+    const hour = parseInt(match[1], 10);
+    return hour >= 0 && hour <= 23 ? hour : NaN;
+  }
+
+  _calendarTimeLabels(timeStr) {
+    const timeNeedles = this._scheduledTimeNeedles(timeStr);
+    const hour = this._parseScheduledHour(timeStr);
+    if (!Number.isFinite(hour)) return timeNeedles;
+    const period = hour >= 12 ? 'pm' : 'am';
+    const h12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+    return [...new Set([
+      ...timeNeedles,
+      `${h12} ${period}`,
+      `${h12}${period}`,
+      `${h12} ${period.toUpperCase()}`,
+      `${h12}${period.toUpperCase()}`,
+    ])];
+  }
+
+  async _getVisibleCalendarPostCandidates(scheduledTime = '') {
+    const timeNeedles = this._scheduledTimeNeedles(scheduledTime);
+    return await this.page.evaluate((timeNeedles) => {
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textHasAny = (text, needles) => {
+        const compactText = norm(text).toLowerCase();
+        const spacelessText = compactText.replace(/\s+/g, '');
+        return (needles || []).some(needle => {
+          const compactNeedle = norm(needle).toLowerCase();
+          return compactNeedle && (compactText.includes(compactNeedle) || spacelessText.includes(compactNeedle.replace(/\s+/g, '')));
+        });
+      };
+      const hasMedia = el => !!el.querySelector?.('img, video, [aria-label*="photo" i], [aria-label*="image" i], [aria-label*="post" i]') ||
+        /url\(/i.test(window.getComputedStyle(el).backgroundImage || '');
+      const looksLikeCard = (el, text) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.x < 430 || rect.y < 90) return false;
+        if (rect.width < 35 || rect.height < 30 || rect.width > 420 || rect.height > 280) return false;
+        if (/Dashboard|Content Library|Planner|Monetization|All tools|Today|Day Month|Wednesday|Thursday|Friday/i.test(text) && rect.width > 260) return false;
+        return hasMedia(el) || textHasAny(text, timeNeedles);
+      };
+      const bestCardFor = el => {
+        let node = el;
+        let best = null;
+        for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+          if (!visible(node)) continue;
+          const text = norm(node.innerText || node.textContent || node.getAttribute('aria-label') || '');
+          if (!looksLikeCard(node, text)) continue;
+          const rect = node.getBoundingClientRect();
+          const score = (hasMedia(node) ? 40 : 0) +
+            (textHasAny(text, timeNeedles) ? 60 : 0) +
+            (node.matches?.('button, [role="button"], a') ? 15 : 0) -
+            Math.max(0, rect.width - 220) / 20;
+          if (!best || score > best.score) best = { el: node, rect, text, score };
+        }
+        return best;
+      };
+
+      const seeds = [
+        ...document.querySelectorAll('img, video, [role="button"], button, a, div'),
+      ].filter(visible);
+      const candidates = [];
+      const seen = new Set();
+      for (const seed of seeds) {
+        const card = bestCardFor(seed);
+        if (!card) continue;
+        const key = `${Math.round(card.rect.x)}:${Math.round(card.rect.y)}:${Math.round(card.rect.width)}:${Math.round(card.rect.height)}:${card.text.slice(0, 80)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          x: Math.round(card.rect.x + card.rect.width / 2),
+          y: Math.round(card.rect.y + card.rect.height / 2),
+          text: card.text,
+          key,
+          score: card.score,
+          timeMatch: textHasAny(card.text, timeNeedles),
+        });
+      }
+      return candidates
+        .sort((a, b) => (b.score - a.score) || (a.y - b.y))
+        .slice(0, 8);
+    }, timeNeedles).catch(() => []);
+  }
+
+  async _inspectCalendarPostCandidate(candidate, { expectedCaption, scheduledDate, scheduledTime, headerText, phase }) {
+    this.log(`[FB-SOCIAL] ${phase}: clicking calendar candidate at ${candidate.x},${candidate.y} (${String(candidate.text || '').slice(0, 80)})`);
+    let dialogOpened = false;
+    try {
+      await this.page.mouse.click(candidate.x, candidate.y);
+      dialogOpened = await this._waitForCalendarPostDialog();
+      if (!dialogOpened) {
+        this.log(`[FB-SOCIAL] ${phase}: candidate did not open an Edit post dialog`);
+        return false;
+      }
+
+      const dialogText = await this._readCalendarPostDialogText();
+      const match = this._calendarDialogMatchesExpectedPost({
+        dialogText,
+        candidate,
+        expectedCaption,
+        scheduledDate,
+        scheduledTime,
+        headerText,
+      });
+      if (match.matched) {
+        this.log(`[FB-SOCIAL] ${phase}: Calendar post confirmed (${match.proof})`);
+        return true;
+      }
+      this.log(`[FB-SOCIAL] ${phase}: Calendar candidate rejected (${match.proof})`);
+      return false;
+    } finally {
+      if (dialogOpened) await this._closeCalendarPostDialog();
+    }
+  }
+
+  async _waitForCalendarPostDialog() {
+    return await this.page.waitForFunction(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 100 && rect.height > 100 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      return [...document.querySelectorAll('[role="dialog"]')]
+        .filter(visible)
+        .some(dialog => /Edit post|Unsaved changes|What's on your mind|Add to your post/i.test(dialog.innerText || dialog.textContent || ''));
+    }, { timeout: 8000 }).then(() => true).catch(() => false);
+  }
+
+  async _readCalendarPostDialogText() {
+    return await this.page.evaluate(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 100 && rect.height > 100 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+        .filter(visible)
+        .map(dialog => ({
+          text: (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim(),
+          rect: dialog.getBoundingClientRect(),
+        }))
+        .sort((a, b) => b.text.length - a.text.length);
+      return dialogs[0]?.text || '';
+    }).catch(() => '');
+  }
+
+  _calendarDialogMatchesExpectedPost({ dialogText = '', candidate = {}, expectedCaption = '', scheduledDate = '', scheduledTime = '', headerText = '' } = {}) {
+    const captionNeedles = this._captionNeedles(expectedCaption);
+    const captionMatch = this._textHasAnyNeedle(dialogText, captionNeedles);
+    const timeNeedles = this._scheduledTimeNeedles(scheduledTime);
+    const timeText = `${candidate.text || ''} ${dialogText || ''}`;
+    const timeMatch = !scheduledTime || this._textHasAnyNeedle(timeText, timeNeedles);
+    const headerKnown = !!String(headerText || '').trim();
+    const dateMatch = !scheduledDate || !headerKnown || this._calendarHeaderMatchesDate(headerText, scheduledDate);
+    const proof = [
+      captionMatch ? 'caption' : 'missing-caption',
+      timeMatch ? 'time' : 'missing-time',
+      dateMatch ? (headerKnown ? 'date' : 'date-unverified-day-view') : 'wrong-date',
+    ].join('+');
+    return {
+      matched: captionMatch && timeMatch && dateMatch,
+      proof,
+      captionMatch,
+      timeMatch,
+      dateMatch,
+    };
+  }
+
+  async _closeCalendarPostDialog() {
+    const dialog = this.page.locator('[role="dialog"]').last();
+    const closeCandidates = [
+      () => dialog.locator('[aria-label="Close"], [aria-label="Dismiss"]').last(),
+      () => dialog.getByRole('button', { name: /Close|Dismiss/i }).last(),
+      () => this.page.locator('[aria-label="Close"], [aria-label="Dismiss"]').last(),
+    ];
+    let closed = false;
+    for (const getLocator of closeCandidates) {
+      try {
+        const locator = getLocator();
+        if (await locator.count() > 0) {
+          await locator.click({ timeout: 3000 });
+          closed = true;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (!closed) {
+      await this.page.keyboard.press('Escape').catch(() => {});
+    }
+    await this.page.waitForTimeout(800);
+
+    const discarded = await this._clickVisibleControlByText(/^Discard$/i, { preferRole: 'button' }).catch(() => false);
+    if (discarded) {
+      this.log('[FB-SOCIAL] Calendar dialog close: discarded unsaved Edit post prompt');
+      await this.page.waitForTimeout(1000);
+    }
   }
 
   async _hasVisibleComposerScheduleButton() {
