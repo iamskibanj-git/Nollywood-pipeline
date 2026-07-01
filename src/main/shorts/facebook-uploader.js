@@ -48,7 +48,10 @@ const POST_SCHEDULE_SETTLE_TIMEOUT = 60000;
 const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
 const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
 const POST_SCHEDULE_REFRESH_EVERY = 15000;
+const CALENDAR_CONFIRM_TIMEOUT = 90000;
+const CALENDAR_CONFIRM_SCROLLS = 12;
 const FACEBOOK_MAX_SCHEDULE_DAYS_AHEAD = 29;
+const FACEBOOK_CALENDAR_DAY_URL = 'https://www.facebook.com/professional_dashboard/content_calendar/';
 
 // ── Dynamic readiness — adaptive wait based on FB DOM hydration ──
 // Adapted from Kling automation's DYNAMIC READINESS WAIT pattern.
@@ -312,6 +315,23 @@ class FacebookUploader {
         this.log('[FB-UPLOAD] Matching Reel already exists in Scheduled tab — treating as scheduled');
         return { success: true, recovered: true };
       }
+      const preExistingCalendarMatch = await this._confirmReelInCalendar({
+        expectedDescription: description,
+        scheduledDate,
+        scheduledTime,
+        phase: 'pre-submit calendar recovery',
+      }).catch(error => {
+        this.log(`[FB-UPLOAD] Pre-submit calendar recovery warning: ${error.message || error}`);
+        return false;
+      });
+      if (preExistingCalendarMatch) {
+        this.log('[FB-UPLOAD] Matching Reel already exists in Calendar - treating as scheduled');
+        return { success: true, recovered: true };
+      }
+
+      this.log('[FB-UPLOAD] No existing Calendar match found for Reel; returning to Scheduled tab to create upload');
+      await this._reloadScheduledLibrary();
+
       const scheduledRowBaseline = (await this._getScheduledPostRows()).length;
       this.log(`[FB-UPLOAD] Scheduled row baseline before upload: ${scheduledRowBaseline}`);
 
@@ -762,6 +782,30 @@ class FacebookUploader {
     return true;
   }
 
+  async _dismissLeavePageGuard() {
+    try {
+      const dialog = this.page.locator('[role="dialog"]').filter({ hasText: /Leave Page\?/i }).last();
+      if (await dialog.count() === 0) return false;
+
+      const keepEditing = dialog.getByText('Keep editing', { exact: true }).first();
+      if (await keepEditing.count() > 0) {
+        await keepEditing.click({ timeout: 5000 });
+      } else {
+        const close = dialog.locator('[aria-label="Close"]').first();
+        if (await close.count() > 0) {
+          await close.click({ timeout: 3000 });
+        } else {
+          await this.page.keyboard.press('Escape');
+        }
+      }
+      await this.page.waitForTimeout(1000);
+      this.log('[FB-UPLOAD] Dismissed Leave Page guard, kept editing');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   async _clickComposerScheduleButton() {
     const clicked = await this._clickVisibleControlByText(/^Schedule$/i, { preferRole: 'button', bottomOnly: true });
     if (clicked) return;
@@ -925,6 +969,356 @@ class FacebookUploader {
     }
 
     return null;
+  }
+
+  async _confirmReelInCalendar({ expectedDescription = '', scheduledDate = '', scheduledTime = '', phase = 'calendar confirmation' } = {}) {
+    if (!expectedDescription || !scheduledDate) return false;
+
+    await this._openCalendarDay(scheduledDate, phase);
+    const headerText = await this._readCalendarDayHeader();
+    if (headerText) {
+      const headerOk = this._calendarHeaderMatchesDate(headerText, scheduledDate);
+      this.log(`[FB-UPLOAD] ${phase}: calendar header "${headerText}"${headerOk ? '' : ` does not visibly match ${scheduledDate}`}`);
+    }
+
+    await this._scrollCalendarToScheduledTime(scheduledTime);
+
+    const start = Date.now();
+    const inspected = new Set();
+    for (let pass = 0; pass < CALENDAR_CONFIRM_SCROLLS && Date.now() - start < CALENDAR_CONFIRM_TIMEOUT; pass++) {
+      const candidates = await this._getVisibleCalendarReelCandidates(scheduledTime);
+      if (candidates.length > 0) {
+        this.log(`[FB-UPLOAD] ${phase}: inspecting ${candidates.length} visible calendar candidate(s), pass ${pass + 1}`);
+      }
+
+      for (const candidate of candidates) {
+        const key = candidate.key || `${candidate.x},${candidate.y},${candidate.text}`;
+        if (inspected.has(key)) continue;
+        inspected.add(key);
+
+        if (await this._inspectCalendarReelCandidate(candidate, {
+          expectedDescription,
+          scheduledDate,
+          scheduledTime,
+          headerText,
+          phase,
+        })) {
+          return true;
+        }
+      }
+
+      await this.page.mouse.wheel(0, pass < 2 ? 420 : 760).catch(() => {});
+      await this.page.waitForTimeout(1000);
+    }
+
+    this.log(`[FB-UPLOAD] ${phase}: no matching calendar Reel found after inspecting ${inspected.size} candidate(s)`);
+    return false;
+  }
+
+  async _openCalendarDay(scheduledDate, phase = 'calendar confirmation') {
+    const url = this._buildCalendarDayUrl(scheduledDate);
+    this.log(`[FB-UPLOAD] ${phase}: opening Calendar day view ${url}`);
+    await this.page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    await this._waitForPageReady().catch(error => {
+      this.log(`[FB-UPLOAD] ${phase}: calendar page readiness warning (${error.message || error})`);
+    });
+    await this._dismissPopups();
+    await this._dismissLeavePageGuard();
+    await this.page.waitForTimeout(2500);
+  }
+
+  _buildCalendarDayUrl(scheduledDate) {
+    const offset = this._calendarDayOffsetFromToday(scheduledDate);
+    return `${FACEBOOK_CALENDAR_DAY_URL}?time_offset=${offset}&view=DAY`;
+  }
+
+  _calendarDayOffsetFromToday(scheduledDate) {
+    const target = this._parseLocalDateOnly(scheduledDate);
+    if (!target) return 0;
+    const now = this.nowProvider();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((target.getTime() - today.getTime()) / 86400000);
+  }
+
+  _parseLocalDateOnly(value) {
+    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return null;
+    const [year, month, day] = String(value).split('-').map(n => parseInt(n, 10));
+    if (!year || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return new Date(year, month - 1, day);
+  }
+
+  async _readCalendarDayHeader() {
+    return await this.page.evaluate(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const candidates = [...document.querySelectorAll('h1, h2, [role="heading"], span, div')]
+        .filter(visible)
+        .map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(text => /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(text))
+        .sort((a, b) => a.length - b.length);
+      return candidates[0] || '';
+    }).catch(() => '');
+  }
+
+  _calendarHeaderMatchesDate(headerText, scheduledDate) {
+    if (!scheduledDate) return true;
+    const needles = this._scheduledDateNeedles(scheduledDate);
+    return this._textHasAnyNeedle(headerText || '', needles);
+  }
+
+  async _scrollCalendarToScheduledTime(scheduledTime) {
+    const labels = this._calendarTimeLabels(scheduledTime);
+    const hour = this._parseScheduledHour(scheduledTime);
+    const scrolledToLabel = await this.page.evaluate(({ labels, hour }) => {
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const labelSet = new Set(labels.map(norm));
+      const nodes = [...document.querySelectorAll('span, div')]
+        .filter(el => {
+          const text = norm(el.innerText || el.textContent || '');
+          if (!labelSet.has(text)) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width < 120 && rect.height < 80;
+        });
+      if (nodes[0]) {
+        nodes[0].scrollIntoView({ block: 'center', inline: 'nearest' });
+        return nodes[0].innerText || nodes[0].textContent || '';
+      }
+
+      const scrollables = [document.scrollingElement, ...document.querySelectorAll('*')]
+        .filter(Boolean)
+        .filter(el => {
+          const style = window.getComputedStyle(el);
+          return /(auto|scroll)/i.test(style.overflowY || '') && el.scrollHeight > el.clientHeight + 50;
+        });
+      const approx = Math.max(0, (Number.isFinite(hour) ? hour : 12) * 155);
+      for (const el of scrollables.slice(0, 8)) {
+        el.scrollTop = approx;
+      }
+      if (document.scrollingElement) document.scrollingElement.scrollTop = approx;
+      return '';
+    }, { labels, hour }).catch(() => '');
+
+    if (scrolledToLabel) {
+      this.log(`[FB-UPLOAD] Calendar scrolled to time label "${String(scrolledToLabel).trim()}"`);
+    }
+    await this.page.waitForTimeout(1200);
+  }
+
+  _parseScheduledHour(timeStr) {
+    const match = String(timeStr || '').match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return NaN;
+    const hour = parseInt(match[1], 10);
+    return hour >= 0 && hour <= 23 ? hour : NaN;
+  }
+
+  _calendarTimeLabels(timeStr) {
+    const timeNeedles = this._scheduledTimeNeedles(timeStr);
+    const hour = this._parseScheduledHour(timeStr);
+    if (!Number.isFinite(hour)) return timeNeedles;
+    const period = hour >= 12 ? 'pm' : 'am';
+    const h12 = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+    return [...new Set([
+      ...timeNeedles,
+      `${h12} ${period}`,
+      `${h12}${period}`,
+      `${h12} ${period.toUpperCase()}`,
+      `${h12}${period.toUpperCase()}`,
+    ])];
+  }
+
+  async _getVisibleCalendarReelCandidates(scheduledTime = '') {
+    const timeNeedles = this._scheduledTimeNeedles(scheduledTime);
+    return await this.page.evaluate((timeNeedles) => {
+      const norm = text => (text || '').replace(/\s+/g, ' ').trim();
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textHasAny = (text, needles) => {
+        const compactText = norm(text).toLowerCase();
+        const spacelessText = compactText.replace(/\s+/g, '');
+        return (needles || []).some(needle => {
+          const compactNeedle = norm(needle).toLowerCase();
+          return compactNeedle && (compactText.includes(compactNeedle) || spacelessText.includes(compactNeedle.replace(/\s+/g, '')));
+        });
+      };
+      const hasMedia = el => !!el.querySelector?.('img, video, [aria-label*="video" i], [aria-label*="reel" i], [aria-label*="photo" i], [aria-label*="image" i], [aria-label*="post" i]') ||
+        /url\(/i.test(window.getComputedStyle(el).backgroundImage || '');
+      const looksLikeCard = (el, text) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.x < 430 || rect.y < 90) return false;
+        if (rect.width < 35 || rect.height < 30 || rect.width > 420 || rect.height > 280) return false;
+        if (/Dashboard|Content Library|Planner|Monetization|All tools|Today|Day Month|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday/i.test(text) && rect.width > 260) return false;
+        return hasMedia(el) || textHasAny(text, timeNeedles);
+      };
+      const bestCardFor = el => {
+        let node = el;
+        let best = null;
+        for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+          if (!visible(node)) continue;
+          const text = norm(node.innerText || node.textContent || node.getAttribute('aria-label') || '');
+          if (!looksLikeCard(node, text)) continue;
+          const rect = node.getBoundingClientRect();
+          const score = (hasMedia(node) ? 45 : 0) +
+            (textHasAny(text, timeNeedles) ? 60 : 0) +
+            (/(reel|video)/i.test(text) ? 10 : 0) +
+            (node.matches?.('button, [role="button"], a') ? 15 : 0) -
+            Math.max(0, rect.width - 220) / 20;
+          if (!best || score > best.score) best = { el: node, rect, text, score };
+        }
+        return best;
+      };
+
+      const seeds = [
+        ...document.querySelectorAll('img, video, [aria-label*="video" i], [aria-label*="reel" i], [role="button"], button, a, div'),
+      ].filter(visible);
+      const candidates = [];
+      const seen = new Set();
+      for (const seed of seeds) {
+        const card = bestCardFor(seed);
+        if (!card) continue;
+        const key = `${Math.round(card.rect.x)}:${Math.round(card.rect.y)}:${Math.round(card.rect.width)}:${Math.round(card.rect.height)}:${card.text.slice(0, 80)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          x: Math.round(card.rect.x + card.rect.width / 2),
+          y: Math.round(card.rect.y + card.rect.height / 2),
+          text: card.text,
+          key,
+          score: card.score,
+          timeMatch: textHasAny(card.text, timeNeedles),
+        });
+      }
+      return candidates
+        .sort((a, b) => (b.score - a.score) || (a.y - b.y))
+        .slice(0, 8);
+    }, timeNeedles).catch(() => []);
+  }
+
+  async _inspectCalendarReelCandidate(candidate, { expectedDescription, scheduledDate, scheduledTime, headerText, phase }) {
+    this.log(`[FB-UPLOAD] ${phase}: clicking calendar candidate at ${candidate.x},${candidate.y} (${String(candidate.text || '').slice(0, 80)})`);
+    let dialogOpened = false;
+    try {
+      await this.page.mouse.click(candidate.x, candidate.y);
+      dialogOpened = await this._waitForCalendarReelDialog();
+      if (!dialogOpened) {
+        this.log(`[FB-UPLOAD] ${phase}: candidate did not open an Edit Reel/Post dialog`);
+        return false;
+      }
+
+      const dialogText = await this._readCalendarReelDialogText();
+      const match = this._calendarDialogMatchesExpectedReel({
+        dialogText,
+        candidate,
+        expectedDescription,
+        scheduledDate,
+        scheduledTime,
+        headerText,
+      });
+      if (match.matched) {
+        this.log(`[FB-UPLOAD] ${phase}: Calendar Reel confirmed (${match.proof})`);
+        return true;
+      }
+      this.log(`[FB-UPLOAD] ${phase}: Calendar candidate rejected (${match.proof})`);
+      return false;
+    } finally {
+      if (dialogOpened) await this._closeCalendarReelDialog();
+    }
+  }
+
+  async _waitForCalendarReelDialog() {
+    return await this.page.waitForFunction(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 100 && rect.height > 100 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      return [...document.querySelectorAll('[role="dialog"]')]
+        .filter(visible)
+        .some(dialog => /Edit reel|Edit post|Reel details|Describe your reel|Unsaved changes|What's on your mind|Add to your post/i.test(dialog.innerText || dialog.textContent || ''));
+    }, { timeout: 8000 }).then(() => true).catch(() => false);
+  }
+
+  async _readCalendarReelDialogText() {
+    return await this.page.evaluate(() => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 100 && rect.height > 100 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+        .filter(visible)
+        .map(dialog => ({
+          text: (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim(),
+          rect: dialog.getBoundingClientRect(),
+        }))
+        .sort((a, b) => b.text.length - a.text.length);
+      return dialogs[0]?.text || '';
+    }).catch(() => '');
+  }
+
+  _calendarDialogMatchesExpectedReel({ dialogText = '', candidate = {}, expectedDescription = '', scheduledDate = '', scheduledTime = '', headerText = '' } = {}) {
+    const captionNeedles = this._captionNeedles(expectedDescription);
+    const captionMatch = this._textHasAnyNeedle(dialogText, captionNeedles);
+    const timeNeedles = this._scheduledTimeNeedles(scheduledTime);
+    const timeText = `${candidate.text || ''} ${dialogText || ''}`;
+    const timeMatch = !scheduledTime || this._textHasAnyNeedle(timeText, timeNeedles);
+    const headerKnown = !!String(headerText || '').trim();
+    const dateMatch = !scheduledDate || !headerKnown || this._calendarHeaderMatchesDate(headerText, scheduledDate);
+    const proof = [
+      captionMatch ? 'caption' : 'missing-caption',
+      timeMatch ? 'time' : 'missing-time',
+      dateMatch ? (headerKnown ? 'date' : 'date-unverified-day-view') : 'wrong-date',
+    ].join('+');
+    return {
+      matched: captionMatch && timeMatch && dateMatch,
+      proof,
+      captionMatch,
+      timeMatch,
+      dateMatch,
+    };
+  }
+
+  async _closeCalendarReelDialog() {
+    const dialog = this.page.locator('[role="dialog"]').last();
+    const closeCandidates = [
+      () => dialog.locator('[aria-label="Close"], [aria-label="Dismiss"]').last(),
+      () => dialog.getByRole('button', { name: /Close|Dismiss/i }).last(),
+      () => this.page.locator('[aria-label="Close"], [aria-label="Dismiss"]').last(),
+    ];
+    let closed = false;
+    for (const getLocator of closeCandidates) {
+      try {
+        const locator = getLocator();
+        if (await locator.count() > 0) {
+          await locator.click({ timeout: 3000 });
+          closed = true;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (!closed) {
+      await this.page.keyboard.press('Escape').catch(() => {});
+    }
+    await this.page.waitForTimeout(800);
+
+    const discarded = await this._clickVisibleControlByText(/^Discard$/i, { preferRole: 'button' }).catch(() => false);
+    if (discarded) {
+      this.log('[FB-UPLOAD] Calendar dialog close: discarded unsaved Edit Reel/Post prompt');
+      await this.page.waitForTimeout(1000);
+    }
   }
 
   async _getScheduledPostRows() {
@@ -1105,7 +1499,19 @@ class FacebookUploader {
     });
     if (refreshedMatched) return;
 
-    throw new Error('Schedule confirmation timed out; matching scheduled Reel row did not appear after settle and refresh checks.');
+    this.log('[FB-UPLOAD] Content Library confirmation missed; checking Calendar day view for Reel');
+    const calendarMatched = await this._confirmReelInCalendar({
+      expectedDescription,
+      scheduledDate,
+      scheduledTime,
+      phase: 'calendar fallback confirmation',
+    }).catch(error => {
+      this.log(`[FB-UPLOAD] Calendar fallback confirmation warning: ${error.message || error}`);
+      return false;
+    });
+    if (calendarMatched) return;
+
+    throw new Error('Schedule confirmation timed out; matching scheduled Reel row did not appear after settle, refresh, and Calendar checks.');
   }
 
   /**
