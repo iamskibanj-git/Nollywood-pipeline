@@ -32,7 +32,12 @@ const plan = readPlan(planPath);
 const slots = selectPlanSlots(plan, rawArgs);
 if (slots.length === 0) throw new Error('No ready/prepared slots matched the batch filters.');
 
+const mode = live ? 'live' : execute ? 'execute' : 'dry-run';
+const batchStarted = Date.now();
+const batchRunId = await startBatchRun({ runId, mode, planPath, argv: rawArgs, slots });
+
 console.log(`${execute ? live ? 'Live' : 'Execute' : 'Dry-run'} batch for run ${runId}`);
+console.log(`Batch run id: ${batchRunId}`);
 console.log(`Plan: ${path.relative(pipelineDir, planPath)}`);
 console.log(`Selected ${slots.length} ready/prepared slot(s).`);
 for (const slot of slots) {
@@ -41,19 +46,36 @@ for (const slot of slots) {
 if (!execute) {
   console.log('');
   console.log('No changes made. Add --execute to run generation/QA/dry scheduling, or --live to include final Facebook scheduling.');
+  await finishBatchRun(batchRunId, {
+    runId,
+    status: 'done',
+    results: [],
+    durationMs: Date.now() - batchStarted,
+  });
+  console.log(`Batch duration: ${formatDuration(Date.now() - batchStarted)}`);
   process.exit(0);
 }
 
-const batchStarted = Date.now();
 const results = [];
-for (const slot of slots) {
-  if (batchWallClockMs > 0 && Date.now() - batchStarted > batchWallClockMs) {
-    console.warn(`Batch wall-clock budget reached after ${results.length} slot(s).`);
-    break;
+try {
+  for (const slot of slots) {
+    if (batchWallClockMs > 0 && Date.now() - batchStarted > batchWallClockMs) {
+      console.warn(`Batch wall-clock budget reached after ${results.length} slot(s).`);
+      break;
+    }
+    const result = await processSlot({ runId, batchRunId, slot });
+    results.push(result);
+    if (result.status === 'failed' && result.stopBatch) break;
   }
-  const result = await processSlot({ runId, slot });
-  results.push(result);
-  if (result.status === 'failed' && result.stopBatch) break;
+} catch (error) {
+  await finishBatchRun(batchRunId, {
+    runId,
+    status: 'failed',
+    results,
+    durationMs: Date.now() - batchStarted,
+    error,
+  });
+  throw error;
 }
 
 console.log('');
@@ -61,11 +83,20 @@ console.log('Batch summary');
 for (const result of results) {
   console.log(`- #${result.post_id} ${result.status}${result.message ? `: ${result.message}` : ''}`);
 }
+const finalDurationMs = Date.now() - batchStarted;
+const finalStatus = batchFinalStatus(results);
+await finishBatchRun(batchRunId, {
+  runId,
+  status: finalStatus,
+  results,
+  durationMs: finalDurationMs,
+});
+console.log(`Batch duration: ${formatDuration(finalDurationMs)}`);
 if (results.some(result => result.status !== 'scheduled' && result.status !== 'prepared')) {
   process.exitCode = 1;
 }
 
-async function processSlot({ runId, slot }) {
+async function processSlot({ runId, batchRunId, slot }) {
   const postId = Number(slot.post_id);
   const postStarted = Date.now();
   let captionAttempts = 0;
@@ -78,7 +109,7 @@ async function processSlot({ runId, slot }) {
 
   while (true) {
     if (postWallClockMs > 0 && Date.now() - postStarted > postWallClockMs) {
-      await markBatchEvent(runId, postId, 'batch_post_wall_clock_exhausted', 'Post wall-clock budget exhausted', { slot });
+      await markBatchEvent(runId, postId, 'batch_post_wall_clock_exhausted', 'Post wall-clock budget exhausted', { batchRunId, slot });
       return { post_id: postId, status: 'failed', message: 'post wall-clock budget exhausted' };
     }
 
@@ -93,7 +124,7 @@ async function processSlot({ runId, slot }) {
 
     try {
       if (post.status === 'queued') {
-        runStage('approve', ['review.js', 'approve', '--id', String(postId), '--note', `weekly batch ${slot.scheduled_date} ${slot.scheduled_time}`]);
+        await runStage('approve', ['review.js', 'approve', '--id', String(postId), '--note', `weekly batch ${slot.scheduled_date} ${slot.scheduled_time}`], { runId, batchRunId, postId });
         continue;
       }
       if (post.status === 'review_needed') {
@@ -120,17 +151,17 @@ async function processSlot({ runId, slot }) {
       }
       if (post.status === 'approved') {
         imageAttempts += 1;
-        runStage('image', ['image.js', '--live', '--id', String(postId), '--login-wait-sec', String(higgsfieldLoginWaitSec)]);
+        await runStage('image', ['image.js', '--live', '--id', String(postId), '--login-wait-sec', String(higgsfieldLoginWaitSec)], { runId, batchRunId, postId });
         continue;
       }
       if (post.status === 'image_done') {
         captionAttempts += 1;
-        runStage('content', ['content.js', '--generate', '--id', String(postId)]);
+        await runStage('content', ['content.js', '--generate', '--id', String(postId)], { runId, batchRunId, postId });
         continue;
       }
       if (post.status === 'content_done') {
         qaLoops += 1;
-        const qaOk = runStage('qa', ['qa.js', '--run', '--id', String(postId)], { allowFailure: true });
+        const qaOk = await runStage('qa', ['qa.js', '--run', '--id', String(postId)], { allowFailure: true, runId, batchRunId, postId });
         if (qaOk) continue;
         const qa = await latestQa(postId);
         const repairResult = await repairAfterQaFailure({
@@ -148,7 +179,7 @@ async function processSlot({ runId, slot }) {
         continue;
       }
       if (post.status === 'qa_done') {
-        runStage('facebook-context', [
+        await runStage('facebook-context', [
           'facebook.js',
           '--dry-run',
           '--niche',
@@ -157,8 +188,8 @@ async function processSlot({ runId, slot }) {
           userDataDir,
           '--login-wait-sec',
           String(facebookLoginWaitSec),
-        ]);
-        runStage('facebook-prepare', [
+        ], { runId, batchRunId, postId });
+        await runStage('facebook-prepare', [
           'facebook.js',
           '--prepare',
           '--id',
@@ -167,12 +198,12 @@ async function processSlot({ runId, slot }) {
           slot.scheduled_date,
           '--time',
           slot.scheduled_time,
-        ]);
-        runStage('facebook-dry-run', ['facebook.js', '--schedule-dry-run', '--id', String(postId)]);
+        ], { runId, batchRunId, postId });
+        await runStage('facebook-dry-run', ['facebook.js', '--schedule-dry-run', '--id', String(postId)], { runId, batchRunId, postId });
         if (!live) {
           return { post_id: postId, status: 'prepared', message: `${slot.scheduled_date} ${slot.scheduled_time}` };
         }
-        runStage('facebook-live', [
+        await runStage('facebook-live', [
           'facebook.js',
           '--live',
           '--id',
@@ -181,7 +212,7 @@ async function processSlot({ runId, slot }) {
           userDataDir,
           '--login-wait-sec',
           String(facebookLoginWaitSec),
-        ]);
+        ], { runId, batchRunId, postId });
         const scheduled = await getPost(postId);
         if (scheduled?.status === 'scheduled') {
           return { post_id: postId, status: 'scheduled', message: `${scheduled.scheduled_date} ${scheduled.scheduled_time}` };
@@ -199,7 +230,7 @@ async function processSlot({ runId, slot }) {
         continue;
       }
       const message = error?.message || String(error);
-      await markBatchEvent(runId, postId, 'batch_stage_failed', message, { slot, status: fresh?.status || null });
+      await markBatchEvent(runId, postId, 'batch_stage_failed', message, { batchRunId, slot, status: fresh?.status || null });
       return { post_id: postId, status: 'failed', message, stopBatch: isExternalFailure(message) };
     }
   }
@@ -252,16 +283,34 @@ async function repairAfterQaFailure({
   return skipPostForNextCandidate(runId, postId, `non-repairable QA: ${qaSummary(qa)}`);
 }
 
-function runStage(label, args, { allowFailure = false } = {}) {
+async function runStage(label, args, { allowFailure = false, runId = null, batchRunId = null, postId = null } = {}) {
   console.log(`\n[batch:${label}] node ${args.join(' ')}`);
+  const started = Date.now();
   const result = spawnSync(process.execPath, args, {
     cwd: pipelineDir,
     stdio: 'inherit',
     env: process.env,
   });
-  if (result.status === 0) return true;
+  const durationMs = Date.now() - started;
+  const exitCode = result.status ?? 'unknown';
+  const ok = result.status === 0;
+  console.log(`[batch:${label}] ${ok ? 'completed' : 'failed'} in ${formatDuration(durationMs)}${ok ? '' : ` (exit ${exitCode})`}`);
+  if (runId && postId) {
+    try {
+      await markBatchEvent(
+        runId,
+        postId,
+        ok ? 'batch_stage_complete' : 'batch_stage_failed',
+        `${label} ${ok ? 'completed' : 'failed'} in ${formatDuration(durationMs)}`,
+        { batchRunId, label, args, duration_ms: durationMs, exit_code: exitCode, allowFailure }
+      );
+    } catch (error) {
+      console.warn(`[batch:${label}] Failed to record stage timing: ${error?.message || error}`);
+    }
+  }
+  if (ok) return true;
   if (allowFailure) return false;
-  throw new Error(`${label} failed with exit code ${result.status ?? 'unknown'}`);
+  throw new Error(`${label} failed with exit code ${exitCode}`);
 }
 
 function classifyQaRepair(qa, post) {
@@ -404,6 +453,89 @@ async function markBatchEvent(runId, postId, eventType, message, data = {}) {
   });
 }
 
+async function startBatchRun({ runId, mode, planPath, argv, slots }) {
+  const now = isoNow();
+  const filters = {
+    args: argv,
+    day: parseArgValue(argv, '--day') || parseArgValue(argv, '--date') || null,
+    day_index: parseArgValue(argv, '--day-index') || null,
+    niche: parseArgValue(argv, '--niche') || null,
+    post_id: parseArgValue(argv, '--id') || parseArgValue(argv, '--post-id') || null,
+    limit: parseArgValue(argv, '--limit') || null,
+    selected_slots: slots.map(slot => ({
+      post_id: slot.post_id,
+      niche_id: slot.niche_id,
+      page: slot.facebook_page_name,
+      date: slot.scheduled_date,
+      time: slot.scheduled_time,
+      topic: slot.topic,
+    })),
+  };
+  return withDb(db => {
+    db.run(
+      `INSERT INTO batch_runs
+       (run_id, mode, status, plan_path, filters_json, selected_count, started_at, updated_at)
+       VALUES (?, ?, 'running', ?, ?, ?, ?, ?)`,
+      [runId, mode, path.relative(pipelineDir, planPath), JSON.stringify(filters), slots.length, now, now]
+    );
+    const row = db.queryOne(`SELECT last_insert_rowid() AS id`);
+    const batchRunId = Number(row?.id || 0);
+    db.logEvent(runId, 'batch_run_start', {
+      stage: 'batch',
+      message: `${mode} batch #${batchRunId} started`,
+      data: { batchRunId, mode, selected_count: slots.length, filters },
+    });
+    return batchRunId;
+  });
+}
+
+async function finishBatchRun(batchRunId, { runId, status, results, durationMs, error = null }) {
+  const now = isoNow();
+  const counts = summarizeBatchResults(results);
+  const errorMessage = error ? error?.message || String(error) : null;
+  await withDb(db => {
+    db.run(
+      `UPDATE batch_runs
+       SET status = ?, prepared_count = ?, scheduled_count = ?, skipped_count = ?, failed_count = ?,
+           duration_ms = ?, results_json = ?, error_message = ?, completed_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        status,
+        counts.prepared,
+        counts.scheduled,
+        counts.skipped,
+        counts.failed,
+        Math.max(0, Math.round(durationMs || 0)),
+        JSON.stringify(results || []),
+        errorMessage,
+        now,
+        now,
+        batchRunId,
+      ]
+    );
+    db.logEvent(runId, status === 'done' ? 'batch_run_complete' : status === 'failed' ? 'batch_run_failed' : 'batch_run_needs_attention', {
+      stage: 'batch',
+      message: `Batch #${batchRunId} ${status} in ${formatDuration(durationMs)}`,
+      data: { batchRunId, status, duration_ms: Math.round(durationMs || 0), ...counts, error: errorMessage },
+    });
+  });
+}
+
+function summarizeBatchResults(results = []) {
+  return {
+    prepared: results.filter(result => result.status === 'prepared').length,
+    scheduled: results.filter(result => result.status === 'scheduled').length,
+    skipped: results.filter(result => result.status === 'skipped').length,
+    failed: results.filter(result => result.status === 'failed').length,
+  };
+}
+
+function batchFinalStatus(results = []) {
+  if (results.some(result => result.status === 'failed' && result.stopBatch)) return 'failed';
+  if (results.some(result => !['scheduled', 'prepared'].includes(result.status))) return 'needs_attention';
+  return 'done';
+}
+
 function qaSummary(qa) {
   if (!qa) return 'No QA row found.';
   const reasons = parseJson(qa.reasons_json, []);
@@ -498,6 +630,16 @@ function readInteger(value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(0, Math.round(parsed));
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }
 
 function hasFlag(argv, flag) {

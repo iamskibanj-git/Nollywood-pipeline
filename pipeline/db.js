@@ -3,7 +3,7 @@ import path from 'node:path';
 import initSqlJs from 'sql.js';
 import { pipelineConfig } from './config.js';
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 export async function openPipelineDb({ config = pipelineConfig, logger = console } = {}) {
   const dbPath = path.resolve(config.files.database || 'howto-content.sqlite');
@@ -288,6 +288,28 @@ class PipelineDb {
         UNIQUE(run_id, post_id)
       )
     `);
+    this.run(`
+      CREATE TABLE IF NOT EXISTS batch_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        plan_path TEXT,
+        filters_json TEXT DEFAULT '{}',
+        selected_count INTEGER DEFAULT 0,
+        prepared_count INTEGER DEFAULT 0,
+        scheduled_count INTEGER DEFAULT 0,
+        skipped_count INTEGER DEFAULT 0,
+        failed_count INTEGER DEFAULT 0,
+        duration_ms INTEGER,
+        results_json TEXT DEFAULT '[]',
+        error_message TEXT,
+        started_at TEXT DEFAULT (datetime('now')),
+        completed_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
 
     this.run(`CREATE INDEX IF NOT EXISTS idx_source_pulls_status ON source_pulls(run_id, status)`);
     this.run(`CREATE INDEX IF NOT EXISTS idx_raw_topics_niche ON raw_topics(run_id, niche_id)`);
@@ -303,6 +325,8 @@ class PipelineDb {
     this.run(`CREATE INDEX IF NOT EXISTS idx_fb_context_checks_page ON facebook_page_context_checks(target_page_name, created_at)`);
     this.run(`CREATE INDEX IF NOT EXISTS idx_fb_schedule_jobs_status ON facebook_schedule_jobs(run_id, status)`);
     this.run(`CREATE INDEX IF NOT EXISTS idx_fb_schedule_jobs_post ON facebook_schedule_jobs(post_id)`);
+    this.run(`CREATE INDEX IF NOT EXISTS idx_batch_runs_run ON batch_runs(run_id, started_at)`);
+    this.run(`CREATE INDEX IF NOT EXISTS idx_batch_runs_status ON batch_runs(status, started_at)`);
     this.run(`CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, created_at)`);
     this.ensureColumn('posts', 'review_note', 'TEXT');
     this.ensureColumn('posts', 'reviewed_at', 'TEXT');
@@ -321,6 +345,7 @@ class PipelineDb {
     this.ensureColumn('image_jobs', 'source_gen_id', 'TEXT');
     this.ensureColumn('image_jobs', 'cdn_url', 'TEXT');
     this.ensureColumn('image_jobs', 'generation_duration_ms', 'INTEGER');
+    this.ensureColumn('batch_runs', 'results_json', 'TEXT DEFAULT \'[]\'');
     this.run(`INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)`, [String(SCHEMA_VERSION)]);
   }
 
@@ -400,6 +425,18 @@ class PipelineDb {
            updated_at = ?
        WHERE status IN ('pending', 'running') AND dry_run = 0`,
       [now, now]
+    );
+    this.run(
+      `UPDATE batch_runs
+       SET status = 'failed',
+           error_message = COALESCE(error_message, 'Interrupted before batch completion'),
+           completed_at = COALESCE(completed_at, ?),
+           duration_ms = COALESCE(duration_ms, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)),
+           updated_at = ?
+       WHERE status = 'running'
+         AND started_at IS NOT NULL
+         AND (strftime('%s', ?) - strftime('%s', started_at)) > 43200`,
+      [now, now, now, now]
     );
     this.run(
       `UPDATE runs
