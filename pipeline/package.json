@@ -18,7 +18,7 @@
     "batch": "node batch.js",
     "facebook": "node facebook.js",
     "timings": "node timings.js",
-    "check": "node --check config.js && node --check credentials.js && node --check db.js && node --check logger.js && node --check scraper.js && node --check scorer.js && node --check queue.js && node --check run.js && node --check review.js && node --check image.js && node --check content-quality.js && node --check dedup.js && node --check content.js && node --check qa.js && node --check weekly.js && node --check batch.js && node --check timings.js && node --check facebook.js && node --check adapters/higgsfield-image-generator.js"
+    "check": "node --check config.js && node --check credentials.js && node --check db.js && node --check logger.js && node --check scraper.js && node --check scorer.js && node --check queue.js && node --check run.js && node --check review.js && node --check image.js && node --check content-quality.js && node --check dedup.js && node --check visual-dedup.js && node --check content.js && node --check qa.js && node --check weekly.js && node --check batch.js && node --check timings.js && node --check facebook.js && node --check adapters/higgsfield-image-generator.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -77,6 +77,13 @@ export const pipelineConfig = {
     higgsfieldLoginWaitMs: readPositiveInteger(process.env.CONTENT_RESEARCH_HIGGSFIELD_LOGIN_WAIT_MS, 0),
     higgsfieldProjectDir: '_higgsfield/project',
   },
+  visualDedup: {
+    enabled: true,
+    sameNicheThreshold: 0.64,
+    globalThreshold: 0.74,
+    recentLimit: 80,
+    statuses: ['scheduled', 'scheduling', 'qa_done', 'content_done', 'image_done', 'image_generating'],
+  },
   content: {
     model: 'claude-sonnet-4-6',
     maxTokens: 1800,

@@ -78,6 +78,8 @@ npm.cmd run dedup -- --topic "How to stop a toilet from running" --niche fix-it
 npm.cmd run dedup -- --id 301
 ```
 
+Image generation also runs a separate visual prompt dedup guard. It fingerprints the image prompt by composition, setting, actor framing, prop family, and visual tokens, then compares it with recent scheduled/generated prompts. If a same-niche or strong global match is found, the image prompt is varied before Higgsfield generation and the decision is recorded on `posts.visual_*`, `image_jobs.visual_*`, and a `visual_dedup_prompt_varied` event. This is prompt-level diversity only; it catches repeated visual recipes such as repeated overhead hands/table shots before generation, while QA still checks the actual generated image.
+
 Plan the next weekly calendar without mutating state:
 
 ```powershell

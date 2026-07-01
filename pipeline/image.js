@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { pipelineConfig } from './config.js';
 import { openPipelineDb } from './db.js';
 import { generateHiggsfieldImage } from './adapters/higgsfield-image-generator.js';
+import { prepareVisualPromptForGeneration, summarizeVisualPlan } from './visual-dedup.js';
 
 const pipelineDir = path.dirname(fileURLToPath(import.meta.url));
 process.chdir(pipelineDir);
@@ -69,13 +70,14 @@ async function runLiveImageGeneration(db, runId, posts, argv) {
   const manifestPath = path.resolve(parseArgValue(argv, '--manifest') || pipelineConfig.files.imageManifest);
   const outputPath = buildOutputPath(runId, post);
   await fs.mkdir(path.dirname(outputPath.absolute), { recursive: true });
-  const promptPayload = buildPromptPayload(post, { provider, model });
+  db.backup(`pre-image-live-${runId}`);
+  const promptPayload = buildPromptPayload(db, post, { provider, model, runId, persist: true });
   const projectDir = path.resolve(pipelineConfig.image.higgsfieldProjectDir || '_higgsfield/project');
   const loginWaitMs = parseLoginWaitMs(argv) ?? pipelineConfig.image.higgsfieldLoginWaitMs ?? 0;
   const now = isoNow();
   let genClicked = false;
 
-  db.backup(`pre-image-live-${runId}`);
+  logVisualDedupeEvent(db, runId, post, promptPayload);
   upsertImageJob(db, {
     runId,
     post,
@@ -206,7 +208,8 @@ async function buildDryRunManifest(db, runId, posts, argv) {
   for (const post of posts) {
     const outputPath = buildOutputPath(runId, post);
     await fs.mkdir(path.dirname(outputPath.absolute), { recursive: true });
-    const promptPayload = buildPromptPayload(post, { provider, model });
+    const promptPayload = buildPromptPayload(db, post, { provider, model, runId, persist: false });
+    logVisualDedupeEvent(db, runId, post, promptPayload);
     upsertImageJob(db, {
       runId,
       post,
@@ -274,6 +277,8 @@ function upsertImageJob(db, job) {
     job.dryRun ? 1 : 0,
     job.prompt,
     JSON.stringify(job.promptPayload),
+    JSON.stringify(job.promptPayload.visual_fingerprint || null),
+    JSON.stringify(job.promptPayload.visual_dedupe || null),
     job.manifestPath,
     job.outputPath,
     null,
@@ -285,7 +290,8 @@ function upsertImageJob(db, job) {
     db.run(
       `UPDATE image_jobs
        SET niche_id = ?, model = ?, status = ?, dry_run = ?, prompt = ?, prompt_payload_json = ?,
-           manifest_path = ?, output_path = ?, error_message = ?, started_at = ?, completed_at = ?, updated_at = ?
+           visual_fingerprint = ?, visual_dedupe_json = ?, manifest_path = ?, output_path = ?,
+           error_message = ?, started_at = ?, completed_at = ?, updated_at = ?
        WHERE id = ?`,
       [
         job.post.niche_id,
@@ -294,6 +300,8 @@ function upsertImageJob(db, job) {
         job.dryRun ? 1 : 0,
         job.prompt,
         JSON.stringify(job.promptPayload),
+        JSON.stringify(job.promptPayload.visual_fingerprint || null),
+        JSON.stringify(job.promptPayload.visual_dedupe || null),
         job.manifestPath,
         job.outputPath,
         null,
@@ -307,11 +315,25 @@ function upsertImageJob(db, job) {
     db.run(
       `INSERT INTO image_jobs
        (run_id, post_id, niche_id, provider, model, mode, status, dry_run, prompt, prompt_payload_json,
-        manifest_path, output_path, error_message, started_at, completed_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        visual_fingerprint, visual_dedupe_json, manifest_path, output_path, error_message, started_at, completed_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       values
     );
   }
+}
+
+function logVisualDedupeEvent(db, runId, post, promptPayload) {
+  if (!promptPayload?.visual_dedupe?.changed) return;
+  db.logEvent(runId, 'visual_dedup_prompt_varied', {
+    stage: 'image',
+    nicheId: post.niche_id,
+    message: promptPayload.visual_dedupe.reason,
+    data: {
+      postId: post.id,
+      rank: post.rank,
+      visual_dedupe: promptPayload.visual_dedupe,
+    },
+  });
 }
 
 async function writeLiveManifest({ runId, post, provider, model, outputPath, promptPayload, genMeta, manifestPath }) {
@@ -378,8 +400,13 @@ function selectPosts(db, runId, argv) {
   return db.queryAll(sql, params);
 }
 
-function buildPromptPayload(post, { provider, model }) {
-  const visualPrompt = cleanText(post.image_prompt);
+function buildPromptPayload(db, post, { provider, model, runId = post?.run_id || null, persist = false }) {
+  const visualPlan = prepareVisualPromptForGeneration(db, post, {
+    runId,
+    persist,
+    logger: console,
+  });
+  const visualPrompt = cleanText(visualPlan.prompt);
   const style = cleanText(pipelineConfig.image.promptStyle);
   const visualGuard = 'No readable words, labels, logos, app icons, brand marks, watermarks, UI text, captions, posters, or printed text anywhere in the image; no fake social media post frames, profile icons, like/comment/share UI, smartphone-screen mockups, tablet frames, or device bezels framing the subject; use generic blank props and abstract interface shapes only; avoid color palettes or geometry that resemble real brand logos';
   const prompt = `${visualPrompt}. ${style}. ${visualGuard}.`;
@@ -389,6 +416,9 @@ function buildPromptPayload(post, { provider, model }) {
     mode: 'single-image',
     aspect_ratio: pipelineConfig.image.aspectRatio,
     prompt,
+    original_image_prompt: visualPlan.original_prompt,
+    visual_fingerprint: visualPlan.fingerprint,
+    visual_dedupe: summarizeVisualPlan(visualPlan),
     negative_prompt: [
       'text overlay',
       'readable words',

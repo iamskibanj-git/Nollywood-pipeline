@@ -365,7 +365,7 @@ async function mutateImagePromptForRepair(runId, post, qa, { repeatedReasonCount
 
 function imageBasePrompt(post) {
   const prompt = cleanText(post.image_prompt);
-  const repairIndex = prompt.search(/\b(Repair the image|Switch visual strategy|Hard requirements|QA review_needed|Regenerate|Recommended fix)\b/i);
+  const repairIndex = prompt.search(/\b(Visual variation|Repair the image|Switch visual strategy|Hard requirements|QA review_needed|Regenerate|Recommended fix)\b/i);
   return repairIndex > 80 ? prompt.slice(0, repairIndex).trim() : prompt;
 }
 

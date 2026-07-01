@@ -3,7 +3,7 @@ import path from 'node:path';
 import initSqlJs from 'sql.js';
 import { pipelineConfig } from './config.js';
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const RECOVERY_STALE_SECONDS = 2 * 60 * 60;
 
 export async function openPipelineDb({ config = pipelineConfig, logger = console } = {}) {
@@ -138,6 +138,9 @@ class PipelineDb {
         duplicate_of_post_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
         duplicate_reason TEXT,
         dedupe_checked_at TEXT,
+        visual_fingerprint TEXT,
+        visual_dedupe_reason TEXT,
+        visual_dedupe_checked_at TEXT,
         image_path TEXT,
         caption TEXT,
         scheduled_date TEXT,
@@ -181,6 +184,8 @@ class PipelineDb {
         dry_run INTEGER NOT NULL DEFAULT 0,
         prompt TEXT NOT NULL,
         prompt_payload_json TEXT DEFAULT '{}',
+        visual_fingerprint TEXT,
+        visual_dedupe_json TEXT,
         manifest_path TEXT,
         output_path TEXT,
         gen_clicked_at TEXT,
@@ -339,6 +344,9 @@ class PipelineDb {
     this.ensureColumn('posts', 'duplicate_of_post_id', 'INTEGER');
     this.ensureColumn('posts', 'duplicate_reason', 'TEXT');
     this.ensureColumn('posts', 'dedupe_checked_at', 'TEXT');
+    this.ensureColumn('posts', 'visual_fingerprint', 'TEXT');
+    this.ensureColumn('posts', 'visual_dedupe_reason', 'TEXT');
+    this.ensureColumn('posts', 'visual_dedupe_checked_at', 'TEXT');
     this.run(`CREATE INDEX IF NOT EXISTS idx_posts_dedup ON posts(niche_id, content_fingerprint, status)`);
     this.run(`CREATE INDEX IF NOT EXISTS idx_posts_duplicate_of ON posts(duplicate_of_post_id)`);
     this.ensureColumn('image_jobs', 'gen_clicked_at', 'TEXT');
@@ -346,6 +354,8 @@ class PipelineDb {
     this.ensureColumn('image_jobs', 'source_gen_id', 'TEXT');
     this.ensureColumn('image_jobs', 'cdn_url', 'TEXT');
     this.ensureColumn('image_jobs', 'generation_duration_ms', 'INTEGER');
+    this.ensureColumn('image_jobs', 'visual_fingerprint', 'TEXT');
+    this.ensureColumn('image_jobs', 'visual_dedupe_json', 'TEXT');
     this.ensureColumn('batch_runs', 'results_json', 'TEXT DEFAULT \'[]\'');
     this.run(`INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)`, [String(SCHEMA_VERSION)]);
   }
@@ -874,6 +884,9 @@ class PipelineDb {
       duplicate_of_post_id: row.duplicate_of_post_id || undefined,
       duplicate_reason: row.duplicate_reason || undefined,
       dedupe_checked_at: row.dedupe_checked_at || undefined,
+      visual_fingerprint: row.visual_fingerprint ? parseJson(row.visual_fingerprint, undefined) : undefined,
+      visual_dedupe_reason: row.visual_dedupe_reason || undefined,
+      visual_dedupe_checked_at: row.visual_dedupe_checked_at || undefined,
       image_path: row.image_path || undefined,
       caption: row.caption || undefined,
       scheduled_date: row.scheduled_date || undefined,
