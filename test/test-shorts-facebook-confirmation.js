@@ -213,6 +213,32 @@ async function testCalendarMatcherRequiresCaptionAndTime() {
   assert(/missing-time/.test(captionOnly.proof));
 }
 
+async function testCalendarDialogWaitsForHydratedDescription() {
+  const uploader = makeUploader();
+  let waits = 0;
+  const reads = [
+    'Edit reel Public Add to your post',
+    'Edit reel Public Add to your post 6:00 PM',
+    'Edit reel Unique July caption that proves the correct post',
+  ];
+  uploader.page.waitForTimeout = async () => {
+    waits += 1;
+  };
+  uploader._readCalendarReelDialogText = async () => reads.shift() || reads[reads.length - 1] || '';
+
+  const proof = await uploader._waitForCalendarReelDialogMatch({
+    candidate: { text: '6:00 PM' },
+    expectedDescription: 'Unique July caption that proves the correct post with more copy',
+    scheduledDate: '2026-07-14',
+    scheduledTime: '18:00',
+    headerText: 'Tuesday, Jul 14, 2026',
+  });
+
+  assert.strictEqual(proof.match.matched, true);
+  assert.strictEqual(proof.attempts, 3);
+  assert.strictEqual(waits, 2);
+}
+
 async function main() {
   await testRowCountIncreaseIsNotConfirmation();
   await testCaptionDateTimeRowConfirms();
@@ -221,6 +247,7 @@ async function main() {
   await testCalendarFallbackConfirmsAfterContentLibraryMiss();
   await testPreSubmitCalendarRecoverySkipsUpload();
   await testCalendarMatcherRequiresCaptionAndTime();
+  await testCalendarDialogWaitsForHydratedDescription();
   console.log('test-shorts-facebook-confirmation passed');
 }
 

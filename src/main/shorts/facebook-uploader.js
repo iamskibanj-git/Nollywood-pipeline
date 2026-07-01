@@ -50,6 +50,8 @@ const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
 const POST_SCHEDULE_REFRESH_EVERY = 15000;
 const CALENDAR_CONFIRM_TIMEOUT = 90000;
 const CALENDAR_CONFIRM_SCROLLS = 12;
+const CALENDAR_DIALOG_TEXT_READY_TIMEOUT = 20000;
+const CALENDAR_DIALOG_TEXT_POLL = 750;
 const FACEBOOK_MAX_SCHEDULE_DAYS_AHEAD = 29;
 const FACEBOOK_CALENDAR_DAY_URL = 'https://www.facebook.com/professional_dashboard/content_calendar/';
 
@@ -992,16 +994,18 @@ class FacebookUploader {
       }
 
       for (const candidate of candidates) {
-        const key = candidate.key || `${candidate.x},${candidate.y},${candidate.text}`;
+        const key = candidate.coordinateKey || candidate.key || `${candidate.x},${candidate.y},${candidate.text}`;
         if (inspected.has(key)) continue;
         inspected.add(key);
 
+        const remainingMs = Math.max(1000, CALENDAR_CONFIRM_TIMEOUT - (Date.now() - start));
         if (await this._inspectCalendarReelCandidate(candidate, {
           expectedDescription,
           scheduledDate,
           scheduledTime,
           headerText,
           phase,
+          timeoutMs: Math.min(CALENDAR_DIALOG_TEXT_READY_TIMEOUT, remainingMs),
         })) {
           return true;
         }
@@ -1189,14 +1193,20 @@ class FacebookUploader {
       for (const seed of seeds) {
         const card = bestCardFor(seed);
         if (!card) continue;
-        const key = `${Math.round(card.rect.x)}:${Math.round(card.rect.y)}:${Math.round(card.rect.width)}:${Math.round(card.rect.height)}:${card.text.slice(0, 80)}`;
+        const centerX = Math.round(card.rect.x + card.rect.width / 2);
+        const centerY = Math.round(card.rect.y + card.rect.height / 2);
+        const coordinateKey = `${Math.round(centerX / 8) * 8}:${Math.round(centerY / 8) * 8}`;
+        const key = `${coordinateKey}:${Math.round(card.rect.width)}:${Math.round(card.rect.height)}:${card.text.slice(0, 80)}`;
+        if (seen.has(coordinateKey)) continue;
         if (seen.has(key)) continue;
+        seen.add(coordinateKey);
         seen.add(key);
         candidates.push({
-          x: Math.round(card.rect.x + card.rect.width / 2),
-          y: Math.round(card.rect.y + card.rect.height / 2),
+          x: centerX,
+          y: centerY,
           text: card.text,
           key,
+          coordinateKey,
           score: card.score,
           timeMatch: textHasAny(card.text, timeNeedles),
         });
@@ -1207,7 +1217,7 @@ class FacebookUploader {
     }, timeNeedles).catch(() => []);
   }
 
-  async _inspectCalendarReelCandidate(candidate, { expectedDescription, scheduledDate, scheduledTime, headerText, phase }) {
+  async _inspectCalendarReelCandidate(candidate, { expectedDescription, scheduledDate, scheduledTime, headerText, phase, timeoutMs = CALENDAR_DIALOG_TEXT_READY_TIMEOUT }) {
     this.log(`[FB-UPLOAD] ${phase}: clicking calendar candidate at ${candidate.x},${candidate.y} (${String(candidate.text || '').slice(0, 80)})`);
     let dialogOpened = false;
     try {
@@ -1218,20 +1228,20 @@ class FacebookUploader {
         return false;
       }
 
-      const dialogText = await this._readCalendarReelDialogText();
-      const match = this._calendarDialogMatchesExpectedReel({
-        dialogText,
+      const proof = await this._waitForCalendarReelDialogMatch({
         candidate,
         expectedDescription,
         scheduledDate,
         scheduledTime,
         headerText,
+        timeoutMs,
       });
+      const { dialogText, match } = proof;
       if (match.matched) {
-        this.log(`[FB-UPLOAD] ${phase}: Calendar Reel confirmed (${match.proof})`);
+        this.log(`[FB-UPLOAD] ${phase}: Calendar Reel confirmed (${match.proof}; textLen=${dialogText.length}; waits=${proof.attempts})`);
         return true;
       }
-      this.log(`[FB-UPLOAD] ${phase}: Calendar candidate rejected (${match.proof})`);
+      this.log(`[FB-UPLOAD] ${phase}: Calendar candidate rejected (${match.proof}; textLen=${dialogText.length}; waits=${proof.attempts})`);
       return false;
     } finally {
       if (dialogOpened) await this._closeCalendarReelDialog();
@@ -1267,6 +1277,39 @@ class FacebookUploader {
         .sort((a, b) => b.text.length - a.text.length);
       return dialogs[0]?.text || '';
     }).catch(() => '');
+  }
+
+  async _waitForCalendarReelDialogMatch({ candidate, expectedDescription, scheduledDate, scheduledTime, headerText, timeoutMs = CALENDAR_DIALOG_TEXT_READY_TIMEOUT }) {
+    const start = Date.now();
+    let attempts = 0;
+    let lastDialogText = '';
+    let lastMatch = this._calendarDialogMatchesExpectedReel({
+      dialogText: '',
+      candidate,
+      expectedDescription,
+      scheduledDate,
+      scheduledTime,
+      headerText,
+    });
+
+    while (Date.now() - start < timeoutMs) {
+      attempts += 1;
+      lastDialogText = await this._readCalendarReelDialogText();
+      lastMatch = this._calendarDialogMatchesExpectedReel({
+        dialogText: lastDialogText,
+        candidate,
+        expectedDescription,
+        scheduledDate,
+        scheduledTime,
+        headerText,
+      });
+      if (lastMatch.matched) {
+        return { dialogText: lastDialogText, match: lastMatch, attempts };
+      }
+      await this.page.waitForTimeout(CALENDAR_DIALOG_TEXT_POLL);
+    }
+
+    return { dialogText: lastDialogText, match: lastMatch, attempts };
   }
 
   _calendarDialogMatchesExpectedReel({ dialogText = '', candidate = {}, expectedDescription = '', scheduledDate = '', scheduledTime = '', headerText = '' } = {}) {

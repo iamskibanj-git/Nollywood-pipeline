@@ -284,6 +284,34 @@ async function testCalendarDialogRequiresCaptionAndTimeProof() {
   assert.match(captionOnly.proof, /missing-time/);
 }
 
+async function testCalendarDialogWaitsForHydratedCaption() {
+  const uploader = new SocialFacebookUploader({ log: () => {} });
+  let waits = 0;
+  const reads = [
+    'Edit post Public Add to your post',
+    'Edit post Public Add to your post 3:00 PM',
+    'Edit post She sent money. He wanted her presence. #NollywoodDrama',
+  ];
+  uploader.page = {
+    waitForTimeout: async () => {
+      waits += 1;
+    },
+  };
+  uploader._readCalendarPostDialogText = async () => reads.shift() || reads[reads.length - 1] || '';
+
+  const proof = await uploader._waitForCalendarPostDialogMatch({
+    candidate: { text: '3:00 PM' },
+    expectedCaption: 'She sent money. He wanted her presence.',
+    scheduledDate: '2026-07-24',
+    scheduledTime: '15:00',
+    headerText: 'Friday, Jul 24, 2026',
+  });
+
+  assert.strictEqual(proof.match.matched, true);
+  assert.strictEqual(proof.attempts, 3);
+  assert.strictEqual(waits, 2);
+}
+
 async function main() {
   await testUploaderDefersBeforeFileCheck();
   await testFutureOnlyBatchDoesNotLaunchFacebook();
@@ -292,6 +320,7 @@ async function main() {
   await testConfirmationFallsBackToContentLibraryAfterCalendarMiss();
   await testUploadFailedPreSubmitCalendarRecoverySkipsCreate();
   await testCalendarDialogRequiresCaptionAndTimeProof();
+  await testCalendarDialogWaitsForHydratedCaption();
   console.log('test-social-schedule-window passed');
 }
 
