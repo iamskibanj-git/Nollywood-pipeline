@@ -21,6 +21,7 @@ const userDataDir = parseArgValue(rawArgs, '--user-data-dir') || '.browser-profi
 const facebookLoginWaitSec = readInteger(parseArgValue(rawArgs, '--facebook-login-wait-sec') || parseArgValue(rawArgs, '--login-wait-sec'), 120);
 const higgsfieldLoginWaitSec = readInteger(parseArgValue(rawArgs, '--higgsfield-login-wait-sec'), 240);
 const captionRetryLimit = readInteger(parseArgValue(rawArgs, '--caption-retries'), 3);
+const imageRetryLimit = readInteger(parseArgValue(rawArgs, '--image-retries'), 0);
 const postWallClockMs = readMinutes(parseArgValue(rawArgs, '--post-wall-clock-min'), 45);
 const batchWallClockMs = readMinutes(parseArgValue(rawArgs, '--batch-wall-clock-min'), 0);
 
@@ -131,6 +132,7 @@ async function processSlot({ runId, slot }) {
         qaLoops += 1;
         const qaOk = runStage('qa', ['qa.js', '--run', '--id', String(postId)], { allowFailure: true });
         if (qaOk) continue;
+        const qa = await latestQa(postId);
         const repairResult = await repairAfterQaFailure({
           runId,
           postId,
@@ -227,6 +229,9 @@ async function repairAfterQaFailure({
     qaLoops,
   });
   if (repair.action === 'image') {
+    if (imageRetryLimit > 0 && imageAttempts >= imageRetryLimit) {
+      return skipPostForNextCandidate(runId, postId, `image retry budget exhausted after ${imageRetryLimit} attempt(s): ${imageRepairSummary(qa)}`);
+    }
     await mutateImagePromptForRepair(runId, post, qa, { repeatedReasonCount: seen });
     return null;
   }
@@ -238,6 +243,9 @@ async function repairAfterQaFailure({
     return null;
   }
   if (repair.action === 'both') {
+    if (imageRetryLimit > 0 && imageAttempts >= imageRetryLimit) {
+      return skipPostForNextCandidate(runId, postId, `image retry budget exhausted after ${imageRetryLimit} attempt(s): ${imageRepairSummary(qa)}`);
+    }
     await mutateImagePromptForRepair(runId, post, qa, { repeatedReasonCount: seen });
     return null;
   }
@@ -277,15 +285,15 @@ function classifyQaRepair(qa, post) {
 }
 
 async function mutateImagePromptForRepair(runId, post, qa, { repeatedReasonCount = 1 } = {}) {
-  const feedback = qaSummary(qa);
+  const feedback = imageRepairSummary(qa);
   const strategy = repeatedReasonCount >= 2
-    ? 'Switch strategy: use a simple clean scene with one or two generic unlabeled props on a neutral background, no screens unless essential, no social-media frames, no brand-like colors, no text.'
-    : 'Repair the image using this QA feedback.';
+    ? 'Switch visual strategy: make the key action obvious with only the essential unlabeled props, clean background, no social-media frame, no brand-like colors, no text.'
+    : 'Repair the visual only using these image-specific notes.';
   const prompt = [
-    post.image_prompt,
     strategy,
+    imageBasePrompt(post),
     feedback,
-    'Hard requirements: no readable words, labels, logos, app icons, UI chrome, social media frames, watermarks, brand-like color layouts, duplicate props, or printed text. Keep it realistic, editorial, square, and directly matched to the caption topic.',
+    'Hard visual requirements: no readable words, labels, logos, app icons, UI chrome, social media frames, watermarks, brand-like color layouts, duplicate props, or printed text. Keep it realistic, editorial, square, and directly matched to the how-to action.',
   ].join(' ');
   const now = isoNow();
   await withDb(db => {
@@ -304,6 +312,26 @@ async function mutateImagePromptForRepair(runId, post, qa, { repeatedReasonCount
       data: { postId: post.id, repeatedReasonCount, prompt: cleanPrompt(prompt) },
     });
   });
+}
+
+function imageBasePrompt(post) {
+  const prompt = cleanText(post.image_prompt);
+  const repairIndex = prompt.search(/\b(Repair the image|Switch visual strategy|Hard requirements|QA review_needed|Regenerate|Recommended fix)\b/i);
+  return repairIndex > 80 ? prompt.slice(0, repairIndex).trim() : prompt;
+}
+
+function imageRepairSummary(qa) {
+  const reasons = parseJson(qa?.reasons_json, []);
+  const imageReasons = Array.isArray(reasons)
+    ? reasons.filter(reason => /\b(image|visual|photo|picture|rubber|screw|screwdriver|tip|screen|device|background|logo|label|text|watermark|frame|ui|mockup|debris|shavings|prop|crop|artifact|brand)\b/i.test(reason))
+    : [];
+  const fixLines = cleanText(qa?.recommended_fix)
+    .split(/(?=\d+\)\s+)/)
+    .map(line => cleanText(line))
+    .filter(line => /\b(image|visual|photo|picture|regenerate|show|rubber|screw|screwdriver|screen|device|background|logo|label|text|watermark|frame|ui|mockup|debris|shavings|prop|crop|artifact|brand)\b/i.test(line));
+  const selected = [...imageReasons, ...fixLines].slice(0, 5);
+  const summary = selected.length ? selected.join(' ') : qaSummary(qa);
+  return cleanText(summary).slice(0, 650);
 }
 
 async function resetForCaptionRepair(runId, post, qa) {
@@ -508,6 +536,7 @@ Filters:
 
 Repair policy:
   Image QA failures regenerate without a fixed retry cap while within --post-wall-clock-min.
+  Use --image-retries N to cap image attempts for a fragile candidate.
   Caption QA failures retry up to --caption-retries, then the post is skipped for review.
 `);
 }

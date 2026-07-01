@@ -101,6 +101,7 @@ Batch mode is plan-only by default. `--execute` runs the existing stage CLIs for
 Repair policy in batch mode:
 
 - Image QA failures regenerate through Higgsfield without a fixed numeric retry cap while the post stays inside `--post-wall-clock-min`; repeated image failures mutate the image prompt from QA feedback and eventually switch visual strategy.
+- Use `--image-retries N` when a fragile candidate should be dumped after a fixed number of image attempts.
 - Caption/content QA failures regenerate from QA feedback up to `--caption-retries` times, default `3`, then the post is marked `review_needed` and skipped.
 - Posts are never scheduled unless the latest QA row is `passed/pass` for the exact generated image path and caption hash.
 - `review_needed` posts with a QA row resume through the repair loop; posts already marked `Batch skipped:` are not auto-approved on rerun.
