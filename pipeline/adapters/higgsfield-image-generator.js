@@ -33,7 +33,7 @@ export async function generateHiggsfieldImage({
       aspectRatio,
       onGenClicked,
       requireAssetPromptMatchBeforeDownload: true,
-      promptMatchMinSimilarity: 55,
+      promptMatchMinSimilarity: 80,
       promptMatchMaxTilesToCheck: 10,
       promptMatchTimeoutMs: 120000,
     });
