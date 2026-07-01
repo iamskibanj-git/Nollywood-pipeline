@@ -381,7 +381,7 @@ function selectPosts(db, runId, argv) {
 function buildPromptPayload(post, { provider, model }) {
   const visualPrompt = cleanText(post.image_prompt);
   const style = cleanText(pipelineConfig.image.promptStyle);
-  const visualGuard = 'No readable words, labels, logos, app icons, brand marks, watermarks, UI text, captions, posters, or printed text anywhere in the image; use generic blank props and abstract interface shapes only; avoid color palettes or geometry that resemble real brand logos';
+  const visualGuard = 'No readable words, labels, logos, app icons, brand marks, watermarks, UI text, captions, posters, or printed text anywhere in the image; no fake social media post frames, profile icons, like/comment/share UI, smartphone-screen mockups, tablet frames, or device bezels framing the subject; use generic blank props and abstract interface shapes only; avoid color palettes or geometry that resemble real brand logos';
   const prompt = `${visualPrompt}. ${style}. ${visualGuard}.`;
   return {
     provider,
@@ -399,6 +399,13 @@ function buildPromptPayload(post, { provider, model }) {
       'real company logos',
       'brand-like color blocks',
       'UI text',
+      'fake social media post',
+      'phone screen mockup',
+      'smartphone frame',
+      'device bezel',
+      'profile icon',
+      'like button',
+      'comment icon',
       'printed text',
       'distorted hands',
       'extra fingers',

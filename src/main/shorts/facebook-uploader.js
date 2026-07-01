@@ -976,7 +976,8 @@ class FacebookUploader {
   async _confirmReelInCalendar({ expectedDescription = '', scheduledDate = '', scheduledTime = '', phase = 'calendar confirmation' } = {}) {
     if (!expectedDescription || !scheduledDate) return false;
 
-    await this._openCalendarDay(scheduledDate, phase);
+    const calendarOpened = await this._openCalendarDay(scheduledDate, phase);
+    if (!calendarOpened) return false;
     const headerText = await this._readCalendarDayHeader();
     if (headerText) {
       const headerOk = this._calendarHeaderMatchesDate(headerText, scheduledDate);
@@ -1032,6 +1033,19 @@ class FacebookUploader {
     await this._dismissPopups();
     await this._dismissLeavePageGuard();
     await this.page.waitForTimeout(2500);
+    if (await this._isCalendarUnavailableSurface()) {
+      this.log(`[FB-UPLOAD] ${phase}: calendar day view unavailable; falling back to scheduled row confirmation`);
+      return false;
+    }
+    return true;
+  }
+
+  async _isCalendarUnavailableSurface() {
+    return await this.page.evaluate(() => {
+      const text = document.body?.innerText || document.body?.textContent || '';
+      return /This content isn['’]t available right now/i.test(text) &&
+        /Go to Feed|Visit Help Center|only shared it with a small group/i.test(text);
+    }).catch(() => false);
   }
 
   _buildCalendarDayUrl(scheduledDate) {

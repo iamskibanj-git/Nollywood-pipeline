@@ -47,8 +47,9 @@ Return ONLY one valid JSON object, no markdown fences:
 
 Verdict rules:
 - pass only when the image matches the topic, the image has no obvious text/watermark/artifacts, the caption is genuinely useful, and the advice is safe enough for a general audience.
+- review_needed or blocked for any fake social media post frame, phone/tablet screen mockup framing the subject, visible profile/avatar placeholder, like/comment/share icons, app chrome, device bezel border, or UI scaffold around the image. A production Facebook image should be the image itself, not a screenshot/post mockup inside another interface.
 - review_needed for minor visual mismatch, weak usefulness, unclear safety, dubious claims, or advice that may need a human read.
-- blocked for unsafe instructions, high-stakes medical/legal/financial claims, off-topic image, offensive/sexual/gory content, visible watermark/text-heavy image, or obvious AI failure.`;
+- blocked for unsafe instructions, high-stakes medical/legal/financial claims, off-topic image, offensive/sexual/gory content, visible watermark/text-heavy image, fake social/app UI wrapper, or obvious AI failure.`;
 
 const STOPWORDS = new Set([
   'about', 'after', 'again', 'against', 'and', 'are', 'can', 'for', 'from', 'how', 'into',
@@ -533,6 +534,11 @@ ${post.image_prompt}
 
 IMAGE PATH
 ${post.image_path}
+
+GLOBAL IMAGE HARD FAILS
+- The image must be a standalone square editorial/photo-style image, not a phone screenshot, social post mockup, app frame, or content displayed inside a device bezel.
+- Fail any visible fake social-media chrome: avatar/profile placeholders, username bars, like/comment/share icons, notification/app UI, phone notch/bezel, or white social feed margins around the subject.
+- A real physical device may appear only when the topic naturally requires it, but it must not frame the whole image as a mock social post or screenshot.
 
 NICHE-SPECIFIC QA RULES
 ${nicheSpecificQaRules(post.niche_id)}

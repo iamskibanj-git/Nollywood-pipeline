@@ -20,6 +20,8 @@ const SOCIAL_CALENDAR_DAY_URL = 'https://www.facebook.com/professional_dashboard
 
 class SocialFacebookUploader extends FacebookUploader {
   async _dismissPopups() {
+    await this._dismissWhatsAppButtonPrompt().catch(() => false);
+
     const popups = [
       { find: () => this.page.locator('[role="dialog"]').getByText('Turn off', { exact: true }), label: 'keyboard shortcuts dialog' },
       { find: () => this.page.locator('button[data-cookiebanner="accept_button"]'), label: 'cookie consent' },
@@ -44,6 +46,31 @@ class SocialFacebookUploader extends FacebookUploader {
     }
 
     await this._dismissLeavePageGuard();
+  }
+
+  async _dismissWhatsAppButtonPrompt() {
+    const dialogs = this.page.locator('[role="dialog"]').filter({
+      hasText: /Make it easier to contact you|Add WhatsApp button|WhatsApp button/i,
+    });
+    const count = await dialogs.count().catch(() => 0);
+    for (let index = count - 1; index >= 0; index--) {
+      const dialog = dialogs.nth(index);
+      const notNow = dialog.getByRole('button', { name: /^Not now$/i }).first();
+      if (await notNow.count().catch(() => 0)) {
+        await notNow.click({ timeout: 3000 });
+        await this.page.waitForTimeout(1000);
+        this.log('[FB-SOCIAL] Dismissed WhatsApp button prompt');
+        return true;
+      }
+      const close = dialog.locator('[aria-label="Close"], [aria-label="Dismiss"]').first();
+      if (await close.count().catch(() => 0)) {
+        await close.click({ timeout: 3000 });
+        await this.page.waitForTimeout(1000);
+        this.log('[FB-SOCIAL] Closed WhatsApp button prompt');
+        return true;
+      }
+    }
+    return false;
   }
 
   async scheduleImagePost(post) {
@@ -119,13 +146,16 @@ class SocialFacebookUploader extends FacebookUploader {
       this.log(`[FB-SOCIAL] Step 7: Setting time ${scheduledTime}`);
       await this._setScopedScheduleTime(scheduledTime);
       await this.page.waitForTimeout(1000);
+      await this._dismissPopups();
 
       this.log('[FB-SOCIAL] Step 8: Clicking Schedule for later');
       await this._clickScheduleForLater();
       await this.page.waitForTimeout(POST_CLICK_SETTLE);
+      await this._dismissPopups();
       this.onStepComplete('schedule_for_later');
 
       this.log('[FB-SOCIAL] Step 9: Clicking Schedule post to submit scheduled post');
+      await this._dismissPopups();
       await this._clickComposerSubmitButton();
       this.log(`[FB-SOCIAL] Step 9b: Waiting ${POST_SCHEDULE_POST_CLICK_SETTLE / 1000}s after Schedule click for Facebook to settle...`);
       await this.page.waitForTimeout(POST_SCHEDULE_POST_CLICK_SETTLE);
@@ -776,6 +806,7 @@ class SocialFacebookUploader extends FacebookUploader {
     const start = Date.now();
     let lastState = null;
     while (Date.now() - start < POST_SCHEDULE_SETTLE_TIMEOUT) {
+      await this._dismissPopups().catch(() => {});
       lastState = await this.page.evaluate((caption) => {
         const visible = el => {
           const rect = el.getBoundingClientRect();
@@ -865,7 +896,8 @@ class SocialFacebookUploader extends FacebookUploader {
   async _confirmImagePostInCalendar({ expectedCaption = '', scheduledDate = '', scheduledTime = '', phase = 'calendar confirmation' } = {}) {
     if (!expectedCaption || !scheduledDate) return false;
 
-    await this._openSocialCalendarDay(scheduledDate, phase);
+    const calendarOpened = await this._openSocialCalendarDay(scheduledDate, phase);
+    if (!calendarOpened) return false;
     const headerText = await this._readCalendarDayHeader();
     if (headerText) {
       const headerOk = this._calendarHeaderMatchesDate(headerText, scheduledDate);
@@ -921,6 +953,19 @@ class SocialFacebookUploader extends FacebookUploader {
     await this._dismissPopups();
     await this._dismissLeavePageGuard();
     await this.page.waitForTimeout(2500);
+    if (await this._isCalendarUnavailableSurface()) {
+      this.log(`[FB-SOCIAL] ${phase}: calendar day view unavailable; falling back to Content Library confirmation`);
+      return false;
+    }
+    return true;
+  }
+
+  async _isCalendarUnavailableSurface() {
+    return await this.page.evaluate(() => {
+      const text = document.body?.innerText || document.body?.textContent || '';
+      return /This content isn['’]t available right now/i.test(text) &&
+        /Go to Feed|Visit Help Center|only shared it with a small group/i.test(text);
+    }).catch(() => false);
   }
 
   _buildSocialCalendarDayUrl(scheduledDate) {

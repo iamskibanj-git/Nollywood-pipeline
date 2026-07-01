@@ -4,6 +4,7 @@ import initSqlJs from 'sql.js';
 import { pipelineConfig } from './config.js';
 
 const SCHEMA_VERSION = 10;
+const RECOVERY_STALE_SECONDS = 2 * 60 * 60;
 
 export async function openPipelineDb({ config = pipelineConfig, logger = console } = {}) {
   const dbPath = path.resolve(config.files.database || 'howto-content.sqlite');
@@ -360,44 +361,51 @@ class PipelineDb {
     this.run(
       `UPDATE source_pulls
        SET status = 'pending', error_message = COALESCE(error_message, 'Reset after interrupted run'), updated_at = ?
-       WHERE status = 'running'`,
-      [now]
+       WHERE status = 'running'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE posts
        SET status = 'approved', error_message = COALESCE(error_message, 'Reset after interrupted image generation'), updated_at = ?
-       WHERE status = 'image_generating'`,
-      [now]
+       WHERE status = 'image_generating'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, generated_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE posts
        SET status = 'content_done', error_message = COALESCE(error_message, 'Reset after interrupted scheduling'), updated_at = ?
-       WHERE status = 'scheduling'`,
-      [now]
+       WHERE status = 'scheduling'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, quality_checked_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE posts
        SET status = 'image_done', error_message = COALESCE(error_message, 'Reset after interrupted content generation'), updated_at = ?
-       WHERE status = 'content_generating'`,
-      [now]
+       WHERE status = 'content_generating'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, generated_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE posts
        SET status = 'content_done', error_message = COALESCE(error_message, 'Reset after interrupted quality check'), updated_at = ?
-       WHERE status = 'qa_generating'`,
-      [now]
+       WHERE status = 'qa_generating'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, content_generated_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE image_jobs
        SET status = 'pending', error_message = COALESCE(error_message, 'Reset after interrupted image generation'), updated_at = ?
-       WHERE status = 'generating'`,
-      [now]
+       WHERE status = 'generating'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE content_jobs
        SET status = 'pending', error_message = COALESCE(error_message, 'Reset after interrupted content generation'), updated_at = ?
-       WHERE status = 'generating'`,
-      [now]
+       WHERE status = 'generating'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at, created_at))) > ?`,
+      [now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE post_quality_checks
@@ -405,8 +413,9 @@ class PipelineDb {
            error_message = COALESCE(error_message, 'Interrupted before quality check completion'),
            completed_at = COALESCE(completed_at, ?),
            updated_at = ?
-       WHERE status = 'running'`,
-      [now, now]
+       WHERE status = 'running'
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at, created_at))) > ?`,
+      [now, now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE facebook_page_context_checks
@@ -414,8 +423,9 @@ class PipelineDb {
            error_message = COALESCE(error_message, 'Interrupted before context check completion'),
            completed_at = COALESCE(completed_at, ?),
            updated_at = ?
-       WHERE status IN ('pending', 'running')`,
-      [now, now]
+       WHERE status IN ('pending', 'running')
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at, created_at))) > ?`,
+      [now, now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE facebook_schedule_jobs
@@ -423,8 +433,9 @@ class PipelineDb {
            error_message = COALESCE(error_message, 'Interrupted before Facebook schedule completion'),
            completed_at = COALESCE(completed_at, ?),
            updated_at = ?
-       WHERE status IN ('pending', 'running') AND dry_run = 0`,
-      [now, now]
+       WHERE status IN ('pending', 'running') AND dry_run = 0
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at, created_at))) > ?`,
+      [now, now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE batch_runs
@@ -435,8 +446,8 @@ class PipelineDb {
            updated_at = ?
        WHERE status = 'running'
          AND started_at IS NOT NULL
-         AND (strftime('%s', ?) - strftime('%s', started_at)) > 43200`,
-      [now, now, now, now]
+         AND (strftime('%s', ?) - strftime('%s', started_at)) > ?`,
+      [now, now, now, now, RECOVERY_STALE_SECONDS]
     );
     this.run(
       `UPDATE runs
@@ -444,8 +455,9 @@ class PipelineDb {
            error_message = COALESCE(error_message, 'Interrupted before completion'),
            completed_at = COALESCE(completed_at, ?),
            updated_at = ?
-       WHERE status IN ('created', 'scraping', 'scoring', 'queueing', 'generating_images', 'generating_content', 'scheduling')`,
-      [now, now]
+       WHERE status IN ('created', 'scraping', 'scoring', 'queueing', 'generating_images', 'generating_content', 'scheduling')
+         AND (strftime('%s', ?) - strftime('%s', COALESCE(updated_at, started_at))) > ?`,
+      [now, now, now, RECOVERY_STALE_SECONDS]
     );
   }
 
