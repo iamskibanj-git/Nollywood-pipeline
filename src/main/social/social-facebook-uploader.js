@@ -7,7 +7,9 @@ const POST_CLICK_SETTLE = 3000;
 const IMAGE_UPLOAD_TIMEOUT = 90000;
 const SCHEDULE_MODAL_SETTLE = 3000;
 const POST_SCHEDULE_POST_CLICK_SETTLE = 30000;
-const POST_SCHEDULE_SETTLE_TIMEOUT = 60000;
+const POST_SCHEDULE_SETTLE_MAX = 180000;
+const POST_SCHEDULE_SETTLE_POLL = 3000;
+const POST_SCHEDULE_SETTLE_CHECKPOINTS = [60000, 90000, 120000, 180000];
 const POST_SCHEDULE_MIN_SETTLE = 30000;
 const POST_SCHEDULE_IN_PLACE_CONFIRM = 30000;
 const POST_SCHEDULE_REFRESH_CONFIRM = 90000;
@@ -173,6 +175,7 @@ class SocialFacebookUploader extends FacebookUploader {
       const debugPath = await this._captureDebugScreenshot(mediaPath, 'social_post_error');
       return {
         success: false,
+        submitPending: error?.code === 'SCHEDULE_SUBMIT_STILL_PROCESSING',
         error: `${error.message || error}${debugPath ? ` (screenshot: ${debugPath})` : ''}`,
       };
     }
@@ -804,8 +807,12 @@ class SocialFacebookUploader extends FacebookUploader {
   async _waitForImageScheduleSubmissionSettle(expectedCaption = '', alreadySettledMs = 0) {
     const captionNeedle = String(expectedCaption || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     const start = Date.now();
+    const remainingSettleMs = Math.max(POST_SCHEDULE_SETTLE_POLL, POST_SCHEDULE_SETTLE_MAX - alreadySettledMs);
+    const pendingCheckpoints = POST_SCHEDULE_SETTLE_CHECKPOINTS
+      .filter(ms => ms > alreadySettledMs)
+      .sort((a, b) => a - b);
     let lastState = null;
-    while (Date.now() - start < POST_SCHEDULE_SETTLE_TIMEOUT) {
+    while (Date.now() - start < remainingSettleMs) {
       await this._dismissPopups().catch(() => {});
       lastState = await this.page.evaluate((caption) => {
         const visible = el => {
@@ -849,14 +856,29 @@ class SocialFacebookUploader extends FacebookUploader {
         this.log('[FB-SOCIAL] Schedule submit settle: Facebook displayed scheduled success text');
         return lastState;
       }
-      const composerGone = !lastState.hasComposerDialog && !lastState.hasFinalScheduleButton && !lastState.hasProgressText;
-      if (composerGone && elapsed >= POST_SCHEDULE_MIN_SETTLE) {
+      const activeSubmitUi = lastState.hasComposerDialog || lastState.hasFinalScheduleButton || lastState.hasProgressText;
+      if (!activeSubmitUi && elapsed >= POST_SCHEDULE_MIN_SETTLE) {
         this.log(`[FB-SOCIAL] Schedule submit settle: composer no longer active after ${Math.round(elapsed / 1000)}s`);
         return lastState;
       }
-      await this.page.waitForTimeout(3000);
+
+      while (pendingCheckpoints.length && elapsed >= pendingCheckpoints[0]) {
+        const checkpoint = pendingCheckpoints.shift();
+        this.log(`[FB-SOCIAL] Schedule submit settle: still waiting at ${Math.round(checkpoint / 1000)}s (active=${activeSubmitUi}, state=${JSON.stringify(lastState)})`);
+      }
+
+      await this.page.waitForTimeout(POST_SCHEDULE_SETTLE_POLL);
     }
-    this.log(`[FB-SOCIAL] Schedule submit settle timed out; continuing to confirmation checks (state=${JSON.stringify(lastState)})`);
+
+    const totalElapsed = alreadySettledMs + (Date.now() - start);
+    const activeSubmitUi = !!(lastState && (lastState.hasComposerDialog || lastState.hasFinalScheduleButton || lastState.hasProgressText));
+    if (activeSubmitUi) {
+      const error = new Error(`SCHEDULE_SUBMIT_STILL_PROCESSING: Facebook still shows active scheduling UI after ${Math.round(totalElapsed / 1000)}s; leaving composer open and skipping confirmation navigation. Last state=${JSON.stringify(lastState)}`);
+      error.code = 'SCHEDULE_SUBMIT_STILL_PROCESSING';
+      throw error;
+    }
+
+    this.log(`[FB-SOCIAL] Schedule submit settle reached max wait with no active submit UI; continuing to confirmation checks (state=${JSON.stringify(lastState)})`);
     return lastState;
   }
 

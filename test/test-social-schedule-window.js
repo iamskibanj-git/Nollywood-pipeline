@@ -312,6 +312,118 @@ async function testCalendarDialogWaitsForHydratedCaption() {
   assert.strictEqual(waits, 2);
 }
 
+function makeSettleState(overrides = {}) {
+  return {
+    url: 'https://www.facebook.com/post/create',
+    hasSuccessText: false,
+    hasProgressText: false,
+    hasComposerDialog: false,
+    hasFinalScheduleButton: false,
+    onScheduledSurface: false,
+    hasCaptionText: true,
+    ...overrides,
+  };
+}
+
+async function withFakeClock(callback) {
+  const realDateNow = Date.now;
+  let now = 0;
+  Date.now = () => now;
+  try {
+    return await callback({
+      advance: ms => { now += ms; },
+      now: () => now,
+    });
+  } finally {
+    Date.now = realDateNow;
+  }
+}
+
+async function testSubmitSettleWaitsUntilComposerGone() {
+  const logs = [];
+  const uploader = new SocialFacebookUploader({ log: message => logs.push(message) });
+  const states = [
+    makeSettleState({ hasProgressText: true, hasComposerDialog: true, hasFinalScheduleButton: true }),
+    makeSettleState({ hasProgressText: true, hasComposerDialog: true, hasFinalScheduleButton: true }),
+    makeSettleState({ url: 'https://www.facebook.com/professional_dashboard/content_calendar/' }),
+  ];
+  let waits = 0;
+  uploader._dismissPopups = async () => {};
+
+  await withFakeClock(async clock => {
+    uploader.page = {
+      evaluate: async () => states.shift() || makeSettleState(),
+      waitForTimeout: async ms => {
+        waits += 1;
+        clock.advance(ms);
+      },
+    };
+
+    const result = await uploader._waitForImageScheduleSubmissionSettle('Caption body', 30000);
+    assert.strictEqual(result.hasProgressText, false);
+  });
+
+  assert.strictEqual(waits, 2);
+  assert.ok(logs.some(line => /composer no longer active after 36s/i.test(line)));
+}
+
+async function testSubmitSettleThrowsWhileFacebookStillProcessing() {
+  const logs = [];
+  const uploader = new SocialFacebookUploader({ log: message => logs.push(message) });
+  uploader._dismissPopups = async () => {};
+
+  await withFakeClock(async clock => {
+    uploader.page = {
+      evaluate: async () => makeSettleState({
+        hasProgressText: true,
+        hasComposerDialog: true,
+        hasFinalScheduleButton: true,
+      }),
+      waitForTimeout: async ms => {
+        clock.advance(ms);
+      },
+    };
+
+    await assert.rejects(
+      () => uploader._waitForImageScheduleSubmissionSettle('Caption body', 30000),
+      error => {
+        assert.strictEqual(error.code, 'SCHEDULE_SUBMIT_STILL_PROCESSING');
+        assert.match(error.message, /still shows active scheduling UI after 180s/);
+        return true;
+      },
+    );
+  });
+
+  assert.ok(logs.some(line => /still waiting at 60s/i.test(line)));
+  assert.ok(logs.some(line => /still waiting at 90s/i.test(line)));
+  assert.ok(logs.some(line => /still waiting at 120s/i.test(line)));
+}
+
+async function testSubmitPendingDoesNotOpenCalendarConfirmation() {
+  const uploader = new SocialFacebookUploader({ log: () => {} });
+  let calendarCalled = false;
+  const error = new Error('SCHEDULE_SUBMIT_STILL_PROCESSING');
+  error.code = 'SCHEDULE_SUBMIT_STILL_PROCESSING';
+
+  uploader._waitForImageScheduleSubmissionSettle = async () => {
+    throw error;
+  };
+  uploader._confirmImagePostInCalendar = async () => {
+    calendarCalled = true;
+    return true;
+  };
+
+  await assert.rejects(
+    () => uploader._waitForScheduleConfirmation('Caption body for match', 3, {
+      scheduledDate: '2026-07-24',
+      scheduledTime: '15:00',
+      alreadySettledMs: 30000,
+    }),
+    /SCHEDULE_SUBMIT_STILL_PROCESSING/,
+  );
+  assert.strictEqual(calendarCalled, false);
+}
+
 async function main() {
   await testUploaderDefersBeforeFileCheck();
   await testFutureOnlyBatchDoesNotLaunchFacebook();
@@ -321,6 +433,9 @@ async function main() {
   await testUploadFailedPreSubmitCalendarRecoverySkipsCreate();
   await testCalendarDialogRequiresCaptionAndTimeProof();
   await testCalendarDialogWaitsForHydratedCaption();
+  await testSubmitSettleWaitsUntilComposerGone();
+  await testSubmitSettleThrowsWhileFacebookStillProcessing();
+  await testSubmitPendingDoesNotOpenCalendarConfirmation();
   console.log('test-social-schedule-window passed');
 }
 
