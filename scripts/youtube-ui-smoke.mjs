@@ -84,11 +84,11 @@ try {
     for (const project of projects) {
       const status = await page.evaluate(projectId => window.api.getShortsStatus(projectId), project.id);
       const jobs = status.youtubeJobs || [];
-      const match = jobs.find(job => job.remote_post_id === 'uQGmdxd0TeM')
+      const match = jobs.find(job => job.platform === 'youtube_shorts' && job.remote_post_id === 'uQGmdxd0TeM')
         || jobs.find(job => job.platform === 'youtube_shorts');
       if (match) return { project, status, job: match };
     }
-    throw new Error('No project with YouTube Shorts job proof found');
+    throw new Error('No project with YouTube Shorts job found');
   }, 30000);
 
   result.projectId = target.project.id;
@@ -99,10 +99,21 @@ try {
   await page.locator('#shorts-project-selector').waitFor({ timeout: 30000 });
   await page.selectOption('#shorts-project-selector', String(target.project.id));
   await page.waitForSelector('#shorts-youtube-section', { state: 'visible', timeout: 30000 });
-  await page.waitForFunction(() => document.querySelector('#shorts-youtube-jobs')?.innerText.includes('uQGmdxd0TeM'), null, { timeout: 30000 });
+  await page.waitForFunction(job => {
+    const text = document.querySelector('#shorts-youtube-jobs')?.innerText || '';
+    const hasJobId = text.includes(String(job.id));
+    const hasStatus = !job.status || text.includes(String(job.status));
+    const hasRemoteProof = !job.remote_post_id || text.includes(String(job.remote_post_id));
+    return hasJobId && hasStatus && hasRemoteProof;
+  }, pickJobFields(target.job), { timeout: 30000 });
 
   result.youtubeSectionVisible = await page.locator('#shorts-youtube-section').isVisible();
-  result.proofTextVisible = await page.locator('#shorts-youtube-jobs').innerText().then(text => text.includes('uQGmdxd0TeM'));
+  result.proofTextVisible = await page.locator('#shorts-youtube-jobs').innerText().then(text => {
+    const job = pickJobFields(target.job);
+    return text.includes(String(job.id))
+      && (!job.status || text.includes(String(job.status)))
+      && (!job.remote_post_id || text.includes(String(job.remote_post_id)));
+  });
   result.prepareButton = await buttonState(page, '#btn-youtube-prepare');
   result.inspectButton = await buttonState(page, '#btn-youtube-inspect');
   result.scheduleButtonBeforePrepare = await buttonState(page, '#btn-youtube-schedule');
