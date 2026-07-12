@@ -84,7 +84,12 @@ contextBridge.exposeInMainWorld('api', {
   getShortsStatus: (projectId) => ipcRenderer.invoke('shorts:getStatus', projectId),
   planShortsCalendar: (projectId, options) => ipcRenderer.invoke('shorts:planCalendar', projectId, options),
   assembleShorts: (projectId) => ipcRenderer.invoke('shorts:assemble', projectId),
-  uploadAllShorts: (projectId) => ipcRenderer.invoke('shorts:uploadAll', projectId),
+  uploadAllShorts: (projectId) => ipcRenderer.invoke(`shorts:uploadAll`, projectId),
+  prepareYouTubeShortPublishJob: (shortId, options) => ipcRenderer.invoke(`shorts:prepareYouTubePublishJob`, shortId, options || {}),
+  prepareNextYouTubeShortPublishJob: (projectId, options) => ipcRenderer.invoke(`shorts:prepareNextYouTubePublishJob`, projectId, options || {}),
+  inspectYouTubeUploadWizard: (jobId, options) => ipcRenderer.invoke(`shorts:inspectYouTubeUploadWizard`, jobId, options || {}),
+  scheduleYouTubeShortPublishJob: (jobId, options) => ipcRenderer.invoke(`shorts:scheduleYouTubePublishJob`, jobId, options || {}),
+  scheduleNextYouTubeShortPublishJob: (projectId, options) => ipcRenderer.invoke(`shorts:scheduleNextYouTubePublishJob`, projectId, options || {}),
 
   // Social engagement posts tab
   getSocialProjects: () => ipcRenderer.invoke('social:getProjects'),

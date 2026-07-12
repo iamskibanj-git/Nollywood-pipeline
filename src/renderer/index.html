@@ -798,7 +798,7 @@
           </div>
 
           <h2>Shorts — Facebook Reels</h2>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Repurpose completed project clips into a Reel calendar.</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">Repurpose completed project clips into short-form platform calendars.</p>
 
           <!-- Shorts tools (hidden until project selected) -->
           <div id="shorts-tools" style="display:none;">
@@ -852,6 +852,21 @@
                 <button class="btn btn-primary" onclick="uploadAllShorts()" id="btn-upload-all" style="font-size:12px;" disabled>Upload All to Facebook</button>
               </div>
               <div id="shorts-upload-status" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
+
+              <div id="shorts-youtube-section" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+                <h3 style="font-size:13px;margin-bottom:10px;">YouTube Shorts</h3>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                  <button class="btn btn-primary" onclick="prepareNextYouTubeShort()" id="btn-youtube-prepare" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Prepare Next</button>
+                  <button class="btn btn-ghost" onclick="inspectYouTubeShortWizard()" id="btn-youtube-inspect" style="font-size:12px;" disabled>Inspect Wizard</button>
+                  <label style="font-size:11px;color:var(--muted);">Date:</label>
+                  <input id="shorts-youtube-date" type="date" onchange="updateShortsYouTubeButtons()" style="width:132px;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px;font-size:12px;">
+                  <label style="font-size:11px;color:var(--muted);">Time:</label>
+                  <input id="shorts-youtube-time" type="time" value="18:00" onchange="updateShortsYouTubeButtons()" style="width:96px;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px;font-size:12px;">
+                  <button class="btn btn-primary" onclick="scheduleYouTubeShort()" id="btn-youtube-schedule" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Schedule Short</button>
+                </div>
+                <div id="shorts-youtube-status" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
+                <div id="shorts-youtube-jobs" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
+              </div>
             </div>
 
           </div><!-- /shorts-tools -->
@@ -3023,6 +3038,7 @@
     // ═══════════════════════════════════════════════════════════════════════
 
     let shortsProjectId = null;
+    let shortsYoutubeJobs = [];
 
     function formatShortsDateValue(date) {
       const y = date.getFullYear();
@@ -3064,11 +3080,25 @@
       updateShortsCalendarDaysFromStartDate();
     }
 
+    function setDefaultYouTubeScheduleWindow() {
+      const dateInput = document.getElementById('shorts-youtube-date');
+      const timeInput = document.getElementById('shorts-youtube-time');
+      if (!dateInput || !timeInput) return;
+      if (!dateInput.value) {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        dateInput.value = formatShortsDateValue(tomorrow);
+      }
+      if (!timeInput.value) timeInput.value = '18:00';
+      updateShortsYouTubeButtons();
+    }
+
     async function openShortsTab() {
       document.getElementById('stepper').style.display = 'none';
       showView('view-shorts');
       document.getElementById('shorts-tools').style.display = 'none';
       setDefaultShortsScheduleWindow();
+      setDefaultYouTubeScheduleWindow();
 
       const selector = document.getElementById('shorts-project-selector');
       selector.innerHTML = '<option value="">Select a project...</option>';
@@ -3102,15 +3132,23 @@
       document.getElementById('stepper').style.display = 'flex';
       showView('view-launcher');
       shortsProjectId = null;
+      shortsYoutubeJobs = [];
+      renderShortsYouTubeJobs([]);
     }
 
     async function switchShortsProject(projectId) {
       shortsProjectId = projectId || null;
       if (!projectId) {
         document.getElementById('shorts-tools').style.display = 'none';
+        shortsYoutubeJobs = [];
+        const ytStatus = document.getElementById('shorts-youtube-status');
+        if (ytStatus) ytStatus.textContent = '';
+        renderShortsYouTubeJobs([]);
         return;
       }
       document.getElementById('shorts-tools').style.display = 'block';
+      const ytStatus = document.getElementById('shorts-youtube-status');
+      if (ytStatus) ytStatus.textContent = '';
       // Load existing shorts status if any
       await refreshShortsCalendar();
     }
@@ -3120,6 +3158,8 @@
       try {
         const data = await window.api.getShortsStatus(shortsProjectId);
         renderShortsCalendar(data.shorts || []);
+        shortsYoutubeJobs = data.youtubeJobs || [];
+        renderShortsYouTubeJobs(shortsYoutubeJobs);
         const statusEl = document.getElementById('shorts-project-status');
         if (data.summary && data.summary.total > 0) {
           const s = data.summary;
@@ -3163,6 +3203,8 @@
         }
       } catch (e) {
         document.getElementById('shorts-project-status').textContent = 'No shorts planned yet. Click "Plan Calendar" to start.';
+        shortsYoutubeJobs = [];
+        renderShortsYouTubeJobs([]);
       }
     }
 
@@ -3188,6 +3230,166 @@
       });
     }
 
+    function renderShortsYouTubeJobs(jobs) {
+      const el = document.getElementById('shorts-youtube-jobs');
+      const statusEl = document.getElementById('shorts-youtube-status');
+      if (!el) return;
+      const list = Array.isArray(jobs) ? jobs : [];
+      if (!list.length) {
+        el.innerHTML = '<span style="color:var(--muted);">No YouTube job prepared for this project.</span>';
+        if (statusEl) statusEl.textContent = 'No YouTube job prepared for this project.';
+        updateShortsYouTubeButtons();
+        return;
+      }
+
+      const statusColors = {
+        planned: 'var(--muted)',
+        ready: 'var(--accent)',
+        blocked: 'var(--red)',
+        uploading: 'var(--yellow)',
+        draft_uploaded: 'var(--yellow)',
+        scheduled: 'var(--green)',
+        upload_failed: 'var(--red)',
+        published: 'var(--green)',
+      };
+      el.innerHTML = `
+        <table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:6px;">
+          <thead>
+            <tr style="background:var(--bg3);">
+              <th style="padding:5px 8px;text-align:left;">Job</th>
+              <th style="padding:5px 8px;text-align:left;">Short</th>
+              <th style="padding:5px 8px;text-align:left;">Date</th>
+              <th style="padding:5px 8px;text-align:left;">Time</th>
+              <th style="padding:5px 8px;text-align:left;">Status</th>
+              <th style="padding:5px 8px;text-align:left;">Proof</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.map(job => {
+              const status = job.status || 'planned';
+              const proof = job.remote_post_id
+                ? (job.remote_url ? `<a href="${escapeHtml(job.remote_url)}" target="_blank" style="color:var(--accent);">${escapeHtml(job.remote_post_id)}</a>` : escapeHtml(job.remote_post_id))
+                : '—';
+              return `
+                <tr style="border-bottom:1px solid var(--border);">
+                  <td style="padding:5px 8px;">${escapeHtml(job.id)}</td>
+                  <td style="padding:5px 8px;">#${escapeHtml(job.short_number || job.short_id || '-')}</td>
+                  <td style="padding:5px 8px;">${escapeHtml(job.scheduled_date || '-')}</td>
+                  <td style="padding:5px 8px;">${escapeHtml(job.scheduled_time || '-')}</td>
+                  <td style="padding:5px 8px;color:${statusColors[status] || 'var(--muted)'}">${escapeHtml(status)}</td>
+                  <td style="padding:5px 8px;">${proof}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+      if (statusEl && !statusEl.textContent) statusEl.textContent = `${list.length} YouTube job${list.length === 1 ? '' : 's'} for this project.`;
+      updateShortsYouTubeButtons();
+    }
+
+    function getActiveYouTubeJob(statuses) {
+      const wanted = new Set(statuses || []);
+      return (shortsYoutubeJobs || []).find(job => wanted.has(job.status)) || null;
+    }
+
+    function updateShortsYouTubeButtons() {
+      const prepareBtn = document.getElementById('btn-youtube-prepare');
+      const inspectBtn = document.getElementById('btn-youtube-inspect');
+      const scheduleBtn = document.getElementById('btn-youtube-schedule');
+      const dateInput = document.getElementById('shorts-youtube-date');
+      const timeInput = document.getElementById('shorts-youtube-time');
+      if (!prepareBtn || !inspectBtn || !scheduleBtn) return;
+
+      const inspectJob = getActiveYouTubeJob(['ready', 'planned', 'blocked', 'upload_failed']);
+      const scheduleJob = getActiveYouTubeJob(['ready', 'draft_uploaded', 'upload_failed']);
+      const hasDateTime = Boolean(dateInput && dateInput.value && timeInput && timeInput.value);
+      prepareBtn.disabled = !shortsProjectId;
+      inspectBtn.disabled = !inspectJob;
+      inspectBtn.title = inspectJob ? `Inspect YouTube upload wizard for job #${inspectJob.id}` : 'Prepare a YouTube job first';
+      scheduleBtn.disabled = !scheduleJob || !hasDateTime;
+      scheduleBtn.title = scheduleJob
+        ? (hasDateTime ? `Schedule YouTube job #${scheduleJob.id}` : 'Choose a date and time')
+        : 'Prepare a schedulable YouTube job first';
+    }
+
+    async function prepareNextYouTubeShort() {
+      if (!shortsProjectId) return;
+      const btn = document.getElementById('btn-youtube-prepare');
+      const statusEl = document.getElementById('shorts-youtube-status');
+      btn.disabled = true;
+      btn.textContent = 'Preparing...';
+      statusEl.textContent = 'Preparing next YouTube Shorts job...';
+      try {
+        const result = await window.api.prepareNextYouTubeShortPublishJob(shortsProjectId, {});
+        const job = result.job || {};
+        const color = result.ok ? 'var(--green)' : 'var(--yellow)';
+        statusEl.innerHTML = `<span style="color:${color};">YouTube job #${escapeHtml(job.id || '-')} ${escapeHtml(result.status || job.status || 'prepared')}.</span>`;
+        await refreshShortsCalendar();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+      btn.textContent = 'Prepare Next';
+      updateShortsYouTubeButtons();
+    }
+
+    async function inspectYouTubeShortWizard() {
+      const job = getActiveYouTubeJob(['ready', 'planned', 'blocked', 'upload_failed']);
+      if (!job) return;
+      const btn = document.getElementById('btn-youtube-inspect');
+      const statusEl = document.getElementById('shorts-youtube-status');
+      btn.disabled = true;
+      btn.textContent = 'Inspecting...';
+      statusEl.textContent = `Opening YouTube Studio upload wizard for job #${job.id}...`;
+      try {
+        const result = await window.api.inspectYouTubeUploadWizard(job.id, { openWizard: true, closeWizard: true });
+        const dialog = result.wizardProof || {};
+        statusEl.innerHTML = `<span style="color:var(--green);">Wizard checked. File input: ${escapeHtml(dialog.fileInputCount || 0)}, no file selected.</span>`;
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+      btn.textContent = 'Inspect Wizard';
+      updateShortsYouTubeButtons();
+    }
+
+    async function scheduleYouTubeShort() {
+      const job = getActiveYouTubeJob(['ready', 'draft_uploaded', 'upload_failed']);
+      const dateInput = document.getElementById('shorts-youtube-date');
+      const timeInput = document.getElementById('shorts-youtube-time');
+      const statusEl = document.getElementById('shorts-youtube-status');
+      if (!job || !dateInput || !timeInput || !dateInput.value || !timeInput.value) {
+        updateShortsYouTubeButtons();
+        return;
+      }
+      const confirmed = window.confirm(`This will open YouTube Studio and click Schedule for job #${job.id} on ${dateInput.value} at ${timeInput.value}. Continue?`);
+      if (!confirmed) return;
+
+      const btn = document.getElementById('btn-youtube-schedule');
+      btn.disabled = true;
+      btn.textContent = 'Scheduling...';
+      statusEl.textContent = `Scheduling YouTube job #${job.id}...`;
+      try {
+        const result = await window.api.scheduleYouTubeShortPublishJob(job.id, {
+          confirmSchedule: true,
+          scheduledDate: dateInput.value,
+          scheduledTime: timeInput.value,
+          existingDraftPolicy: 'resume',
+          setStudioDate: true,
+          verifyInContentTab: true,
+        });
+        if (result.success) {
+          const proof = result.proof || {};
+          statusEl.innerHTML = `<span style="color:var(--green);">Scheduled YouTube Short ${escapeHtml(proof.remoteVideoId || result.job?.remote_post_id || '')}.</span>`;
+        } else {
+          statusEl.innerHTML = `<span style="color:var(--red);">Schedule failed: ${escapeHtml(result.error || 'Unknown error')}</span>`;
+        }
+        await refreshShortsCalendar();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+      btn.textContent = 'Schedule Short';
+      updateShortsYouTubeButtons();
+    }
     async function planShortsCalendar() {
       if (!shortsProjectId) return;
       const btn = document.getElementById('btn-plan-shorts');

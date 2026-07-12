@@ -38,3 +38,5 @@ bush-girl-*.json
 
 # Setup script (one-time use)
 setup-git.bat
+.browser-profile*/
+.tmp-youtube-ui-smoke/

@@ -1957,6 +1957,164 @@ function getFutureScheduledShorts(projectId) {
   `, [projectId]);
 }
 
+function upsertShortPublishJob(job) {
+  if (!job || !job.short_id) throw new Error('short_id is required for short publish job');
+  const platform = String(job.platform || '').trim();
+  if (!platform) throw new Error('platform is required for short publish job');
+
+  const hashtagsJson = normalizePublishJobJson(job.hashtags_json ?? job.hashtags, '[]');
+  const proofJson = normalizePublishJobJson(job.proof_json ?? job.proof, null);
+  const metadataJson = normalizePublishJobJson(job.metadata_json ?? job.metadata, null);
+  const validationJson = normalizePublishJobJson(job.validation_json ?? job.validation, null);
+
+  runSql(`
+    INSERT OR IGNORE INTO short_publish_jobs (
+      short_id, platform, status, scheduled_date, scheduled_time, title,
+      description, hashtags_json, remote_post_id, remote_url,
+      upload_confirmed_at, proof_json, metadata_json, validation_json, error_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    job.short_id,
+    platform,
+    job.status || 'planned',
+    job.scheduled_date || null,
+    job.scheduled_time || null,
+    job.title || null,
+    job.description || null,
+    hashtagsJson === undefined ? '[]' : hashtagsJson,
+    job.remote_post_id || null,
+    job.remote_url || null,
+    job.upload_confirmed_at || null,
+    proofJson === undefined ? null : proofJson,
+    metadataJson === undefined ? null : metadataJson,
+    validationJson === undefined ? null : validationJson,
+    job.error_message || null,
+  ]);
+
+  const updates = {
+    status: job.status,
+    scheduled_date: job.scheduled_date,
+    scheduled_time: job.scheduled_time,
+    title: job.title,
+    description: job.description,
+    hashtags_json: hashtagsJson,
+    remote_post_id: job.remote_post_id,
+    remote_url: job.remote_url,
+    upload_confirmed_at: job.upload_confirmed_at,
+    proof_json: proofJson,
+    metadata_json: metadataJson,
+    validation_json: validationJson,
+    error_message: job.error_message,
+  };
+
+  const sets = [];
+  const vals = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    sets.push(`${key} = ?`);
+    vals.push(value);
+  }
+  if (sets.length > 0) {
+    vals.push(job.short_id, platform);
+    runSql(`
+      UPDATE short_publish_jobs
+      SET ${sets.join(', ')}, updated_at = datetime('now')
+      WHERE short_id = ? AND platform = ?
+    `, vals);
+  }
+
+  return getShortPublishJob(job.short_id, platform);
+}
+
+function updateShortPublishJob(id, fields = {}) {
+  const allowed = [
+    'status', 'scheduled_date', 'scheduled_time', 'title', 'description',
+    'hashtags_json', 'remote_post_id', 'remote_url', 'upload_confirmed_at',
+    'proof_json', 'metadata_json', 'validation_json', 'error_message',
+  ];
+  const sets = [];
+  const vals = [];
+  for (const [key, rawValue] of Object.entries(fields || {})) {
+    if (!allowed.includes(key) || rawValue === undefined) continue;
+    const value = key === 'hashtags_json'
+      ? normalizePublishJobJson(rawValue, '[]')
+      : key === 'proof_json' || key === 'metadata_json' || key === 'validation_json'
+        ? normalizePublishJobJson(rawValue, null)
+        : rawValue;
+    sets.push(`${key} = ?`);
+    vals.push(value);
+  }
+  if (sets.length === 0) return getShortPublishJobById(id);
+  sets.push(`updated_at = datetime('now')`);
+  vals.push(id);
+  runSql(`UPDATE short_publish_jobs SET ${sets.join(', ')} WHERE id = ?`, vals);
+  return getShortPublishJobById(id);
+}
+
+function getShortPublishJob(shortId, platform) {
+  return queryOne(`
+    SELECT * FROM short_publish_jobs
+    WHERE short_id = ? AND platform = ?
+  `, [shortId, platform]);
+}
+
+function getShortPublishJobById(id) {
+  return queryOne(`SELECT * FROM short_publish_jobs WHERE id = ?`, [id]);
+}
+
+function getShortPublishJobsForProject(projectId, platform = null) {
+  const params = [projectId];
+  const platformSql = platform ? ' AND spj.platform = ?' : '';
+  if (platform) params.push(platform);
+  return queryAll(`
+    SELECT spj.*, s.project_id, s.short_number, s.file_path, s.duration_seconds
+    FROM short_publish_jobs spj
+    JOIN shorts s ON s.id = spj.short_id
+    WHERE s.project_id = ?${platformSql}
+    ORDER BY spj.scheduled_date ASC, spj.scheduled_time ASC, s.short_number ASC
+  `, params);
+}
+
+function getPendingShortPublishJobs(projectId, platform, statuses = ['planned', 'ready', 'upload_failed']) {
+  const normalizedStatuses = Array.isArray(statuses) && statuses.length > 0
+    ? statuses.map(status => String(status || '').trim()).filter(Boolean)
+    : ['planned', 'ready', 'upload_failed'];
+  const placeholders = normalizedStatuses.map(() => '?').join(',');
+  return queryAll(`
+    SELECT spj.*, s.project_id, s.short_number, s.file_path, s.duration_seconds
+    FROM short_publish_jobs spj
+    JOIN shorts s ON s.id = spj.short_id
+    WHERE s.project_id = ?
+      AND spj.platform = ?
+      AND spj.status IN (${placeholders})
+    ORDER BY spj.scheduled_date ASC, spj.scheduled_time ASC, s.short_number ASC
+  `, [projectId, platform, ...normalizedStatuses]);
+}
+
+function markShortPublishJobScheduled(id, proof = {}) {
+  return updateShortPublishJob(id, {
+    status: 'scheduled',
+    remote_post_id: proof.remote_post_id,
+    remote_url: proof.remote_url,
+    upload_confirmed_at: proof.upload_confirmed_at || new Date().toISOString(),
+    proof_json: proof.proof_json ?? proof.proof,
+    error_message: null,
+  });
+}
+
+function markShortPublishJobFailed(id, errorMessage) {
+  return updateShortPublishJob(id, {
+    status: 'upload_failed',
+    error_message: errorMessage || 'Unknown short publish failure',
+  });
+}
+
+function normalizePublishJobJson(value, fallback) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return fallback;
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
 function getSocialPostsForProject(projectId) {
   return queryAll(`
     SELECT * FROM social_posts
@@ -2149,6 +2307,15 @@ module.exports = {
   getPendingSocialUploads,
   markSocialPostScheduled,
   markSocialPostFailed,
+  // Short publish jobs
+  upsertShortPublishJob,
+  updateShortPublishJob,
+  getShortPublishJob,
+  getShortPublishJobById,
+  getShortPublishJobsForProject,
+  getPendingShortPublishJobs,
+  markShortPublishJobScheduled,
+  markShortPublishJobFailed,
   // Credit tracking
   getProjectCreditUsage,
   // Migration

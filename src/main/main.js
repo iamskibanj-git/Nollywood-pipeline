@@ -19,6 +19,17 @@ if (typeof globalThis.fetch === 'undefined') {
   }
 }
 
+if (process.env.NOLLYWOOD_USER_DATA_DIR) {
+  const overrideUserDataDir = path.resolve(process.env.NOLLYWOOD_USER_DATA_DIR);
+  try {
+    require('fs').mkdirSync(overrideUserDataDir, { recursive: true });
+    app.setPath('userData', overrideUserDataDir);
+    console.log(`[INIT] Electron userData path overridden: ${overrideUserDataDir}`);
+  } catch (e) {
+    console.warn(`[INIT] Failed to apply NOLLYWOOD_USER_DATA_DIR override: ${e.message}`);
+  }
+}
+
 const store = new Store();
 let mainWindow = null;
 let pipeline = null;
@@ -292,7 +303,12 @@ ipcMain.handle('shorts:getProjects', () => getShortsController().getProjects());
 ipcMain.handle('shorts:getStatus', (_, projectId) => getShortsController().getStatus(projectId));
 ipcMain.handle('shorts:planCalendar', (_, projectId, options) => getShortsController().planCalendar(projectId, options));
 ipcMain.handle('shorts:assemble', (_, projectId) => getShortsController().assembleShorts(projectId));
-ipcMain.handle('shorts:uploadAll', (_, projectId) => getShortsController().uploadAll(projectId));
+ipcMain.handle(`shorts:uploadAll`, (_, projectId) => getShortsController().uploadAll(projectId));
+ipcMain.handle(`shorts:prepareYouTubePublishJob`, (_, shortId, options) => getShortsController().prepareYouTubePublishJob(shortId, options || {}));
+ipcMain.handle(`shorts:prepareNextYouTubePublishJob`, (_, projectId, options) => getShortsController().prepareNextYouTubePublishJob(projectId, options || {}));
+ipcMain.handle(`shorts:inspectYouTubeUploadWizard`, (_, jobId, options) => getShortsController().inspectYouTubeUploadWizard(jobId, options || {}));
+ipcMain.handle(`shorts:scheduleYouTubePublishJob`, (_, jobId, options) => getShortsController().scheduleYouTubePublishJob(jobId, options || {}));
+ipcMain.handle(`shorts:scheduleNextYouTubePublishJob`, (_, projectId, options) => getShortsController().scheduleNextYouTubePublishJob(projectId, options || {}));
 
 // Social engagement posts tab
 const { SocialPostsController } = require('./social');

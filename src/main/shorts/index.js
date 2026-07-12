@@ -20,6 +20,26 @@
 
 const { ShortsScheduler } = require('./shorts-scheduler');
 const { FacebookUploader } = require('./facebook-uploader');
+const {
+  FacebookShortPublisherAdapter,
+  YouTubeShortPublisherAdapter,
+} = require('./publish-adapters');
+const {
+  SHORT_PLATFORM_PROFILES,
+  getShortPlatformProfile,
+  normalizeShortPlatform,
+  validateShortMetadataForPlatform,
+} = require('./platform-profiles');
+const {
+  YouTubeStudioUploader,
+  extractYouTubeStudioChannelId,
+} = require('./youtube-studio-uploader');
+const {
+  buildYouTubeShortMetadata,
+  buildYouTubeHashtags,
+  prepareYouTubeShortPublishJob,
+  probeShortVideoFile,
+} = require('./youtube-job-prep');
 const path = require('path');
 const db = require('../database/db');
 
@@ -35,6 +55,10 @@ class ShortsController {
       nowProvider: options.nowProvider || (() => new Date()),
     };
     this.uploaderFactory = options.uploaderFactory || (uploaderOptions => new FacebookUploader(uploaderOptions));
+    this.publisherFactory = options.publisherFactory || (publisherOptions => new FacebookShortPublisherAdapter({
+      ...publisherOptions,
+      uploaderFactory: this.uploaderFactory,
+    }));
     this.nowProvider = options.nowProvider || (() => new Date());
     this.log = options.log || console.log;
     this.onProgress = options.onProgress || null;
@@ -230,7 +254,12 @@ class ShortsController {
     if (this.uploader) {
       await this.uploader.close();
     }
-    this.uploader = this.uploaderFactory(this.uploaderOptions);
+    this.uploader = this.publisherFactory({
+      platform: 'facebook_reels',
+      uploaderOptions: this.uploaderOptions,
+      log: this.log,
+      nowProvider: this.nowProvider,
+    });
     this._emitProgress({ phase: 'upload', status: 'logging_in', message: 'Waiting for Facebook login + 2FA...' });
     await this.uploader.launch(); // Waits for login + 2FA before returning
     this.log(`[SHORTS] Upload session started — uploading ${uploadableNow} short(s). ${deferred > 0 ? `${deferred} deferred beyond ${scheduleWindow.maxDate}.` : ''}`);
@@ -263,11 +292,13 @@ class ShortsController {
 
         const description = this._buildFullDescription(nextShort);
 
-        const result = await this.uploader.scheduleReel({
+        const result = await this.uploader.scheduleShort({
           filePath: nextShort.file_path,
           description,
           scheduledDate: nextShort.scheduled_date,
           scheduledTime: nextShort.scheduled_time,
+          status: nextShort.status,
+          short: nextShort,
         });
 
         if (result.success) {
@@ -312,6 +343,192 @@ class ShortsController {
     return { uploaded, failed, deferred, total: uploaded + failed + deferred, maxScheduleDate: scheduleWindow.maxDate };
   }
 
+  /**
+   * Prepare a YouTube Shorts publish job for a specific assembled short.
+   * This is metadata/file validation only; it never opens YouTube Studio.
+   */
+  prepareYouTubePublishJob(shortId, options = {}) {
+    const short = db.queryOne('SELECT * FROM shorts WHERE id = ?', [shortId]);
+    if (!short) throw new Error(`Short not found: ${shortId}`);
+    const project = db.queryOne('SELECT * FROM projects WHERE id = ?', [short.project_id]) || {};
+    db.backup('pre-youtube-short-job-prep');
+    return prepareYouTubeShortPublishJob(db, short, project, options);
+  }
+
+  /**
+   * Pick the next eligible short for YouTube job prep and persist its job row.
+   * Keeps existing Facebook status untouched.
+   */
+  prepareNextYouTubePublishJob(projectId, options = {}) {
+    const project = db.queryOne('SELECT * FROM projects WHERE id = ?', [projectId]);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+
+    const short = db.queryOne(`
+      SELECT s.* FROM shorts s
+      LEFT JOIN short_publish_jobs spj
+        ON spj.short_id = s.id AND spj.platform = 'youtube_shorts'
+      WHERE s.project_id = ?
+        AND s.file_path IS NOT NULL
+        AND s.status IN ('seo_done', 'scheduled', 'upload_failed')
+        AND (spj.id IS NULL OR spj.status IN ('planned', 'blocked', 'upload_failed'))
+      ORDER BY
+        CASE WHEN s.duration_seconds IS NOT NULL AND s.duration_seconds <= 60 THEN 0 ELSE 1 END,
+        s.short_number ASC
+      LIMIT 1
+    `, [projectId]);
+
+    if (!short) throw new Error(`No eligible assembled short found for YouTube job prep: ${projectId}`);
+    db.backup('pre-youtube-short-job-prep');
+    return prepareYouTubeShortPublishJob(db, short, project, options);
+  }
+
+  /**
+   * Prepare and schedule the next eligible YouTube Shorts job.
+   * Live schedule still requires confirmSchedule=true in options.
+   */
+  async scheduleNextYouTubePublishJob(projectId, options = {}) {
+    const prepared = this.prepareNextYouTubePublishJob(projectId, options.jobPrepOptions || options);
+    if (!prepared || !prepared.job || !prepared.job.id) {
+      throw new Error(`YOUTUBE_NEXT_JOB_PREP_FAILED`);
+    }
+    return this.scheduleYouTubePublishJob(prepared.job.id, options);
+  }
+
+  /**
+   * Dry-run inspect the YouTube Studio upload entry for a prepared publish job.
+   * Defaults to channel + Create entry proof only; pass { openWizard: true }
+   * to inspect the upload dialog while still stopping before file selection.
+   */
+  async inspectYouTubeUploadWizard(jobId, options = {}) {
+    const job = db.getShortPublishJobById(jobId);
+    if (!job) throw new Error(`Short publish job not found: ${jobId}`);
+    if (job.platform !== 'youtube_shorts') {
+      throw new Error(`Publish job ${jobId} is not a YouTube Shorts job`);
+    }
+    if (!['ready', 'planned', 'blocked', 'upload_failed'].includes(job.status)) {
+      throw new Error(`Publish job ${jobId} is not inspectable in status ${job.status}`);
+    }
+
+    const adapter = new YouTubeShortPublisherAdapter({
+      dashboardUrl: options.dashboardUrl,
+      userDataDir: options.userDataDir || this.uploaderOptions.userDataDir || null,
+      headless: options.headless === true,
+      loginWaitMs: options.loginWaitMs,
+      log: this.log,
+    });
+
+    try {
+      return await adapter.inspectUploadWizard({
+        ...options,
+        job,
+        openWizard: options.openWizard === true,
+      });
+    } finally {
+      await adapter.close();
+    }
+  }
+  /**
+   * Live one-short YouTube proof: upload, fill metadata, schedule, and persist
+   * proof on short_publish_jobs. This does not update legacy Facebook fields.
+   */
+  async scheduleYouTubePublishJob(jobId, options = {}) {
+    if (options.confirmSchedule !== true) {
+      throw new Error('YOUTUBE_SCHEDULE_REQUIRES_CONFIRMATION: pass confirmSchedule=true for the live e2e schedule proof.');
+    }
+
+    const job = db.queryOne(`
+      SELECT spj.*, s.file_path, s.duration_seconds, s.project_id, s.short_number
+      FROM short_publish_jobs spj
+      JOIN shorts s ON s.id = spj.short_id
+      WHERE spj.id = ?
+    `, [jobId]);
+    if (!job) throw new Error(`Short publish job not found: ${jobId}`);
+    if (job.platform !== 'youtube_shorts') throw new Error(`Publish job ${jobId} is not a YouTube Shorts job`);
+    if (!['ready', 'draft_uploaded', 'upload_failed'].includes(job.status)) {
+      throw new Error(`Publish job ${jobId} is not schedulable in status ${job.status}`);
+    }
+
+    const metadata = parseShortPublishJson(job.metadata_json, {});
+    const validation = parseShortPublishJson(job.validation_json, {});
+    const settings = metadata.settings || {};
+    const videoInfo = validation.videoInfo || {};
+    const scheduledDate = options.scheduledDate || job.scheduled_date;
+    const scheduledTime = options.scheduledTime || job.scheduled_time || settings.defaultScheduleTime || '18:00';
+    if (!scheduledDate) throw new Error('YOUTUBE_SCHEDULE_DATE_REQUIRED');
+
+    const payload = {
+      filePath: job.file_path,
+      title: options.title || job.title || metadata.title,
+      description: options.description || job.description || metadata.description,
+      scheduledDate,
+      scheduledTime,
+      madeForKids: options.madeForKids ?? settings.madeForKids ?? false,
+      aiDisclosure: options.aiDisclosure ?? settings.aiDisclosure ?? true,
+      durationSeconds: videoInfo.durationSeconds || job.duration_seconds,
+      width: videoInfo.width,
+      height: videoInfo.height,
+      validationOptions: options.validationOptions || {},
+    };
+
+    const adapter = new YouTubeShortPublisherAdapter({
+      dashboardUrl: options.dashboardUrl,
+      userDataDir: options.userDataDir || this.uploaderOptions.userDataDir || null,
+      headless: options.headless === true,
+      loginWaitMs: options.loginWaitMs,
+      log: this.log,
+    });
+
+    db.backup('pre-youtube-short-live-schedule');
+    db.updateShortPublishJob(job.id, {
+      status: 'uploading',
+      scheduled_date: scheduledDate,
+      scheduled_time: scheduledTime,
+      error_message: null,
+    });
+
+    try {
+      const result = await adapter.uploadAndScheduleShort(payload, {
+        ...options,
+        confirmDraftUpload: true,
+        confirmSchedule: true,
+        existingDraftPolicy: options.existingDraftPolicy || `resume`,
+        setStudioDate: options.setStudioDate !== false,
+        verifyInContentTab: options.verifyInContentTab !== false,
+        contentVerifyDelayMs: Number.isFinite(Number(options.contentVerifyDelayMs)) ? Number(options.contentVerifyDelayMs) : 45000,
+      });
+      const proof = {
+        ...result,
+        jobId: job.id,
+        shortId: job.short_id,
+        scheduledDate,
+        scheduledTime,
+      };
+      const updatedJob = db.updateShortPublishJob(job.id, {
+        status: 'scheduled',
+        scheduled_date: scheduledDate,
+        scheduled_time: scheduledTime,
+        remote_post_id: result.remoteVideoId || null,
+        remote_url: result.remoteUrl || null,
+        upload_confirmed_at: new Date().toISOString(),
+        proof_json: proof,
+        error_message: null,
+      });
+      return {
+        success: true,
+        job: updatedJob,
+        proof,
+      };
+    } catch (error) {
+      const failedJob = db.markShortPublishJobFailed(job.id, error.message || String(error));
+      return {
+        success: false,
+        job: failedJob,
+        error: error.message || String(error),
+      };
+    } finally {
+      await adapter.close();
+    }
+  }
   /**
    * Get status of all shorts for a project.
    */
@@ -364,7 +581,11 @@ class ShortsController {
       };
     }
 
-    return { shorts, summary, stats };
+    const youtubeJobs = typeof db.getShortPublishJobsForProject === `function`
+      ? db.getShortPublishJobsForProject(projectId)
+      : [];
+
+    return { shorts, summary, stats, youtubeJobs };
   }
 
   /**
@@ -411,4 +632,29 @@ class ShortsController {
   }
 }
 
-module.exports = { ShortsController, ShortsScheduler, FacebookUploader };
+function parseShortPublishJson(value, fallback) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return fallback;
+  }
+}
+module.exports = {
+  ShortsController,
+  ShortsScheduler,
+  FacebookUploader,
+  FacebookShortPublisherAdapter,
+  YouTubeShortPublisherAdapter,
+  YouTubeStudioUploader,
+  extractYouTubeStudioChannelId,
+  buildYouTubeShortMetadata,
+  buildYouTubeHashtags,
+  prepareYouTubeShortPublishJob,
+  probeShortVideoFile,
+  SHORT_PLATFORM_PROFILES,
+  getShortPlatformProfile,
+  normalizeShortPlatform,
+  validateShortMetadataForPlatform,
+};
