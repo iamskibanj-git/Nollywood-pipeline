@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { YOUTUBE_STUDIO_DASHBOARD_URL } = require('../shorts/platform-profiles');
 const { YouTubeStudioUploader } = require('../shorts/youtube-studio-uploader');
 
@@ -15,14 +16,42 @@ function prepareYouTubeCommunityPostJob(db, post = {}, project = {}, options = {
     throw new Error('SocialPublishJobStore with upsert() is required');
   }
 
+  const existing = typeof db.getForPost === 'function'
+    ? db.getForPost(post.id, YOUTUBE_COMMUNITY_PLATFORM)
+    : null;
+  if (existing && existing.status === 'scheduled' && existing.remote_post_id) {
+    const metadata = parseJson(existing.metadata_json, {});
+    const mediaPaths = normalizeCommunityMediaPaths(metadata.mediaPaths || existing.media_path);
+    return {
+      job: existing,
+      validation: parseJson(existing.validation_json, { ok: true, errors: [], warnings: [], hashtags: extractHashtags(existing.body || ''), mediaCount: mediaPaths.length }),
+      caption: existing.body || buildYouTubeCommunityCaption(post, project, options),
+      mediaPaths,
+      status: 'scheduled',
+      preserved: true,
+    };
+  }
+
   const caption = buildYouTubeCommunityCaption(post, project, options);
-  const mediaPaths = normalizeCommunityMediaPaths(post.media_path || options.mediaPath || options.mediaPaths);
+  const rawMediaPaths = normalizeCommunityMediaPaths(post.media_path || options.mediaPath || options.mediaPaths);
+  const mediaPrep = prepareYouTubeCommunityMediaPaths(rawMediaPaths, options.mediaOptions || {});
+  const mediaPaths = mediaPrep.mediaPaths;
+  const validationOptions = {
+    ...(options.validationOptions || {}),
+    maxImageBytes: (options.validationOptions && options.validationOptions.maxImageBytes) || mediaPrep.maxImageBytes,
+  };
   const validation = validateYouTubeCommunityPost({
     caption,
     mediaPaths,
     scheduledDate: options.scheduledDate || post.scheduled_date,
     scheduledTime: options.scheduledTime || post.scheduled_time,
-  }, options.validationOptions || {});
+  }, validationOptions);
+  if (mediaPrep.warnings.length > 0) validation.warnings.push(...mediaPrep.warnings);
+  if (mediaPrep.errors.length > 0) {
+    validation.errors.push(...mediaPrep.errors);
+    validation.ok = false;
+  }
+  if (mediaPrep.conversions.length > 0) validation.conversions = mediaPrep.conversions;
 
   const status = validation.ok ? 'ready' : 'blocked';
   const job = db.upsert({
@@ -40,6 +69,8 @@ function prepareYouTubeCommunityPostJob(db, post = {}, project = {}, options = {
       postType: post.post_type || null,
       sourceShortId: post.short_id || null,
       mediaPaths,
+      originalMediaPaths: rawMediaPaths,
+      mediaConversions: mediaPrep.conversions,
     },
     validation_json: validation,
     error_message: validation.ok ? null : validation.errors.join('; '),
@@ -48,6 +79,143 @@ function prepareYouTubeCommunityPostJob(db, post = {}, project = {}, options = {
   return { job, validation, caption, mediaPaths, status };
 }
 
+function prepareYouTubeCommunityMediaPaths(value, options = {}) {
+  const mediaPaths = normalizeCommunityMediaPaths(value);
+  const maxImageBytes = Number(options.maxImageBytes || MAX_IMAGE_BYTES);
+  const result = {
+    mediaPaths: [],
+    conversions: [],
+    warnings: [],
+    errors: [],
+    maxImageBytes,
+  };
+
+  for (const mediaPath of mediaPaths) {
+    let finalPath = mediaPath;
+    try {
+      const ext = path.extname(mediaPath).toLowerCase();
+      if (IMAGE_EXTENSIONS.has(ext) && fs.existsSync(mediaPath)) {
+        const stat = fs.statSync(mediaPath);
+        if (stat.size > maxImageBytes) {
+          const converted = ensureCommunityImageDerivative(mediaPath, { ...options, maxImageBytes });
+          finalPath = converted.path;
+          result.conversions.push(converted);
+          result.warnings.push(`Converted oversized YouTube Community image ${path.basename(mediaPath)} (${stat.size} bytes) to ${path.basename(finalPath)} (${converted.bytes} bytes)`);
+        }
+      }
+    } catch (error) {
+      result.errors.push(`YouTube Community image export failed for ${mediaPath}: ${error.message || String(error)}`);
+    }
+    result.mediaPaths.push(finalPath);
+  }
+
+  return result;
+}
+
+function ensureCommunityImageDerivative(mediaPath, options = {}) {
+  const maxImageBytes = Number(options.maxImageBytes || MAX_IMAGE_BYTES);
+  const outputPath = options.outputPath || buildCommunityDerivativePath(mediaPath, options);
+  const originalBytes = fs.statSync(mediaPath).size;
+
+  if (fs.existsSync(outputPath)) {
+    const outputStat = fs.statSync(outputPath);
+    const sourceStat = fs.statSync(mediaPath);
+    if (outputStat.size > 0 && outputStat.size <= maxImageBytes && outputStat.mtimeMs >= sourceStat.mtimeMs) {
+      return { sourcePath: mediaPath, path: outputPath, originalBytes, bytes: outputStat.size, reused: true };
+    }
+  }
+
+  if (typeof options.convertImage === 'function') {
+    const converted = options.convertImage(mediaPath, { outputPath, maxImageBytes, originalBytes });
+    const convertedPath = converted && converted.path ? converted.path : outputPath;
+    if (!fs.existsSync(convertedPath)) throw new Error(`custom converter did not create ${convertedPath}`);
+    const stat = fs.statSync(convertedPath);
+    if (stat.size <= maxImageBytes) {
+      return { sourcePath: mediaPath, path: convertedPath, originalBytes, bytes: stat.size, custom: true, ...(converted || {}) };
+    }
+    throw new Error(`custom converter output is still over ${maxImageBytes} bytes: ${convertedPath}`);
+  }
+
+  const ffmpegPath = options.ffmpegPath || findCommunityFFmpegPath();
+  if (!ffmpegPath) throw new Error('ffmpeg not found for oversized YouTube Community image export');
+
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const attempts = options.attempts || [
+    { longSide: 1920, q: 4 },
+    { longSide: 1600, q: 5 },
+    { longSide: 1440, q: 6 },
+    { longSide: 1280, q: 7 },
+    { longSide: 1080, q: 8 },
+    { longSide: 960, q: 10 },
+  ];
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      exportCommunityImageWithFFmpeg(ffmpegPath, mediaPath, outputPath, attempt);
+      const stat = fs.statSync(outputPath);
+      if (stat.size > 0 && stat.size <= maxImageBytes) {
+        return {
+          sourcePath: mediaPath,
+          path: outputPath,
+          originalBytes,
+          bytes: stat.size,
+          ffmpegPath,
+          longSide: attempt.longSide,
+          q: attempt.q,
+        };
+      }
+      lastError = new Error(`converted image remains over ${maxImageBytes} bytes (${stat.size})`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error(`failed to export ${mediaPath}`);
+}
+
+function buildCommunityDerivativePath(mediaPath) {
+  const parsed = path.parse(mediaPath);
+  const parts = path.normalize(mediaPath).split(/[\\/]+/);
+  const assetsIndex = parts.map(part => part.toLowerCase()).lastIndexOf('assets');
+  const safeName = parsed.name.replace(/[^a-z0-9_.-]+/gi, '_').slice(0, 90) || 'community-image';
+  const outputDir = assetsIndex >= 0
+    ? path.join(parts.slice(0, assetsIndex + 1).join(path.sep), 'social', 'youtube-community')
+    : path.join(parsed.dir, '.youtube-community');
+  return path.join(outputDir, `${safeName}_yt_community.jpg`);
+}
+
+function findCommunityFFmpegPath() {
+  for (const candidate of ['ffmpeg', 'C:\\ffmpeg\\bin\\ffmpeg.exe', 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe']) {
+    try {
+      execFileSync(candidate, ['-version'], { stdio: 'ignore', timeout: 5000 });
+      return candidate;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function exportCommunityImageWithFFmpeg(ffmpegPath, inputPath, outputPath, attempt = {}) {
+  const longSide = Number(attempt.longSide || 1600);
+  const q = Number(attempt.q || 5);
+  const filter = `scale='if(gt(iw,ih),${longSide},-2)':'if(gt(iw,ih),-2,${longSide})'`;
+  execFileSync(ffmpegPath, [
+    '-y',
+    '-i', inputPath,
+    '-frames:v', '1',
+    '-vf', filter,
+    '-q:v', String(q),
+    outputPath,
+  ], { stdio: 'pipe', timeout: 45000 });
+}
+
+function parseJson(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return fallback;
+  }
+}
 function buildYouTubeCommunityCaption(post = {}, project = {}, options = {}) {
   const rawBody = String(options.body || post.body || '').trim();
   const hashtags = parseHashtags(options.hashtags ?? post.hashtags)
@@ -91,6 +259,7 @@ function validateYouTubeCommunityPost(input = {}, options = {}) {
   const caption = String(input.caption || '').trim();
   const mediaPaths = normalizeCommunityMediaPaths(input.mediaPaths || input.mediaPath);
   const hashtags = extractHashtags(caption);
+  const maxImageBytes = Number(options.maxImageBytes || MAX_IMAGE_BYTES);
 
   if (!caption) errors.push('YouTube Community post caption is empty');
   if (caption.length > (options.maxCaptionChars || 1500)) {
@@ -117,8 +286,8 @@ function validateYouTubeCommunityPost(input = {}, options = {}) {
       continue;
     }
     const stat = fs.statSync(mediaPath);
-    if (stat.size > MAX_IMAGE_BYTES) {
-      errors.push(`YouTube Community image exceeds 16 MB: ${mediaPath}`);
+    if (stat.size > maxImageBytes) {
+      errors.push(`YouTube Community image exceeds ${Math.round(maxImageBytes / 1024 / 1024) || maxImageBytes} MB: ${mediaPath}`);
     }
   }
 
@@ -890,6 +1059,7 @@ module.exports = {
   YouTubeCommunityStudioUploader,
   YouTubeCommunityPostPublisher,
   prepareYouTubeCommunityPostJob,
+  prepareYouTubeCommunityMediaPaths,
   buildYouTubeCommunityCaption,
   validateYouTubeCommunityPost,
   normalizeCommunityMediaPaths,

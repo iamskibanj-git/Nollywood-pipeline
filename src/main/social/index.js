@@ -258,15 +258,18 @@ class SocialPostsController {
 
     let ready = 0;
     let blocked = 0;
+    let preserved = 0;
     const jobs = [];
     for (const post of posts) {
       const prepared = prepareYouTubeCommunityPostJob(this.socialPublishJobs, post, project, {
         scheduledDate: options.scheduledDate || post.scheduled_date,
         scheduledTime: options.scheduledTime || post.scheduled_time,
         validationOptions: options.validationOptions || {},
+        mediaOptions: options.mediaOptions || {},
       });
       jobs.push(prepared.job);
-      if (prepared.validation.ok) ready++;
+      if (prepared.status === 'ready') ready++;
+      else if (prepared.status === 'scheduled') preserved++;
       else blocked++;
     }
 
@@ -275,6 +278,7 @@ class SocialPostsController {
       prepared: jobs.length,
       ready,
       blocked,
+      preserved,
       jobs: status.youtubeCommunityJobs,
       youtubeCommunitySummary: status.youtubeCommunitySummary,
       posts: status.posts,

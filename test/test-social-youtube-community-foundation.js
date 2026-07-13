@@ -18,6 +18,7 @@ const {
   YouTubeCommunityPostPublisher,
   buildYouTubeCommunityCaption,
   prepareYouTubeCommunityPostJob,
+  prepareYouTubeCommunityMediaPaths,
   validateYouTubeCommunityPost,
 } = require('../src/main/social/youtube-community-posts');
 
@@ -107,6 +108,73 @@ function testPrepareUpsertsCommunityJob() {
   }
 }
 
+function testOversizedCommunityImageIsExported() {
+  const source = path.join(os.tmpdir(), `yt-community-large-${Date.now()}-${Math.random().toString(16).slice(2)}.png`);
+  fs.writeFileSync(source, Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(128, 1),
+  ]));
+  const written = [];
+  try {
+    const prep = prepareYouTubeCommunityMediaPaths([source], {
+      maxImageBytes: 64,
+      convertImage: (_inputPath, { outputPath }) => {
+        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+        fs.writeFileSync(outputPath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+        written.push(outputPath);
+        return { path: outputPath, strategy: 'unit-test' };
+      },
+    });
+    assert.strictEqual(prep.errors.length, 0);
+    assert.strictEqual(prep.conversions.length, 1);
+    assert.strictEqual(prep.mediaPaths.length, 1);
+    assert.notStrictEqual(prep.mediaPaths[0], source);
+    assert.strictEqual(path.extname(prep.mediaPaths[0]).toLowerCase(), '.jpg');
+    assert(fs.existsSync(prep.mediaPaths[0]));
+  } finally {
+    for (const file of [source, ...written]) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+  }
+}
+
+function testPreparePreservesScheduledCommunityJob() {
+  let upsertCalled = false;
+  const existing = {
+    id: 51,
+    social_post_id: 12,
+    platform: YOUTUBE_COMMUNITY_PLATFORM,
+    status: 'scheduled',
+    scheduled_date: '2026-07-20',
+    scheduled_time: '12:00',
+    body: 'Already scheduled. #Nollywood',
+    media_path: null,
+    metadata_json: JSON.stringify({ mediaPaths: [] }),
+    validation_json: JSON.stringify({ ok: true, errors: [], warnings: [], hashtags: ['#Nollywood'], mediaCount: 0 }),
+    remote_post_id: 'already-remote',
+    remote_url: 'https://studio.youtube.com/post/already-remote/edit',
+  };
+  const store = {
+    getForPost: () => existing,
+    upsert: () => {
+      upsertCalled = true;
+      throw new Error('scheduled job should not be upserted');
+    },
+  };
+  const result = prepareYouTubeCommunityPostJob(store, {
+    id: 12,
+    project_id: 'project-1',
+    title: 'Already scheduled source',
+    body: 'Updated source copy should not overwrite remote proof.',
+    scheduled_date: '2026-07-20',
+    scheduled_time: '12:00',
+    status: 'scheduled',
+  }, { id: 'project-1', title: 'Project' });
+  assert.strictEqual(result.preserved, true);
+  assert.strictEqual(result.status, 'scheduled');
+  assert.strictEqual(result.job.remote_post_id, 'already-remote');
+  assert.strictEqual(upsertCalled, false);
+}
 async function testPublisherRequiresScheduleConfirmation() {
   const image = makeImageFixture();
   let scheduleCalled = false;
@@ -223,6 +291,8 @@ async function main() {
   testCaptionRewriteForYouTube();
   testValidationRequiresScheduleAndImageProof();
   testPrepareUpsertsCommunityJob();
+  testOversizedCommunityImageIsExported();
+  testPreparePreservesScheduledCommunityJob();
   await testPublisherRequiresScheduleConfirmation();
   await testControllerSchedulesCommunityJobThroughPublisher();
   testImageUploaderHardeningIsPresent();
