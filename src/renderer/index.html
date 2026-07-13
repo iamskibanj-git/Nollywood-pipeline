@@ -836,6 +836,7 @@
                       <th style="padding:6px 8px;text-align:left;">Time</th>
                       <th style="padding:6px 8px;text-align:left;">Duration</th>
                       <th style="padding:6px 8px;text-align:left;">Status</th>
+                      <th style="padding:6px 8px;text-align:left;">YouTube</th>
                     </tr>
                   </thead>
                   <tbody id="shorts-calendar-body">
@@ -909,6 +910,9 @@
                 <button class="btn btn-primary" onclick="planSocialPosts()" id="btn-plan-social" style="font-size:12px;">Plan Posts</button>
                 <button class="btn btn-primary" onclick="generateSocialPosts()" id="btn-generate-social" style="font-size:12px;background:#8b5cf6;border-color:#8b5cf6;" disabled>Generate Copy</button>
                 <button class="btn btn-primary" onclick="scheduleAllSocialPosts()" id="btn-schedule-social" style="font-size:12px;background:#22c55e;border-color:#22c55e;" disabled>Schedule All</button>
+                <button class="btn btn-primary" onclick="prepareYouTubeCommunityPosts()" id="btn-prepare-youtube-community" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Prepare YouTube</button>
+                <button class="btn btn-ghost" onclick="inspectYouTubeCommunityComposer()" id="btn-inspect-youtube-community" style="font-size:12px;" disabled>Inspect YouTube UI</button>
+                <button class="btn btn-primary" onclick="scheduleAllYouTubeCommunityPosts()" id="btn-schedule-youtube-community" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Schedule YouTube</button>
               </div>
               <div id="social-progress" style="font-size:11px;color:var(--muted);"></div>
               <div id="social-stats" style="display:none;margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:6px;font-size:12px;gap:20px;flex-wrap:wrap;"></div>
@@ -929,7 +933,7 @@
                     </tr>
                   </thead>
                   <tbody id="social-posts-body">
-                    <tr><td colspan="6" style="padding:12px;color:var(--muted);text-align:center;">Select a project to see engagement posts</td></tr>
+                    <tr><td colspan="7" style="padding:12px;color:var(--muted);text-align:center;">Select a project to see engagement posts</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -3570,6 +3574,7 @@
     // SOCIAL ENGAGEMENT POSTS TAB
     let socialProjectId = null;
     let socialCurrentPosts = [];
+    let socialYoutubeCommunityJobs = [];
 
     async function openSocialTab() {
       document.getElementById('stepper').style.display = 'none';
@@ -3577,6 +3582,7 @@
       document.getElementById('social-tools').style.display = 'none';
       document.getElementById('social-progress').textContent = '';
       socialCurrentPosts = [];
+      socialYoutubeCommunityJobs = [];
       renderSocialPosts([]);
       renderSocialStats(null);
 
@@ -3628,12 +3634,15 @@
         const data = await window.api.getSocialStatus(socialProjectId);
         const posts = data.posts || [];
         socialCurrentPosts = posts;
+        socialYoutubeCommunityJobs = data.youtubeCommunityJobs || [];
         renderSocialPosts(posts);
         renderSocialStats(data.stats);
 
         const summary = data.summary || {};
         if (summary.total > 0) {
-          statusEl.textContent = `${summary.total} posts - ${summary.planned || 0} planned, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled` + ((summary.upload_failed || 0) > 0 ? `, ${summary.upload_failed} failed` : '');
+          const ytSummary = data.youtubeCommunitySummary || {};
+          const ytText = ytSummary.total ? ` - YouTube: ${ytSummary.ready || 0} ready, ${ytSummary.scheduled || 0} scheduled` : '';
+          statusEl.textContent = `${summary.total} posts - ${summary.planned || 0} planned, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled` + ((summary.upload_failed || 0) > 0 ? `, ${summary.upload_failed} failed` : '') + ytText;
         } else {
           statusEl.textContent = 'No engagement posts planned yet. Click Plan Posts after Shorts are scheduled.';
         }
@@ -3642,6 +3651,7 @@
       } catch (e) {
         statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
         socialCurrentPosts = [];
+        socialYoutubeCommunityJobs = [];
         renderSocialPosts([]);
         renderSocialStats(null);
         updateSocialActionButtons();
@@ -3662,6 +3672,10 @@
       const planned = rows.filter(p => p.status === 'planned').length;
       const ready = rows.filter(p => p.status === 'content_done' || p.status === 'upload_failed').length;
       const scheduled = rows.filter(p => p.status === 'scheduled').length;
+      const rowIds = new Set(rows.map(p => Number(p.id)));
+      const ytRows = socialYoutubeCommunityJobs.filter(job => rowIds.has(Number(job.social_post_id)));
+      const youtubeReady = ytRows.filter(job => job.status === 'ready' || job.status === 'upload_failed').length;
+      const youtubePrepared = ytRows.length;
       const allRowsScheduled = rows.length > 0 && planned === 0 && ready === 0 && scheduled === rows.length;
       const targetComplete = !!targetDate && allRowsScheduled;
       const allFutureComplete = !targetDate && scope === 'all_future' && allRowsScheduled;
@@ -3670,13 +3684,16 @@
         ? `All ${scheduled} posts for ${targetDate} are already scheduled.`
         : (allFutureComplete ? `All ${scheduled} future engagement posts are already scheduled.` : '');
 
-      return { targetDate, scope, rows, planned, ready, scheduled, complete, completeMessage };
+      return { targetDate, scope, rows, planned, ready, scheduled, youtubeReady, youtubePrepared, complete, completeMessage };
     }
 
     function updateSocialActionButtons() {
       const planBtn = document.getElementById('btn-plan-social');
       const generateBtn = document.getElementById('btn-generate-social');
       const scheduleBtn = document.getElementById('btn-schedule-social');
+      const prepareYouTubeBtn = document.getElementById('btn-prepare-youtube-community');
+      const inspectYouTubeBtn = document.getElementById('btn-inspect-youtube-community');
+      const scheduleYouTubeBtn = document.getElementById('btn-schedule-youtube-community');
       const progressEl = document.getElementById('social-progress');
       if (!planBtn || !generateBtn || !scheduleBtn) return;
 
@@ -3687,6 +3704,18 @@
       generateBtn.title = state.planned > 0 ? '' : (state.complete ? state.completeMessage : 'Plan posts first');
       scheduleBtn.disabled = state.ready === 0;
       scheduleBtn.title = state.ready > 0 ? '' : (state.complete ? state.completeMessage : 'Generate copy first');
+      if (prepareYouTubeBtn) {
+        prepareYouTubeBtn.disabled = state.ready === 0 && state.scheduled === 0;
+        prepareYouTubeBtn.title = !prepareYouTubeBtn.disabled ? 'Prepare generated engagement posts for YouTube Community scheduling' : 'Generate copy first';
+      }
+      if (inspectYouTubeBtn) {
+        inspectYouTubeBtn.disabled = !socialProjectId;
+        inspectYouTubeBtn.title = socialProjectId ? 'Explore YouTube Community composer UI' : 'Select a project first';
+      }
+      if (scheduleYouTubeBtn) {
+        scheduleYouTubeBtn.disabled = state.youtubeReady === 0;
+        scheduleYouTubeBtn.title = state.youtubeReady > 0 ? 'Schedule prepared YouTube Community posts' : 'Prepare YouTube posts first';
+      }
 
       if (state.complete && progressEl) {
         progressEl.innerHTML = `<span style="color:var(--green);">${escapeHtml(state.completeMessage)}</span>`;
@@ -3697,7 +3726,7 @@
       const tbody = document.getElementById('social-posts-body');
       if (!tbody) return;
       if (!posts || posts.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="padding:12px;color:var(--muted);text-align:center;">No engagement posts planned</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="padding:12px;color:var(--muted);text-align:center;">No engagement posts planned</td></tr>';
         return;
       }
 
@@ -3709,10 +3738,14 @@
       const statusColors = {
         planned: 'var(--muted)',
         content_done: 'var(--accent)',
+        ready: 'var(--accent)',
+        blocked: 'var(--yellow)',
+        scheduling: 'var(--yellow)',
         scheduled: 'var(--green)',
         upload_failed: 'var(--red)',
         skipped: 'var(--yellow)',
       };
+      const ytByPostId = new Map((socialYoutubeCommunityJobs || []).map(job => [Number(job.social_post_id), job]));
 
       tbody.innerHTML = '';
       posts.forEach(p => {
@@ -3720,6 +3753,8 @@
           ? (p.source_character_element_name || p.source_character_id || '-')
           : (p.short_id ? `short #${p.short_id}` : '-');
         const mediaName = p.media_path ? p.media_path.split(/[\\/]/).pop() : 'missing';
+        const ytJob = ytByPostId.get(Number(p.id));
+        const ytText = ytJob ? (ytJob.remote_post_id ? `${ytJob.status} ${ytJob.remote_post_id}` : ytJob.status) : '-';
         const tr = document.createElement('tr');
         tr.style.borderBottom = '1px solid var(--border)';
         tr.innerHTML = `
@@ -3729,6 +3764,7 @@
           <td style="padding:5px 8px;color:var(--muted);">${escapeHtml(source)}</td>
           <td style="padding:5px 8px;color:${p.media_path ? 'var(--text)' : 'var(--red)'};" title="${escapeHtml(p.media_path || p.error_message || '')}">${escapeHtml(mediaName)}</td>
           <td style="padding:5px 8px;color:${statusColors[p.status] || 'var(--muted)'}">${escapeHtml(p.status || 'planned')}</td>
+          <td style="padding:5px 8px;color:${statusColors[ytJob?.status] || 'var(--muted)'}" title="${escapeHtml(ytJob?.error_message || ytJob?.remote_url || '')}">${escapeHtml(ytText)}</td>
         `;
         tbody.appendChild(tr);
       });
@@ -3802,6 +3838,79 @@
 
       btn.disabled = false;
       btn.textContent = 'Generate Copy';
+    }
+
+    async function prepareYouTubeCommunityPosts() {
+      if (!socialProjectId) return;
+      const btn = document.getElementById('btn-prepare-youtube-community');
+      const progressEl = document.getElementById('social-progress');
+      btn.disabled = true;
+      btn.textContent = 'Preparing...';
+      progressEl.textContent = 'Preparing generated engagement posts for YouTube Community scheduling...';
+
+      try {
+        const targetDate = document.getElementById('social-target-date')?.value || '';
+        const result = await window.api.prepareYouTubeCommunityPosts(socialProjectId, { targetDate });
+        const color = result.blocked > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Prepared ${result.prepared} YouTube Community job${result.prepared === 1 ? '' : 's'}: ${result.ready} ready${result.blocked > 0 ? `, ${result.blocked} blocked` : ''}.</span>`;
+        socialYoutubeCommunityJobs = result.jobs || [];
+        renderSocialPosts(result.posts || socialCurrentPosts);
+        await refreshSocialPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">YouTube prep error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Prepare YouTube';
+      updateSocialActionButtons();
+    }
+
+    async function inspectYouTubeCommunityComposer() {
+      const btn = document.getElementById('btn-inspect-youtube-community');
+      const progressEl = document.getElementById('social-progress');
+      btn.disabled = true;
+      btn.textContent = 'Inspecting...';
+      progressEl.textContent = 'Opening YouTube Studio Community post composer for UI exploration...';
+
+      try {
+        const result = await window.api.inspectYouTubeCommunityComposer({ openComposer: true, closeComposer: true });
+        const color = result.success ? 'var(--green)' : 'var(--yellow)';
+        progressEl.innerHTML = `<span style="color:${color};">YouTube Community UI inspection ${result.success ? 'completed' : 'blocked'}${result.error ? `: ${escapeHtml(result.error)}` : ''}.</span>`;
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">YouTube UI inspection error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Inspect YouTube UI';
+      updateSocialActionButtons();
+    }
+
+    async function scheduleAllYouTubeCommunityPosts() {
+      if (!socialProjectId) return;
+      const btn = document.getElementById('btn-schedule-youtube-community');
+      const progressEl = document.getElementById('social-progress');
+      const targetDate = document.getElementById('social-target-date')?.value || '';
+      const confirmed = window.confirm(`This will open YouTube Studio and schedule prepared Community post${targetDate ? `s for ${targetDate}` : 's'} only. Continue?`);
+      if (!confirmed) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Scheduling...';
+      progressEl.textContent = 'Launching YouTube Studio and scheduling Community posts...';
+
+      try {
+        const result = await window.api.scheduleAllYouTubeCommunityPosts(socialProjectId, { targetDate, confirmSchedule: true });
+        const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
+        progressEl.innerHTML = `<span style="color:${color};">Scheduled ${result.uploaded} YouTube Community post${result.uploaded === 1 ? '' : 's'}${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
+        socialYoutubeCommunityJobs = result.jobs || [];
+        renderSocialPosts(result.posts || socialCurrentPosts);
+        await refreshSocialPosts();
+      } catch (e) {
+        progressEl.innerHTML = `<span style="color:var(--red);">YouTube schedule error: ${escapeHtml(e.message)}</span>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Schedule YouTube';
+      updateSocialActionButtons();
     }
 
     async function scheduleAllSocialPosts() {

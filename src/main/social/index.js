@@ -1,6 +1,13 @@
 const { SocialPlanner } = require('./social-planner');
 const { SocialCopyGenerator } = require('./social-copy-generator');
 const { SocialFacebookUploader } = require('./social-facebook-uploader');
+const { SocialPublishJobStore } = require('./social-publish-jobs');
+const {
+  YOUTUBE_COMMUNITY_PLATFORM,
+  YouTubeCommunityPostPublisher,
+  prepareYouTubeCommunityPostJob,
+  normalizeCommunityMediaPaths,
+} = require('./youtube-community-posts');
 
 const ENGAGEMENT_POST_TYPES = new Set(['character_intro', 'pre_short_teaser', 'post_short_recap']);
 
@@ -22,6 +29,15 @@ class SocialPostsController {
       onStepComplete: (step) => this._emitProgress({ phase: 'upload', status: 'step', step }),
     };
     this.uploaderFactory = options.uploaderFactory || ((uploaderOptions) => new SocialFacebookUploader(uploaderOptions));
+    this.socialPublishJobs = options.socialPublishJobs || new SocialPublishJobStore(db);
+    this.youtubeCommunityPublisherFactory = options.youtubeCommunityPublisherFactory || (publisherOptions => new YouTubeCommunityPostPublisher(publisherOptions));
+    this.youtubeOptions = {
+      userDataDir: options.userDataDir || null,
+      headless: false,
+      dashboardUrl: options.youtubeDashboardUrl,
+      loginWaitMs: options.youtubeLoginWaitMs,
+      log: this.log,
+    };
   }
 
   getProjects() {
@@ -29,7 +45,10 @@ class SocialPostsController {
   }
 
   getStatus(projectId) {
-    return this.planner.getStatus(projectId);
+    const status = this.planner.getStatus(projectId);
+    status.youtubeCommunityJobs = this.socialPublishJobs.listForProject(projectId, YOUTUBE_COMMUNITY_PLATFORM);
+    status.youtubeCommunitySummary = this._summarizePublishJobs(status.youtubeCommunityJobs);
+    return status;
   }
 
   plan(projectId, options = {}) {
@@ -226,6 +245,142 @@ class SocialPostsController {
     return { uploaded, failed, deferred, total: uploaded + failed + deferred, maxScheduleDate: scheduleWindow.maxDate, posts: status.posts, summary: status.summary, stats: status.stats };
   }
 
+  prepareYouTubeCommunityPosts(projectId, options = {}) {
+    const targetDate = this._normalizeDate(options.targetDate);
+    this.db.backup('pre-youtube-community-post-prep');
+    const project = this.db.getProject(projectId);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+
+    const posts = this.db.getSocialPostsForProject(projectId)
+      .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type))
+      .filter(p => p.status === 'content_done' || p.status === 'upload_failed' || p.status === 'scheduled')
+      .filter(p => !targetDate || p.scheduled_date === targetDate);
+
+    let ready = 0;
+    let blocked = 0;
+    const jobs = [];
+    for (const post of posts) {
+      const prepared = prepareYouTubeCommunityPostJob(this.socialPublishJobs, post, project, {
+        scheduledDate: options.scheduledDate || post.scheduled_date,
+        scheduledTime: options.scheduledTime || post.scheduled_time,
+        validationOptions: options.validationOptions || {},
+      });
+      jobs.push(prepared.job);
+      if (prepared.validation.ok) ready++;
+      else blocked++;
+    }
+
+    const status = this.getStatus(projectId);
+    return {
+      prepared: jobs.length,
+      ready,
+      blocked,
+      jobs: status.youtubeCommunityJobs,
+      youtubeCommunitySummary: status.youtubeCommunitySummary,
+      posts: status.posts,
+      summary: status.summary,
+      stats: status.stats,
+    };
+  }
+
+  async inspectYouTubeCommunityComposer(options = {}) {
+    const publisher = this.youtubeCommunityPublisherFactory(this.youtubeOptions);
+    try {
+      return await publisher.inspectComposer({
+        openComposer: options.openComposer === true,
+        closeComposer: options.closeComposer !== false,
+      });
+    } finally {
+      if (publisher && typeof publisher.close === 'function') await publisher.close();
+    }
+  }
+
+  async scheduleYouTubeCommunityPostJob(jobId, options = {}) {
+    if (options.confirmSchedule !== true) {
+      throw new Error('YOUTUBE_COMMUNITY_SCHEDULE_REQUIRES_CONFIRMATION: pass confirmSchedule=true for the live schedule-only proof.');
+    }
+    const job = this.socialPublishJobs.getById(jobId);
+    if (!job) throw new Error(`Social publish job not found: ${jobId}`);
+    if (job.platform !== YOUTUBE_COMMUNITY_PLATFORM) throw new Error(`Publish job ${jobId} is not a YouTube Community job`);
+    if (job.status !== 'ready' && job.status !== 'upload_failed') {
+      throw new Error(`YOUTUBE_COMMUNITY_JOB_NOT_READY: job ${jobId} status is ${job.status}`);
+    }
+
+    const scheduledDate = options.scheduledDate || job.scheduled_date;
+    const scheduledTime = options.scheduledTime || job.scheduled_time || '12:00';
+    if (!scheduledDate) throw new Error('YOUTUBE_COMMUNITY_SCHEDULE_DATE_REQUIRED');
+
+    this.db.backup('pre-youtube-community-post-schedule');
+    this.socialPublishJobs.update(job.id, {
+      status: 'scheduling',
+      scheduled_date: scheduledDate,
+      scheduled_time: scheduledTime,
+      error_message: null,
+    });
+
+    const metadata = this._parseJson(job.metadata_json, {});
+    const mediaPaths = normalizeCommunityMediaPaths(metadata.mediaPaths || job.media_path);
+    const publisher = this.youtubeCommunityPublisherFactory(this.youtubeOptions);
+    try {
+      const result = await publisher.schedulePost({
+        caption: job.body,
+        mediaPaths,
+        scheduledDate,
+        scheduledTime,
+        validationOptions: options.validationOptions || {},
+      }, {
+        ...options,
+        confirmSchedule: true,
+      });
+
+      const proof = {
+        remote_post_id: result.remotePostId || result.remote_post_id || null,
+        remote_url: result.remoteUrl || result.remote_url || null,
+        upload_confirmed_at: new Date().toISOString(),
+        proof: result,
+      };
+      const updatedJob = this.socialPublishJobs.markScheduled(job.id, proof);
+      return { success: true, job: updatedJob, proof: result };
+    } catch (error) {
+      const failedJob = this.socialPublishJobs.markFailed(job.id, error.message || String(error));
+      return { success: false, job: failedJob, error: error.message || String(error) };
+    } finally {
+      if (publisher && typeof publisher.close === 'function') await publisher.close();
+    }
+  }
+
+  async scheduleAllYouTubeCommunityPosts(projectId, options = {}) {
+    if (options.confirmSchedule !== true) {
+      throw new Error('YOUTUBE_COMMUNITY_SCHEDULE_REQUIRES_CONFIRMATION: pass confirmSchedule=true for live schedule-only proof.');
+    }
+    const targetDate = this._normalizeDate(options.targetDate);
+    const jobs = this.socialPublishJobs.getPending(projectId, YOUTUBE_COMMUNITY_PLATFORM, ['ready', 'upload_failed'])
+      .filter(job => !targetDate || job.scheduled_date === targetDate);
+
+    let uploaded = 0;
+    let failed = 0;
+    const results = [];
+    for (const job of jobs) {
+      const result = await this.scheduleYouTubeCommunityPostJob(job.id, options);
+      results.push(result);
+      if (result.success) uploaded++;
+      else failed++;
+    }
+
+    const status = this.getStatus(projectId);
+    return {
+      uploaded,
+      failed,
+      total: jobs.length,
+      results,
+      jobs: status.youtubeCommunityJobs,
+      youtubeCommunitySummary: status.youtubeCommunitySummary,
+      posts: status.posts,
+      summary: status.summary,
+      stats: status.stats,
+    };
+  }
+
   async closeUploadSession() {
     if (this.uploader) {
       await this.uploader.close();
@@ -277,6 +432,15 @@ class SocialPostsController {
   _normalizeDate(value) {
     const text = String(value || '').trim();
     return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+  }
+
+  _summarizePublishJobs(jobs = []) {
+    const summary = { total: jobs.length };
+    for (const job of jobs) {
+      const status = job.status || 'unknown';
+      summary[status] = (summary[status] || 0) + 1;
+    }
+    return summary;
   }
 
   _buildCaption(post) {

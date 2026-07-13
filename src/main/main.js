@@ -334,6 +334,10 @@ ipcMain.handle('social:getStatus', (_, projectId) => getSocialPostsController().
 ipcMain.handle('social:plan', (_, projectId, options) => getSocialPostsController().plan(projectId, options || {}));
 ipcMain.handle('social:generate', (_, projectId, options) => getSocialPostsController().generate(projectId, options || {}));
 ipcMain.handle('social:scheduleAll', (_, projectId, options) => getSocialPostsController().scheduleAll(projectId, options || {}));
+ipcMain.handle('social:prepareYouTubeCommunity', (_, projectId, options) => getSocialPostsController().prepareYouTubeCommunityPosts(projectId, options || {}));
+ipcMain.handle('social:inspectYouTubeCommunityComposer', (_, options) => getSocialPostsController().inspectYouTubeCommunityComposer(options || {}));
+ipcMain.handle('social:scheduleYouTubeCommunityJob', (_, jobId, options) => getSocialPostsController().scheduleYouTubeCommunityPostJob(jobId, options || {}));
+ipcMain.handle('social:scheduleAllYouTubeCommunity', (_, projectId, options) => getSocialPostsController().scheduleAllYouTubeCommunityPosts(projectId, options || {}));
 
 // Standalone promo character spotlights
 const { PromoController } = require('./promo');

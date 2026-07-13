@@ -98,6 +98,10 @@ contextBridge.exposeInMainWorld('api', {
   planSocialPosts: (projectId, options) => ipcRenderer.invoke('social:plan', projectId, options || {}),
   generateSocialPosts: (projectId, options) => ipcRenderer.invoke('social:generate', projectId, options || {}),
   scheduleAllSocialPosts: (projectId, options) => ipcRenderer.invoke('social:scheduleAll', projectId, options || {}),
+  prepareYouTubeCommunityPosts: (projectId, options) => ipcRenderer.invoke('social:prepareYouTubeCommunity', projectId, options || {}),
+  inspectYouTubeCommunityComposer: (options) => ipcRenderer.invoke('social:inspectYouTubeCommunityComposer', options || {}),
+  scheduleYouTubeCommunityPostJob: (jobId, options) => ipcRenderer.invoke('social:scheduleYouTubeCommunityJob', jobId, options || {}),
+  scheduleAllYouTubeCommunityPosts: (projectId, options) => ipcRenderer.invoke('social:scheduleAllYouTubeCommunity', projectId, options || {}),
 
   // Standalone promo character spotlights
   getPromoProjects: () => ipcRenderer.invoke('promo:getProjects'),
