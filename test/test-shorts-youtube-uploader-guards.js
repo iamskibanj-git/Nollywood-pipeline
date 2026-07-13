@@ -86,6 +86,59 @@ async function testInvalidTimeBlocksFinalScheduleClick() {
   );
 }
 
+
+async function testDeleteRequiresConfirmation() {
+  const uploader = makeUploader();
+
+  await assert.rejects(
+    () => uploader.deleteShortByRemoteId({ remoteVideoId: 'uQGmdxd0TeM' }, {}),
+    /YOUTUBE_DELETE_REQUIRES_CONFIRMATION/
+  );
+}
+
+async function testDeleteRequiresExactlyOneRemoteRow() {
+  const uploader = makeUploader();
+  uploader._readShortsContentRowsByRemoteId = async () => ({
+    matchCount: 2,
+    matches: [{ thumbnailIds: ['uQGmdxd0TeM'] }, { thumbnailIds: ['uQGmdxd0TeM'] }],
+  });
+
+  await assert.rejects(
+    () => uploader.deleteShortByRemoteId(
+      { remoteVideoId: 'uQGmdxd0TeM' },
+      { confirmDelete: true }
+    ),
+    /YOUTUBE_DELETE_REMOTE_ROW_MATCH_FAILED/
+  );
+}
+
+async function testDeleteVerifiesRemoteRowDisappears() {
+  const uploader = makeUploader();
+  const reads = [
+    { matchCount: 1, matches: [{ thumbnailIds: ['uQGmdxd0TeM'], text: 'Scheduled row' }] },
+    { matchCount: 0, matches: [], bodySample: 'No content available' },
+  ];
+  uploader._readShortsContentRowsByRemoteId = async remoteVideoId => ({
+    remoteVideoId,
+    ...reads.shift(),
+  });
+  uploader._openShortRowOptionsByRemoteId = async remoteVideoId => ({ remoteVideoId, opened: true });
+  uploader._clickShortRowDeleteMenuItem = async () => ({ clicked: true });
+  uploader._readShortDeleteDialogProof = async () => ({ visible: true, dialogs: [{ text: 'Permanently delete this video?' }] });
+  uploader._confirmDeleteForever = async () => ({ clicked: true, checkboxClicked: true });
+
+  const result = await uploader.deleteShortByRemoteId(
+    { remoteVideoId: 'uQGmdxd0TeM' },
+    { confirmDelete: true }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.deleted, true);
+  assert.strictEqual(result.remoteVideoId, 'uQGmdxd0TeM');
+  assert.strictEqual(result.before.matchCount, 1);
+  assert.strictEqual(result.after.matchCount, 0);
+}
+
 async function testUploadSurfaceConfirmationDoesNotWriteProofByDefault() {
   const uploader = makeUploader({
     url: 'https://studio.youtube.com/video/PvmGLH0nw-8/edit',
@@ -180,6 +233,9 @@ async function main() {
   await testInvalidTimeBlocksFinalScheduleClick();
   await testUploadSurfaceConfirmationDoesNotWriteProofByDefault();
   await testShortsContentRowIsRequiredForScheduleProof();
+  await testDeleteRequiresConfirmation();
+  await testDeleteRequiresExactlyOneRemoteRow();
+  await testDeleteVerifiesRemoteRowDisappears();
   console.log('test-shorts-youtube-uploader-guards passed');
 }
 

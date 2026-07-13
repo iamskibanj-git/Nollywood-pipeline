@@ -188,6 +188,27 @@ class YouTubeShortPublisherAdapter extends ShortPublisherAdapter {
       validation,
     };
   }
+  async deleteShort(payload = {}, options = {}) {
+    if (options.confirmDelete !== true) {
+      throw new Error('YOUTUBE_DELETE_REQUIRES_CONFIRMATION: pass confirmDelete=true for the permanent YouTube Studio delete action.');
+    }
+
+    this.studioUploader = this.studioUploaderFactory({
+      userDataDir: this.userDataDir,
+      headless: this.headless,
+      dashboardUrl: this.dashboardUrl,
+      loginWaitMs: this.loginWaitMs,
+      log: this.log,
+    });
+    await this.studioUploader.launch();
+    if (typeof this.studioUploader.deleteShortByRemoteId !== 'function') {
+      throw new Error('YOUTUBE_DELETE_SHORT_NOT_AVAILABLE');
+    }
+    const result = await this.studioUploader.deleteShortByRemoteId(payload, options);
+    this.channelProof = result.channelProof || null;
+    return result;
+  }
+
   async close() {
     if (this.studioUploader && typeof this.studioUploader.close === 'function') {
       await this.studioUploader.close();

@@ -226,6 +226,199 @@ class YouTubeStudioUploader {
     };
   }
 
+
+  async deleteShortByRemoteId(payload = {}, options = {}) {
+    if (options.confirmDelete !== true) {
+      throw new Error('YOUTUBE_DELETE_REQUIRES_CONFIRMATION: pass confirmDelete=true for the permanent YouTube Studio delete action.');
+    }
+    const remoteVideoId = String(payload.remoteVideoId || payload.remote_post_id || '').trim();
+    if (!remoteVideoId) throw new Error('YOUTUBE_DELETE_REMOTE_ID_REQUIRED');
+
+    if (!this.page) {
+      await this.launch();
+    } else if (!this.channelProof || !this.channelProof.verified) {
+      await this.verifyChannelContext();
+    }
+
+    const before = await this._readShortsContentRowsByRemoteId(remoteVideoId, options);
+    if (before.matchCount !== 1) {
+      throw new Error(`YOUTUBE_DELETE_REMOTE_ROW_MATCH_FAILED: ${JSON.stringify({ remoteVideoId, matchCount: before.matchCount, matches: before.matches })}`);
+    }
+
+    const menuProof = await this._openShortRowOptionsByRemoteId(remoteVideoId, options);
+    const deleteMenuProof = await this._clickShortRowDeleteMenuItem(options);
+    if (!deleteMenuProof.clicked) {
+      throw new Error(`YOUTUBE_DELETE_MENU_ITEM_NOT_CLICKED: ${JSON.stringify(deleteMenuProof)}`);
+    }
+
+    const dialogProof = await this._readShortDeleteDialogProof();
+    if (!dialogProof.visible) {
+      throw new Error(`YOUTUBE_DELETE_CONFIRMATION_DIALOG_NOT_FOUND: ${JSON.stringify(dialogProof)}`);
+    }
+
+    const confirmationProof = await this._confirmDeleteForever(options);
+    await safeWait(this.page, options.afterDeleteWaitMs || 6000);
+
+    const after = await this._readShortsContentRowsByRemoteId(remoteVideoId, {
+      ...options,
+      contentSettleMs: options.afterDeleteContentSettleMs || options.contentSettleMs || 7000,
+    });
+    if (after.matchCount !== 0) {
+      throw new Error(`YOUTUBE_DELETE_VERIFICATION_FAILED: ${JSON.stringify({ remoteVideoId, matchCount: after.matchCount, matches: after.matches })}`);
+    }
+
+    return {
+      success: true,
+      deleted: true,
+      remoteVideoId,
+      dashboardUrl: this.dashboardUrl,
+      channelProof: this.channelProof,
+      before,
+      menuProof,
+      deleteMenuProof,
+      dialogProof,
+      confirmationProof,
+      after,
+      proofCheckedAt: new Date().toISOString(),
+    };
+  }
+
+  async _readShortsContentRowsByRemoteId(remoteVideoId, options = {}) {
+    const id = String(remoteVideoId || '').trim();
+    if (!id) return { remoteVideoId: id, matchCount: 0, matches: [], skipped: true, reason: 'empty-remote-id' };
+    const shortsUrl = this._shortsContentUrl();
+    if (options.navigate !== false) {
+      await this.page.goto(shortsUrl, { waitUntil: 'domcontentloaded', timeout: this.navigationTimeoutMs });
+    }
+    await safeWait(this.page, options.contentSettleMs || 7000);
+    const proof = await this.page.evaluate(videoId => {
+      const rows = Array.from(document.querySelectorAll('ytcp-video-row'))
+        .map((row, index) => {
+          const text = (row.innerText || row.textContent || '').trim();
+          const hrefs = Array.from(row.querySelectorAll('a[href]')).map(a => a.href);
+          const imageSrcs = Array.from(row.querySelectorAll('img[src]')).map(img => img.src);
+          const thumbnailIds = imageSrcs
+            .map(src => String(src || '').match(/\/vi\/([^/?]+)/))
+            .filter(Boolean)
+            .map(match => match[1]);
+          const exactHref = hrefs.some(href => String(href || '').includes(videoId));
+          const exactImage = imageSrcs.some(src => String(src || '').includes(videoId));
+          const exactThumb = thumbnailIds.includes(videoId);
+          const textMatch = text.includes(videoId);
+          const matches = exactHref || exactImage || exactThumb || textMatch;
+          return matches ? { index, text, hrefs, thumbnailIds, exactHref, exactImage, exactThumb, textMatch } : null;
+        })
+        .filter(Boolean);
+      return {
+        finalUrl: location.href,
+        title: document.title,
+        bodyHasTargetId: (document.body?.innerText || '').includes(videoId),
+        bodySample: (document.body?.innerText || '').slice(0, 1200),
+        matches: rows,
+      };
+    }, id);
+    return { ...proof, shortsUrl, remoteVideoId: id, matchCount: proof.matches.length };
+  }
+
+  async _findShortContentRowByRemoteId(remoteVideoId) {
+    const id = String(remoteVideoId || '').trim();
+    if (!id || !this.page || !this.page.locator) return null;
+    const rows = await this.page.locator('ytcp-video-row').all();
+    for (const row of rows) {
+      const hit = await row.evaluate((el, videoId) => {
+        const text = (el.innerText || el.textContent || '');
+        const hrefs = Array.from(el.querySelectorAll('a[href]')).map(a => a.href || '');
+        const imgs = Array.from(el.querySelectorAll('img[src]')).map(img => img.src || '');
+        return text.includes(videoId) || hrefs.some(href => href.includes(videoId)) || imgs.some(src => src.includes(videoId));
+      }, id).catch(() => false);
+      if (hit) return row;
+    }
+    return null;
+  }
+
+  async _openShortRowOptionsByRemoteId(remoteVideoId, options = {}) {
+    const row = await this._findShortContentRowByRemoteId(remoteVideoId);
+    if (!row) throw new Error(`YOUTUBE_DELETE_REMOTE_ROW_HANDLE_NOT_FOUND: ${remoteVideoId}`);
+    await row.scrollIntoViewIfNeeded().catch(() => {});
+    await row.hover().catch(() => {});
+    const optionsButton = row.locator('ytcp-icon-button[aria-label="Options"], [aria-label="Options"], button[aria-label="Options"]').first();
+    await optionsButton.click({ timeout: options.menuClickTimeoutMs || 15000, force: true });
+    await safeWait(this.page, options.menuWaitMs || 1000);
+    return this._readShortRowMenuProof();
+  }
+
+  async _readShortRowMenuProof() {
+    return await this.page.evaluate(() => Array.from(document.querySelectorAll('tp-yt-paper-listbox, tp-yt-paper-item, ytcp-menu-service-item-renderer, ytd-menu-service-item-renderer, [role="menu"], [role="menuitem"]'))
+      .map((el, index) => ({
+        index,
+        tag: el.tagName,
+        role: el.getAttribute('role'),
+        text: (el.innerText || el.textContent || '').trim(),
+        visible: Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+      }))
+      .filter(item => /delete|edit|analytics|menu|download|shareable/i.test(item.text) || /menu/i.test(item.role || '')));
+  }
+
+  async _clickShortRowDeleteMenuItem(options = {}) {
+    const selector = 'tp-yt-paper-listbox [role="menuitem"], tp-yt-paper-item, ytcp-menu-service-item-renderer, ytd-menu-service-item-renderer, [role="menuitem"]';
+    const item = this.page.locator(selector).filter({ hasText: /Delete forever|Delete video|Delete/i }).last();
+    const count = await item.count().catch(() => 0);
+    if (count < 1) return { clicked: false, reason: 'delete-menu-item-not-found' };
+    await item.click({ timeout: options.deleteMenuTimeoutMs || 15000, force: true });
+    await safeWait(this.page, options.dialogWaitMs || 1500);
+    return { clicked: true, matchedCount: count };
+  }
+
+  async _readShortDeleteDialogProof() {
+    const dialogs = await this.page.evaluate(() => Array.from(document.querySelectorAll('[role="dialog"], ytcp-confirmation-dialog, tp-yt-paper-dialog, ytcp-dialog'))
+      .map((dialog, index) => ({
+        index,
+        tag: dialog.tagName,
+        text: (dialog.innerText || dialog.textContent || '').trim(),
+        controls: Array.from(dialog.querySelectorAll('button, tp-yt-paper-button, ytcp-button, [role="button"], [role="checkbox"], input, ytcp-checkbox-lit'))
+          .map((el, controlIndex) => ({
+            controlIndex,
+            tag: el.tagName,
+            role: el.getAttribute('role'),
+            type: el.getAttribute('type'),
+            ariaLabel: el.getAttribute('aria-label'),
+            text: (el.innerText || el.textContent || '').trim(),
+            disabled: el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true',
+            checked: el.getAttribute('aria-checked') || el.checked || null,
+          })),
+      })));
+    return {
+      visible: dialogs.some(dialog => /Permanently delete|Delete forever|I understand that deleting/i.test(dialog.text)),
+      dialogs,
+    };
+  }
+
+  async _confirmDeleteForever(options = {}) {
+    const dialog = this.page.locator('[role="dialog"], ytcp-confirmation-dialog, tp-yt-paper-dialog, ytcp-dialog').filter({ hasText: /delete/i }).last();
+    const checkbox = dialog.locator('[role="checkbox"], ytcp-checkbox-lit, input[type="checkbox"]').first();
+    let checkboxClicked = false;
+    if (await checkbox.count().catch(() => 0)) {
+      await checkbox.click({ timeout: options.checkboxTimeoutMs || 7000, force: true }).catch(async () => {
+        if (this.page.keyboard && typeof this.page.keyboard.press === 'function') {
+          await this.page.keyboard.press('Space').catch(() => {});
+        }
+      });
+      checkboxClicked = true;
+      await safeWait(this.page, options.afterCheckboxWaitMs || 750);
+    }
+
+    const deleteButton = dialog.locator('button, tp-yt-paper-button, ytcp-button, [role="button"]')
+      .filter({ hasText: /Delete forever|Delete video|Delete/i })
+      .last();
+    if (await deleteButton.count().catch(() => 0)) {
+      await deleteButton.click({ timeout: options.finalDeleteTimeoutMs || 15000, force: true });
+      return { clicked: true, checkboxClicked };
+    }
+
+    await this.page.getByRole('button', { name: /Delete forever|Delete video|Delete/i }).last().click({ timeout: options.finalDeleteTimeoutMs || 15000, force: true });
+    return { clicked: true, checkboxClicked, fallbackRoleButton: true };
+  }
+
   async _advanceToVisibilityStep(options = {}) {
     const proofs = [];
     for (let i = 0; i < 5; i++) {

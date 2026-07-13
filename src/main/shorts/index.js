@@ -530,6 +530,50 @@ class ShortsController {
     }
   }
   /**
+   * Permanently delete a previously confirmed YouTube Shorts upload from Studio.
+   * The remote target must come from remote_post_id; title-only deletion is forbidden.
+   */
+  async deleteYouTubePublishJob(jobId, options = {}) {
+    if (options.confirmDelete !== true) {
+      throw new Error('YOUTUBE_DELETE_REQUIRES_CONFIRMATION: pass confirmDelete=true for the permanent YouTube Studio delete action.');
+    }
+
+    const job = db.queryOne('SELECT spj.*, s.file_path, s.duration_seconds, s.project_id, s.short_number FROM short_publish_jobs spj JOIN shorts s ON s.id = spj.short_id WHERE spj.id = ?', [jobId]);
+    if (!job) throw new Error('Short publish job not found: ' + jobId);
+    if (job.platform !== 'youtube_shorts') throw new Error('Publish job ' + jobId + ' is not a YouTube Shorts job');
+    if (!job.remote_post_id) {
+      throw new Error('YOUTUBE_DELETE_REMOTE_ID_REQUIRED: publish job ' + jobId + ' has no remote_post_id proof');
+    }
+
+    const adapter = new YouTubeShortPublisherAdapter({
+      dashboardUrl: options.dashboardUrl,
+      userDataDir: options.userDataDir || this.uploaderOptions.userDataDir || null,
+      headless: options.headless === true,
+      loginWaitMs: options.loginWaitMs,
+      log: this.log,
+    });
+
+    db.backup('pre-youtube-short-delete');
+    try {
+      const result = await adapter.deleteShort({
+        remoteVideoId: job.remote_post_id,
+        title: job.title,
+        jobId: job.id,
+      }, {
+        ...options,
+        confirmDelete: true,
+      });
+      const message = 'Deleted YouTube Shorts remote upload ' + job.remote_post_id + ' at user request; remote proof cleared.';
+      const deletedJob = db.markShortPublishJobDeleted(job.id, message);
+      return { success: true, job: deletedJob, proof: { ...result, jobId: job.id, shortId: job.short_id, previousRemotePostId: job.remote_post_id } };
+    } catch (error) {
+      const failedJob = db.updateShortPublishJob(job.id, { error_message: 'YouTube delete failed: ' + (error.message || String(error)) });
+      return { success: false, job: failedJob, error: error.message || String(error) };
+    } finally {
+      await adapter.close();
+    }
+  }
+  /**
    * Get status of all shorts for a project.
    */
   getStatus(projectId) {

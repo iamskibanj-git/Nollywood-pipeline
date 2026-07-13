@@ -53,6 +53,8 @@ const result = {
   inspectButton: null,
   scheduleButtonBeforePrepare: null,
   scheduleButtonAfterPrepare: null,
+  deleteButtonBeforePrepare: null,
+  deleteButtonAfterPrepare: null,
   confirmCalled: false,
   scheduleApiCalledAfterConfirmFalse: false,
   prepareClicked: false,
@@ -117,6 +119,7 @@ try {
   result.prepareButton = await buttonState(page, '#btn-youtube-prepare');
   result.inspectButton = await buttonState(page, '#btn-youtube-inspect');
   result.scheduleButtonBeforePrepare = await buttonState(page, '#btn-youtube-schedule');
+  result.deleteButtonBeforePrepare = await buttonState(page, '#btn-youtube-delete');
 
   if (!result.prepareButton.disabled) {
     await page.locator('#btn-youtube-prepare').click();
@@ -128,6 +131,7 @@ try {
   }
 
   result.scheduleButtonAfterPrepare = await buttonState(page, '#btn-youtube-schedule');
+  result.deleteButtonAfterPrepare = await buttonState(page, '#btn-youtube-delete');
   if (!result.scheduleButtonAfterPrepare.disabled) {
     await page.evaluate(() => {
       window.__ytSmokeConfirmCalled = false;

@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('api', {
   inspectYouTubeUploadWizard: (jobId, options) => ipcRenderer.invoke(`shorts:inspectYouTubeUploadWizard`, jobId, options || {}),
   scheduleYouTubeShortPublishJob: (jobId, options) => ipcRenderer.invoke(`shorts:scheduleYouTubePublishJob`, jobId, options || {}),
   scheduleNextYouTubeShortPublishJob: (projectId, options) => ipcRenderer.invoke(`shorts:scheduleNextYouTubePublishJob`, projectId, options || {}),
+  deleteYouTubeShortPublishJob: (jobId, options) => ipcRenderer.invoke(`shorts:deleteYouTubePublishJob`, jobId, options || {}),
 
   // Social engagement posts tab
   getSocialProjects: () => ipcRenderer.invoke('social:getProjects'),

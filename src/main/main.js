@@ -309,6 +309,7 @@ ipcMain.handle(`shorts:prepareNextYouTubePublishJob`, (_, projectId, options) =>
 ipcMain.handle(`shorts:inspectYouTubeUploadWizard`, (_, jobId, options) => getShortsController().inspectYouTubeUploadWizard(jobId, options || {}));
 ipcMain.handle(`shorts:scheduleYouTubePublishJob`, (_, jobId, options) => getShortsController().scheduleYouTubePublishJob(jobId, options || {}));
 ipcMain.handle(`shorts:scheduleNextYouTubePublishJob`, (_, projectId, options) => getShortsController().scheduleNextYouTubePublishJob(projectId, options || {}));
+ipcMain.handle(`shorts:deleteYouTubePublishJob`, (_, jobId, options) => getShortsController().deleteYouTubePublishJob(jobId, options || {}));
 
 // Social engagement posts tab
 const { SocialPostsController } = require('./social');

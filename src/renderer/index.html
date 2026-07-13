@@ -863,6 +863,7 @@
                   <label style="font-size:11px;color:var(--muted);">Time:</label>
                   <input id="shorts-youtube-time" type="time" value="18:00" onchange="updateShortsYouTubeButtons()" style="width:96px;background:#1a1d27;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:6px;font-size:12px;">
                   <button class="btn btn-primary" onclick="scheduleYouTubeShort()" id="btn-youtube-schedule" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Schedule Short</button>
+                  <button class="btn btn-danger" onclick="deleteYouTubeShortJob()" id="btn-youtube-delete" style="font-size:12px;" disabled>Delete Remote</button>
                 </div>
                 <div id="shorts-youtube-status" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
                 <div id="shorts-youtube-jobs" style="font-size:11px;color:var(--muted);margin-top:8px;"></div>
@@ -3251,6 +3252,7 @@
         scheduled: 'var(--green)',
         upload_failed: 'var(--red)',
         published: 'var(--green)',
+        deleted: 'var(--muted)',
       };
       el.innerHTML = `
         <table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:6px;">
@@ -3293,16 +3295,25 @@
       return (shortsYoutubeJobs || []).find(job => wanted.has(job.status)) || null;
     }
 
+    function getActiveYouTubeRemoteJob() {
+      const jobs = shortsYoutubeJobs || [];
+      return jobs.find(job => job.remote_post_id && ['scheduled', 'published', 'draft_uploaded'].includes(job.status))
+        || jobs.find(job => job.remote_post_id)
+        || null;
+    }
+
     function updateShortsYouTubeButtons() {
       const prepareBtn = document.getElementById('btn-youtube-prepare');
       const inspectBtn = document.getElementById('btn-youtube-inspect');
       const scheduleBtn = document.getElementById('btn-youtube-schedule');
+      const deleteBtn = document.getElementById('btn-youtube-delete');
       const dateInput = document.getElementById('shorts-youtube-date');
       const timeInput = document.getElementById('shorts-youtube-time');
-      if (!prepareBtn || !inspectBtn || !scheduleBtn) return;
+      if (!prepareBtn || !inspectBtn || !scheduleBtn || !deleteBtn) return;
 
       const inspectJob = getActiveYouTubeJob(['ready', 'planned', 'blocked', 'upload_failed']);
       const scheduleJob = getActiveYouTubeJob(['ready', 'draft_uploaded', 'upload_failed']);
+      const deleteJob = getActiveYouTubeRemoteJob();
       const hasDateTime = Boolean(dateInput && dateInput.value && timeInput && timeInput.value);
       prepareBtn.disabled = !shortsProjectId;
       inspectBtn.disabled = !inspectJob;
@@ -3311,6 +3322,8 @@
       scheduleBtn.title = scheduleJob
         ? (hasDateTime ? `Schedule YouTube job #${scheduleJob.id}` : 'Choose a date and time')
         : 'Prepare a schedulable YouTube job first';
+      deleteBtn.disabled = !deleteJob;
+      deleteBtn.title = deleteJob ? `Delete remote YouTube Short ${deleteJob.remote_post_id} for job #${deleteJob.id}` : 'No remote YouTube proof to delete';
     }
 
     async function prepareNextYouTubeShort() {
@@ -3388,6 +3401,36 @@
         statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
       }
       btn.textContent = 'Schedule Short';
+      updateShortsYouTubeButtons();
+    }
+
+    async function deleteYouTubeShortJob() {
+      const job = getActiveYouTubeRemoteJob();
+      const statusEl = document.getElementById('shorts-youtube-status');
+      if (!job || !job.remote_post_id) {
+        updateShortsYouTubeButtons();
+        return;
+      }
+      const confirmed = window.confirm(`This will permanently delete YouTube Short ${job.remote_post_id} for job #${job.id}. Continue?`);
+      if (!confirmed) return;
+
+      const btn = document.getElementById('btn-youtube-delete');
+      btn.disabled = true;
+      btn.textContent = 'Deleting...';
+      statusEl.textContent = `Deleting YouTube Short ${job.remote_post_id}...`;
+      try {
+        const result = await window.api.deleteYouTubeShortPublishJob(job.id, { confirmDelete: true });
+        if (result.success) {
+          const proof = result.proof || {};
+          statusEl.innerHTML = `<span style="color:var(--green);">Deleted YouTube Short ${escapeHtml(proof.previousRemotePostId || job.remote_post_id)}.</span>`;
+        } else {
+          statusEl.innerHTML = `<span style="color:var(--red);">Delete failed: ${escapeHtml(result.error || 'Unknown error')}</span>`;
+        }
+        await refreshShortsCalendar();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
+      }
+      btn.textContent = 'Delete Remote';
       updateShortsYouTubeButtons();
     }
     async function planShortsCalendar() {

@@ -22,6 +22,7 @@ function testRendererContainsYouTubeControls() {
     'btn-youtube-prepare',
     'btn-youtube-inspect',
     'btn-youtube-schedule',
+    'btn-youtube-delete',
     'shorts-youtube-date',
     'shorts-youtube-time',
     'shorts-youtube-jobs',
@@ -33,6 +34,7 @@ function testRendererContainsYouTubeControls() {
     'prepareNextYouTubeShort()',
     'inspectYouTubeShortWizard()',
     'scheduleYouTubeShort()',
+    'deleteYouTubeShortJob()',
     'updateShortsYouTubeButtons()',
   ].forEach(handler => {
     assert(html.includes(handler), `missing renderer handler: ${handler}`);
@@ -45,11 +47,13 @@ function testRendererCallsPreloadApiMethods() {
     'window.api.prepareNextYouTubeShortPublishJob',
     'window.api.inspectYouTubeUploadWizard',
     'window.api.scheduleYouTubeShortPublishJob',
+    'window.api.deleteYouTubeShortPublishJob',
   ].forEach(call => {
     assert(html.includes(call), `missing renderer API call: ${call}`);
   });
   assert(html.includes('window.confirm('), 'schedule action must keep an explicit confirmation');
   assert(html.includes('confirmSchedule: true'), 'schedule call must pass confirmSchedule=true');
+  assert(html.includes('confirmDelete: true'), 'delete call must pass confirmDelete=true');
 }
 
 function testPreloadAndMainExposeYouTubeShortsApi() {
@@ -61,6 +65,7 @@ function testPreloadAndMainExposeYouTubeShortsApi() {
     'inspectYouTubeUploadWizard',
     'scheduleYouTubeShortPublishJob',
     'scheduleNextYouTubeShortPublishJob',
+    'deleteYouTubeShortPublishJob',
   ].forEach(name => {
     assert(preload.includes(name), `missing preload API: ${name}`);
   });
@@ -70,6 +75,7 @@ function testPreloadAndMainExposeYouTubeShortsApi() {
     'shorts:inspectYouTubeUploadWizard',
     'shorts:scheduleYouTubePublishJob',
     'shorts:scheduleNextYouTubePublishJob',
+    'shorts:deleteYouTubePublishJob',
   ].forEach(channel => {
     assert(main.includes(channel), `missing main IPC channel: ${channel}`);
   });

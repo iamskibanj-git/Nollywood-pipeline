@@ -254,6 +254,57 @@ async function testYouTubeAdapterRunsChannelVerifierSeparately() {
   assert.match(scheduleResult.error, /YOUTUBE_DRY_RUN_ONLY/);
 }
 
+
+async function testYouTubeAdapterDeletesRemoteShort() {
+  let factoryOptions = null;
+  let deletePayload = null;
+  let deleteOptions = null;
+  let closed = false;
+  const adapter = new YouTubeShortPublisherAdapter({
+    dashboardUrl: DASHBOARD_URL,
+    userDataDir: '.browser-profile-youtube',
+    loginWaitMs: 777,
+    log: () => {},
+    studioUploaderFactory: options => {
+      factoryOptions = options;
+      return {
+        launch: async () => ({
+          success: true,
+          channelProof: { verified: true, expectedChannelId: 'UCObQBiWc7kI4Q1PPpQZiuxA' },
+        }),
+        deleteShortByRemoteId: async (payload, options) => {
+          deletePayload = payload;
+          deleteOptions = options;
+          return {
+            success: true,
+            deleted: true,
+            remoteVideoId: payload.remoteVideoId,
+            channelProof: { verified: true, expectedChannelId: 'UCObQBiWc7kI4Q1PPpQZiuxA' },
+          };
+        },
+        close: async () => { closed = true; },
+      };
+    },
+  });
+
+  const result = await adapter.deleteShort(
+    { remoteVideoId: 'uQGmdxd0TeM' },
+    { confirmDelete: true }
+  );
+  await adapter.close();
+
+  assert.strictEqual(factoryOptions.dashboardUrl, DASHBOARD_URL);
+  assert.strictEqual(factoryOptions.userDataDir, '.browser-profile-youtube');
+  assert.strictEqual(factoryOptions.loginWaitMs, 777);
+  assert.deepStrictEqual(deletePayload, { remoteVideoId: 'uQGmdxd0TeM' });
+  assert.strictEqual(deleteOptions.confirmDelete, true);
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.deleted, true);
+  assert.strictEqual(result.remoteVideoId, 'uQGmdxd0TeM');
+  assert.strictEqual(adapter.channelProof.verified, true);
+  assert.strictEqual(closed, true);
+}
+
 async function testYouTubeAdapterRunsUploadWizardInspectorSeparately() {
   let factoryOptions = null;
   let inspectOptions = null;
@@ -351,6 +402,7 @@ async function main() {
   await testYouTubeStudioChannelProofRejectsLoginPage();
   await testYouTubeAdapterRunsChannelVerifierSeparately();
   await testYouTubeAdapterRunsUploadWizardInspectorSeparately();
+  await testYouTubeAdapterDeletesRemoteShort();
   testExtractYouTubeStudioChannelId();
   console.log('test-shorts-youtube-publish-foundation passed');
 }

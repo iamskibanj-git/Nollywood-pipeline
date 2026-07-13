@@ -2109,6 +2109,19 @@ function markShortPublishJobFailed(id, errorMessage) {
   });
 }
 
+function markShortPublishJobDeleted(id, errorMessage) {
+  return updateShortPublishJob(id, {
+    status: 'deleted',
+    scheduled_date: null,
+    scheduled_time: null,
+    remote_post_id: null,
+    remote_url: null,
+    upload_confirmed_at: null,
+    proof_json: null,
+    error_message: errorMessage || 'Deleted remote short publish job',
+  });
+}
+
 function normalizePublishJobJson(value, fallback) {
   if (value === undefined) return undefined;
   if (value === null || value === '') return fallback;
@@ -2316,6 +2329,7 @@ module.exports = {
   getPendingShortPublishJobs,
   markShortPublishJobScheduled,
   markShortPublishJobFailed,
+  markShortPublishJobDeleted,
   // Credit tracking
   getProjectCreditUsage,
   // Migration
