@@ -18,7 +18,9 @@ function testRendererContainsYouTubeCommunityControls() {
     'inspectYouTubeCommunityComposer()',
     'scheduleAllYouTubeCommunityPosts()',
     'socialYoutubeCommunityJobs',
+    'socialYoutubeShortCompanions',
     'youtubeCommunitySummary',
+    'youtubeShortCompanionSummary',
     'window.api.prepareYouTubeCommunityPosts',
     'window.api.inspectYouTubeCommunityComposer',
     'window.api.scheduleAllYouTubeCommunityPosts',
@@ -27,6 +29,8 @@ function testRendererContainsYouTubeCommunityControls() {
     'Prepare YT Companions',
     'Schedule YT Companions',
     'missing 6 PM Short proof',
+    'youtubeShortAnchorReady',
+    'Schedule 6 PM YouTube Short first. YouTube Community cannot lead.',
   ].forEach(needle => {
     assert(html.includes(needle), `renderer missing ${needle}`);
   });

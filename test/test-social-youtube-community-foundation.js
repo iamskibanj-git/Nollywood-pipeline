@@ -278,11 +278,13 @@ function testPrepareBlocksWithoutScheduledYouTubeShortCompanion() {
   });
 
   try {
-    const result = controller.prepareYouTubeCommunityPosts('project-1');
+    const result = controller.prepareYouTubeCommunityPosts('project-1', { requireYouTubeShortCompanion: false });
     assert.strictEqual(result.ready, 0);
     assert.strictEqual(result.blocked, 1);
     assert.strictEqual(result.companionSummary.blocked, 1);
+    assert.strictEqual(result.youtubeShortCompanionSummary.blocked, 1);
     assert.strictEqual(jobs[0].status, 'blocked');
+    assert.match(jobs[0].error_message, /YouTube Community cannot lead/);
     assert.match(jobs[0].error_message, /Matching scheduled YouTube Short job not found/);
   } finally {
     fs.unlinkSync(image);
@@ -337,6 +339,7 @@ function testPrepareAllowsScheduledYouTubeShortCompanion() {
     assert.strictEqual(result.ready, 1);
     assert.strictEqual(result.blocked, 0);
     assert.strictEqual(result.companionSummary.ready, 1);
+    assert.strictEqual(result.youtubeShortCompanionSummary.ready, 1);
     assert.strictEqual(jobs[0].status, 'ready');
     const metadata = typeof jobs[0].metadata_json === 'string' ? JSON.parse(jobs[0].metadata_json) : jobs[0].metadata_json;
     assert.strictEqual(metadata.companion.shortPublishJobId, 88);
@@ -508,7 +511,7 @@ async function testControllerBlocksOrphanCommunityJobBeforePublisher() {
     }),
   });
 
-  const result = await controller.scheduleYouTubeCommunityPostJob(78, { confirmSchedule: true });
+  const result = await controller.scheduleYouTubeCommunityPostJob(78, { confirmSchedule: true, requireYouTubeShortCompanion: false });
   assert.strictEqual(result.success, false);
   assert.strictEqual(result.blocked, true);
   assert.strictEqual(publisherCalled, false);

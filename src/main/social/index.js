@@ -50,6 +50,7 @@ class SocialPostsController {
     const status = this.planner.getStatus(projectId);
     status.youtubeCommunityJobs = this.socialPublishJobs.listForProject(projectId, YOUTUBE_COMMUNITY_PLATFORM);
     status.youtubeCommunitySummary = this._summarizePublishJobs(status.youtubeCommunityJobs);
+    status.youtubeShortCompanionSummary = this._summarizeYouTubeShortCompanions(projectId);
     return status;
   }
 
@@ -310,6 +311,7 @@ class SocialPostsController {
       },
       jobs: status.youtubeCommunityJobs,
       youtubeCommunitySummary: status.youtubeCommunitySummary,
+      youtubeShortCompanionSummary: status.youtubeShortCompanionSummary,
       posts: status.posts,
       summary: status.summary,
       stats: status.stats,
@@ -428,6 +430,7 @@ class SocialPostsController {
       results,
       jobs: status.youtubeCommunityJobs,
       youtubeCommunitySummary: status.youtubeCommunitySummary,
+      youtubeShortCompanionSummary: status.youtubeShortCompanionSummary,
       posts: status.posts,
       summary: status.summary,
       stats: status.stats,
@@ -499,10 +502,6 @@ class SocialPostsController {
   }
 
   _resolveYouTubeShortCompanion(post = {}, options = {}) {
-    if (options.requireYouTubeShortCompanion === false) {
-      return { ok: true, errors: [], warnings: ['YouTube Short companion gate disabled by caller'], proof: null };
-    }
-
     const errors = [];
     const warnings = [];
     const shortId = Number(post.short_id);
@@ -519,7 +518,7 @@ class SocialPostsController {
     if (!shortJob) {
       return {
         ok: false,
-        errors: ['Matching scheduled YouTube Short job not found for short ' + shortId],
+        errors: ['YouTube Community cannot lead: Matching scheduled YouTube Short job not found for short ' + shortId + '; schedule the 6 PM YouTube Short first'],
         warnings,
         proof: null,
       };
@@ -556,10 +555,39 @@ class SocialPostsController {
     return null;
   }
 
+  _summarizeYouTubeShortCompanions(projectId, options = {}) {
+    const posts = typeof this.db.getSocialPostsForProject === 'function'
+      ? this.db.getSocialPostsForProject(projectId)
+        .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type))
+        .filter(p => p.scheduled_date)
+      : [];
+    let ready = 0;
+    let blocked = 0;
+    const details = posts.map(post => {
+      const companion = this._resolveYouTubeShortCompanion(post, options);
+      if (companion.ok) ready++;
+      else blocked++;
+      return {
+        socialPostId: post.id,
+        shortId: post.short_id || null,
+        postType: post.post_type,
+        scheduledDate: post.scheduled_date,
+        scheduledTime: post.scheduled_time,
+        ok: companion.ok,
+        errors: companion.errors,
+        proof: companion.proof,
+      };
+    });
+    return {
+      total: details.length,
+      ready,
+      blocked,
+      expectedShortTime: options.youtubeShortScheduledTime || options.expectedShortTime || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME,
+      details,
+    };
+  }
+
   _validateYouTubeCompanionMetadata(metadata = {}, options = {}) {
-    if (options.requireYouTubeShortCompanion === false) {
-      return { ok: true, errors: [], warnings: ['YouTube Short companion gate disabled by caller'], proof: null };
-    }
     const companion = metadata.companion || metadata.youtubeShortCompanion || null;
     const errors = [];
     if (!companion) errors.push('YouTube Community companion proof is missing');

@@ -3575,6 +3575,7 @@
     let socialProjectId = null;
     let socialCurrentPosts = [];
     let socialYoutubeCommunityJobs = [];
+    let socialYoutubeShortCompanions = [];
 
     async function openSocialTab() {
       document.getElementById('stepper').style.display = 'none';
@@ -3583,6 +3584,7 @@
       document.getElementById('social-progress').textContent = '';
       socialCurrentPosts = [];
       socialYoutubeCommunityJobs = [];
+      socialYoutubeShortCompanions = [];
       renderSocialPosts([]);
       renderSocialStats(null);
 
@@ -3635,14 +3637,17 @@
         const posts = data.posts || [];
         socialCurrentPosts = posts;
         socialYoutubeCommunityJobs = data.youtubeCommunityJobs || [];
+        socialYoutubeShortCompanions = data.youtubeShortCompanionSummary?.details || [];
         renderSocialPosts(posts);
         renderSocialStats(data.stats);
 
         const summary = data.summary || {};
         if (summary.total > 0) {
           const ytSummary = data.youtubeCommunitySummary || {};
+          const ytShortSummary = data.youtubeShortCompanionSummary || {};
           const ytText = ytSummary.total ? ` - YT companions: ${ytSummary.ready || 0} ready, ${ytSummary.scheduled || 0} scheduled${(ytSummary.blocked || 0) > 0 ? `, ${ytSummary.blocked} blocked` : ''}` : '';
-          statusEl.textContent = `${summary.total} posts - ${summary.planned || 0} planned, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled` + ((summary.upload_failed || 0) > 0 ? `, ${summary.upload_failed} failed` : '') + ytText;
+          const ytShortText = ytShortSummary.total ? ` - 6 PM Shorts: ${ytShortSummary.ready || 0} anchored${(ytShortSummary.blocked || 0) > 0 ? `, ${ytShortSummary.blocked} blocked` : ''}` : '';
+          statusEl.textContent = `${summary.total} posts - ${summary.planned || 0} planned, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled` + ((summary.upload_failed || 0) > 0 ? `, ${summary.upload_failed} failed` : '') + ytText + ytShortText;
         } else {
           statusEl.textContent = 'No engagement posts planned yet. Click Plan Posts after Shorts are scheduled.';
         }
@@ -3652,6 +3657,7 @@
         statusEl.innerHTML = `<span style="color:var(--red);">Error: ${escapeHtml(e.message)}</span>`;
         socialCurrentPosts = [];
         socialYoutubeCommunityJobs = [];
+        socialYoutubeShortCompanions = [];
         renderSocialPosts([]);
         renderSocialStats(null);
         updateSocialActionButtons();
@@ -3676,6 +3682,14 @@
       const ytRows = socialYoutubeCommunityJobs.filter(job => rowIds.has(Number(job.social_post_id)));
       const youtubeReady = ytRows.filter(job => job.status === 'ready' || job.status === 'upload_failed').length;
       const youtubePrepared = ytRows.length;
+      const youtubeShortRows = socialYoutubeShortCompanions.filter(item => rowIds.has(Number(item.socialPostId)));
+      const youtubeShortAnchorReady = rows.length > 0
+        && youtubeShortRows.length === rows.length
+        && youtubeShortRows.every(item => item.ok === true);
+      const youtubeShortAnchorBlocked = rows.length > 0 && !youtubeShortAnchorReady;
+      const youtubeShortAnchorMessage = youtubeShortAnchorBlocked
+        ? 'Schedule 6 PM YouTube Short first. YouTube Community cannot lead.'
+        : '';
       const allRowsScheduled = rows.length > 0 && planned === 0 && ready === 0 && scheduled === rows.length;
       const targetComplete = !!targetDate && allRowsScheduled;
       const allFutureComplete = !targetDate && scope === 'all_future' && allRowsScheduled;
@@ -3684,7 +3698,21 @@
         ? `All ${scheduled} posts for ${targetDate} are already scheduled.`
         : (allFutureComplete ? `All ${scheduled} future engagement posts are already scheduled.` : '');
 
-      return { targetDate, scope, rows, planned, ready, scheduled, youtubeReady, youtubePrepared, complete, completeMessage };
+      return {
+        targetDate,
+        scope,
+        rows,
+        planned,
+        ready,
+        scheduled,
+        youtubeReady,
+        youtubePrepared,
+        youtubeShortAnchorReady,
+        youtubeShortAnchorBlocked,
+        youtubeShortAnchorMessage,
+        complete,
+        completeMessage,
+      };
     }
 
     function updateSocialActionButtons() {
@@ -3705,16 +3733,23 @@
       scheduleBtn.disabled = state.ready === 0;
       scheduleBtn.title = state.ready > 0 ? '' : (state.complete ? state.completeMessage : 'Generate copy first');
       if (prepareYouTubeBtn) {
-        prepareYouTubeBtn.disabled = state.ready === 0 && state.scheduled === 0;
-        prepareYouTubeBtn.title = !prepareYouTubeBtn.disabled ? 'Prepare generated engagement posts as YouTube Community companions for scheduled 6 PM Shorts' : 'Generate copy first';
+        const hasPreparedSourceRows = state.ready > 0 || state.scheduled > 0;
+        const canPrepareYouTube = hasPreparedSourceRows && state.youtubeShortAnchorReady;
+        prepareYouTubeBtn.disabled = !canPrepareYouTube;
+        prepareYouTubeBtn.title = canPrepareYouTube
+          ? 'Prepare generated engagement posts as YouTube Community companions for scheduled 6 PM Shorts'
+          : (hasPreparedSourceRows ? state.youtubeShortAnchorMessage : (state.complete ? state.completeMessage : 'Generate copy first'));
       }
       if (inspectYouTubeBtn) {
         inspectYouTubeBtn.disabled = !socialProjectId;
         inspectYouTubeBtn.title = socialProjectId ? 'Explore YouTube Community composer UI' : 'Select a project first';
       }
       if (scheduleYouTubeBtn) {
-        scheduleYouTubeBtn.disabled = state.youtubeReady === 0;
-        scheduleYouTubeBtn.title = state.youtubeReady > 0 ? 'Schedule prepared YouTube Community companions' : 'Prepare YouTube companions first';
+        const canScheduleYouTube = state.youtubeReady > 0 && state.youtubeShortAnchorReady;
+        scheduleYouTubeBtn.disabled = !canScheduleYouTube;
+        scheduleYouTubeBtn.title = canScheduleYouTube
+          ? 'Schedule prepared YouTube Community companions'
+          : (state.youtubeShortAnchorBlocked ? state.youtubeShortAnchorMessage : 'Prepare YouTube companions first');
       }
 
       if (state.complete && progressEl) {
@@ -3844,6 +3879,17 @@
       if (!socialProjectId) return;
       const btn = document.getElementById('btn-prepare-youtube-community');
       const progressEl = document.getElementById('social-progress');
+      const actionState = getSocialActionState();
+      if (actionState.ready === 0 && actionState.scheduled === 0) {
+        progressEl.innerHTML = '<span style="color:var(--yellow);">Generate copy first.</span>';
+        updateSocialActionButtons();
+        return;
+      }
+      if (!actionState.youtubeShortAnchorReady) {
+        progressEl.innerHTML = `<span style="color:var(--yellow);">${escapeHtml(actionState.youtubeShortAnchorMessage || 'Schedule 6 PM YouTube Short first. YouTube Community cannot lead.')}</span>`;
+        updateSocialActionButtons();
+        return;
+      }
       btn.disabled = true;
       btn.textContent = 'Preparing...';
       progressEl.textContent = 'Preparing YouTube Community companions for scheduled 6 PM Shorts...';
@@ -3857,6 +3903,7 @@
         const companionText = (companion.blocked || 0) > 0 ? `, ${companion.blocked} missing 6 PM Short proof` : '';
         progressEl.innerHTML = `<span style="color:${color};">Prepared ${result.prepared} YouTube Community companion${result.prepared === 1 ? '' : 's'}: ${result.ready} ready${preservedText}${result.blocked > 0 ? `, ${result.blocked} blocked` : ''}${companionText}.</span>`;
         socialYoutubeCommunityJobs = result.jobs || [];
+        socialYoutubeShortCompanions = result.youtubeShortCompanionSummary?.details || socialYoutubeShortCompanions;
         renderSocialPosts(result.posts || socialCurrentPosts);
         await refreshSocialPosts();
       } catch (e) {
@@ -3893,6 +3940,17 @@
       const btn = document.getElementById('btn-schedule-youtube-community');
       const progressEl = document.getElementById('social-progress');
       const targetDate = document.getElementById('social-target-date')?.value || '';
+      const actionState = getSocialActionState();
+      if (!actionState.youtubeShortAnchorReady) {
+        progressEl.innerHTML = `<span style="color:var(--yellow);">${escapeHtml(actionState.youtubeShortAnchorMessage || 'Schedule 6 PM YouTube Short first. YouTube Community cannot lead.')}</span>`;
+        updateSocialActionButtons();
+        return;
+      }
+      if (actionState.youtubeReady === 0) {
+        progressEl.innerHTML = '<span style="color:var(--yellow);">Prepare YouTube companions first.</span>';
+        updateSocialActionButtons();
+        return;
+      }
       const confirmed = window.confirm(`This will open YouTube Studio and schedule prepared Community post${targetDate ? `s for ${targetDate}` : 's'} only. Continue?`);
       if (!confirmed) return;
 
@@ -3905,6 +3963,7 @@
         const color = result.failed > 0 ? 'var(--yellow)' : 'var(--green)';
         progressEl.innerHTML = `<span style="color:${color};">Scheduled ${result.uploaded} YouTube Community post${result.uploaded === 1 ? '' : 's'}${targetDate ? ` for ${escapeHtml(targetDate)}` : ''}${result.failed > 0 ? `, ${result.failed} failed` : ''}.</span>`;
         socialYoutubeCommunityJobs = result.jobs || [];
+        socialYoutubeShortCompanions = result.youtubeShortCompanionSummary?.details || socialYoutubeShortCompanions;
         renderSocialPosts(result.posts || socialCurrentPosts);
         await refreshSocialPosts();
       } catch (e) {
