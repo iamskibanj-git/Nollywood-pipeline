@@ -16,19 +16,42 @@ function prepareYouTubeCommunityPostJob(db, post = {}, project = {}, options = {
     throw new Error('SocialPublishJobStore with upsert() is required');
   }
 
+  const companionProof = normalizeCommunityCompanionProof(options.companionProof);
+  const companionErrors = normalizeStringArray(options.companionErrors || options.companionValidationErrors);
+  const companionWarnings = normalizeStringArray(options.companionWarnings);
   const existing = typeof db.getForPost === 'function'
     ? db.getForPost(post.id, YOUTUBE_COMMUNITY_PLATFORM)
     : null;
   if (existing && existing.status === 'scheduled' && existing.remote_post_id) {
     const metadata = parseJson(existing.metadata_json, {});
     const mediaPaths = normalizeCommunityMediaPaths(metadata.mediaPaths || existing.media_path);
+    const validation = mergeCommunityCompanionValidation(
+      parseJson(existing.validation_json, { ok: true, errors: [], warnings: [], hashtags: extractHashtags(existing.body || ''), mediaCount: mediaPaths.length }),
+      { companionProof, companionErrors, companionWarnings }
+    );
+    const nextMetadata = mergeCommunityCompanionMetadata(metadata, {
+      companionProof,
+      companionErrors,
+      companionWarnings,
+    });
+    const shouldUpdateProof = companionProof || companionErrors.length > 0 || companionWarnings.length > 0;
+    const updatedExisting = shouldUpdateProof && typeof db.update === 'function'
+      ? db.update(existing.id, {
+          metadata_json: nextMetadata,
+          validation_json: validation,
+          error_message: companionErrors.length > 0 ? companionErrors.join('; ') : clearCommunityCompanionError(existing.error_message),
+        })
+      : existing;
     return {
-      job: existing,
-      validation: parseJson(existing.validation_json, { ok: true, errors: [], warnings: [], hashtags: extractHashtags(existing.body || ''), mediaCount: mediaPaths.length }),
+      job: updatedExisting || existing,
+      validation,
       caption: existing.body || buildYouTubeCommunityCaption(post, project, options),
       mediaPaths,
       status: 'scheduled',
       preserved: true,
+      companionProof,
+      companionErrors,
+      companionBlocked: companionErrors.length > 0,
     };
   }
 
@@ -52,6 +75,12 @@ function prepareYouTubeCommunityPostJob(db, post = {}, project = {}, options = {
     validation.ok = false;
   }
   if (mediaPrep.conversions.length > 0) validation.conversions = mediaPrep.conversions;
+  if (companionWarnings.length > 0) validation.warnings.push(...companionWarnings);
+  if (companionErrors.length > 0) {
+    validation.errors.push(...companionErrors);
+    validation.ok = false;
+  }
+  if (companionProof) validation.companionProof = companionProof;
 
   const status = validation.ok ? 'ready' : 'blocked';
   const job = db.upsert({
@@ -71,12 +100,15 @@ function prepareYouTubeCommunityPostJob(db, post = {}, project = {}, options = {
       mediaPaths,
       originalMediaPaths: rawMediaPaths,
       mediaConversions: mediaPrep.conversions,
+      companion: companionProof,
+      companionErrors,
+      companionWarnings,
     },
     validation_json: validation,
     error_message: validation.ok ? null : validation.errors.join('; '),
   });
 
-  return { job, validation, caption, mediaPaths, status };
+  return { job, validation, caption, mediaPaths, status, companionProof, companionErrors, companionBlocked: companionErrors.length > 0 };
 }
 
 function prepareYouTubeCommunityMediaPaths(value, options = {}) {
@@ -216,6 +248,79 @@ function parseJson(value, fallback) {
     return fallback;
   }
 }
+
+function normalizeStringArray(value) {
+  if (!value) return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map(item => String(item || '').trim())
+    .filter(Boolean);
+}
+
+function normalizeCommunityCompanionProof(value) {
+  if (!value || typeof value !== 'object') return null;
+  const proof = { ...value };
+  const shortId = Number(proof.shortId || proof.short_id || proof.sourceShortId || proof.source_short_id);
+  const shortPublishJobId = Number(proof.shortPublishJobId || proof.short_publish_job_id);
+  return {
+    companionOfPlatform: proof.companionOfPlatform || proof.platform || 'youtube_shorts',
+    shortId: Number.isFinite(shortId) ? shortId : proof.shortId || proof.short_id || null,
+    shortPublishJobId: Number.isFinite(shortPublishJobId) ? shortPublishJobId : proof.shortPublishJobId || proof.short_publish_job_id || null,
+    shortRemotePostId: proof.shortRemotePostId || proof.short_remote_post_id || proof.remote_post_id || null,
+    shortRemoteUrl: proof.shortRemoteUrl || proof.short_remote_url || proof.remote_url || null,
+    shortScheduledDate: proof.shortScheduledDate || proof.short_scheduled_date || proof.scheduled_date || null,
+    shortScheduledTime: proof.shortScheduledTime || proof.short_scheduled_time || proof.scheduled_time || null,
+    communityPostType: proof.communityPostType || proof.community_post_type || null,
+    communityScheduledDate: proof.communityScheduledDate || proof.community_scheduled_date || null,
+    communityScheduledTime: proof.communityScheduledTime || proof.community_scheduled_time || null,
+    offsetMinutes: Number.isFinite(Number(proof.offsetMinutes)) ? Number(proof.offsetMinutes) : null,
+    checkedAt: proof.checkedAt || new Date().toISOString(),
+  };
+}
+
+function mergeCommunityCompanionValidation(validation = {}, companion = {}) {
+  const next = {
+    ...validation,
+    errors: normalizeStringArray(validation.errors).filter(error => !isCommunityCompanionMessage(error)),
+    warnings: normalizeStringArray(validation.warnings).filter(warning => !isCommunityCompanionMessage(warning)),
+  };
+  if (companion.companionProof) next.companionProof = companion.companionProof;
+  else delete next.companionProof;
+  const errors = normalizeStringArray(companion.companionErrors);
+  const warnings = normalizeStringArray(companion.companionWarnings);
+  for (const warning of warnings) {
+    if (!next.warnings.includes(warning)) next.warnings.push(warning);
+  }
+  for (const error of errors) {
+    if (!next.errors.includes(error)) next.errors.push(error);
+  }
+  next.ok = errors.length === 0 && next.errors.length === 0;
+  return next;
+}
+
+function mergeCommunityCompanionMetadata(metadata = {}, companion = {}) {
+  const next = { ...metadata };
+  if (companion.companionProof) next.companion = companion.companionProof;
+  else delete next.companion;
+  const errors = normalizeStringArray(companion.companionErrors);
+  const warnings = normalizeStringArray(companion.companionWarnings);
+  if (errors.length > 0) next.companionErrors = errors;
+  else delete next.companionErrors;
+  if (warnings.length > 0) next.companionWarnings = warnings;
+  else delete next.companionWarnings;
+  return next;
+}
+
+function clearCommunityCompanionError(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  return isCommunityCompanionMessage(text) ? null : text;
+}
+
+function isCommunityCompanionMessage(value) {
+  return /YouTube Community companion|Matching scheduled YouTube Short|Matching YouTube Short job|Community post date .*YouTube Short|6 PM Short proof/i.test(String(value || ''));
+}
+
 function buildYouTubeCommunityCaption(post = {}, project = {}, options = {}) {
   const rawBody = String(options.body || post.body || '').trim();
   const hashtags = parseHashtags(options.hashtags ?? post.hashtags)

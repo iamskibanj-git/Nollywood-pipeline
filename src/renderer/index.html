@@ -910,9 +910,9 @@
                 <button class="btn btn-primary" onclick="planSocialPosts()" id="btn-plan-social" style="font-size:12px;">Plan Posts</button>
                 <button class="btn btn-primary" onclick="generateSocialPosts()" id="btn-generate-social" style="font-size:12px;background:#8b5cf6;border-color:#8b5cf6;" disabled>Generate Copy</button>
                 <button class="btn btn-primary" onclick="scheduleAllSocialPosts()" id="btn-schedule-social" style="font-size:12px;background:#22c55e;border-color:#22c55e;" disabled>Schedule All</button>
-                <button class="btn btn-primary" onclick="prepareYouTubeCommunityPosts()" id="btn-prepare-youtube-community" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Prepare YouTube</button>
+                <button class="btn btn-primary" onclick="prepareYouTubeCommunityPosts()" id="btn-prepare-youtube-community" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Prepare YT Companions</button>
                 <button class="btn btn-ghost" onclick="inspectYouTubeCommunityComposer()" id="btn-inspect-youtube-community" style="font-size:12px;" disabled>Inspect YouTube UI</button>
-                <button class="btn btn-primary" onclick="scheduleAllYouTubeCommunityPosts()" id="btn-schedule-youtube-community" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Schedule YouTube</button>
+                <button class="btn btn-primary" onclick="scheduleAllYouTubeCommunityPosts()" id="btn-schedule-youtube-community" style="font-size:12px;background:#dc2626;border-color:#dc2626;" disabled>Schedule YT Companions</button>
               </div>
               <div id="social-progress" style="font-size:11px;color:var(--muted);"></div>
               <div id="social-stats" style="display:none;margin-top:10px;padding:10px 14px;background:var(--bg3);border-radius:6px;font-size:12px;gap:20px;flex-wrap:wrap;"></div>
@@ -3641,7 +3641,7 @@
         const summary = data.summary || {};
         if (summary.total > 0) {
           const ytSummary = data.youtubeCommunitySummary || {};
-          const ytText = ytSummary.total ? ` - YouTube: ${ytSummary.ready || 0} ready, ${ytSummary.scheduled || 0} scheduled` : '';
+          const ytText = ytSummary.total ? ` - YT companions: ${ytSummary.ready || 0} ready, ${ytSummary.scheduled || 0} scheduled${(ytSummary.blocked || 0) > 0 ? `, ${ytSummary.blocked} blocked` : ''}` : '';
           statusEl.textContent = `${summary.total} posts - ${summary.planned || 0} planned, ${summary.content_done || 0} ready, ${summary.scheduled || 0} scheduled` + ((summary.upload_failed || 0) > 0 ? `, ${summary.upload_failed} failed` : '') + ytText;
         } else {
           statusEl.textContent = 'No engagement posts planned yet. Click Plan Posts after Shorts are scheduled.';
@@ -3706,7 +3706,7 @@
       scheduleBtn.title = state.ready > 0 ? '' : (state.complete ? state.completeMessage : 'Generate copy first');
       if (prepareYouTubeBtn) {
         prepareYouTubeBtn.disabled = state.ready === 0 && state.scheduled === 0;
-        prepareYouTubeBtn.title = !prepareYouTubeBtn.disabled ? 'Prepare generated engagement posts for YouTube Community scheduling' : 'Generate copy first';
+        prepareYouTubeBtn.title = !prepareYouTubeBtn.disabled ? 'Prepare generated engagement posts as YouTube Community companions for scheduled 6 PM Shorts' : 'Generate copy first';
       }
       if (inspectYouTubeBtn) {
         inspectYouTubeBtn.disabled = !socialProjectId;
@@ -3714,7 +3714,7 @@
       }
       if (scheduleYouTubeBtn) {
         scheduleYouTubeBtn.disabled = state.youtubeReady === 0;
-        scheduleYouTubeBtn.title = state.youtubeReady > 0 ? 'Schedule prepared YouTube Community posts' : 'Prepare YouTube posts first';
+        scheduleYouTubeBtn.title = state.youtubeReady > 0 ? 'Schedule prepared YouTube Community companions' : 'Prepare YouTube companions first';
       }
 
       if (state.complete && progressEl) {
@@ -3846,13 +3846,16 @@
       const progressEl = document.getElementById('social-progress');
       btn.disabled = true;
       btn.textContent = 'Preparing...';
-      progressEl.textContent = 'Preparing generated engagement posts for YouTube Community scheduling...';
+      progressEl.textContent = 'Preparing YouTube Community companions for scheduled 6 PM Shorts...';
 
       try {
         const targetDate = document.getElementById('social-target-date')?.value || '';
         const result = await window.api.prepareYouTubeCommunityPosts(socialProjectId, { targetDate });
-        const color = result.blocked > 0 ? 'var(--yellow)' : 'var(--green)';
-        progressEl.innerHTML = `<span style="color:${color};">Prepared ${result.prepared} YouTube Community job${result.prepared === 1 ? '' : 's'}: ${result.ready} ready${result.blocked > 0 ? `, ${result.blocked} blocked` : ''}.</span>`;
+        const companion = result.companionSummary || {};
+        const color = result.blocked > 0 || (companion.blocked || 0) > 0 ? 'var(--yellow)' : 'var(--green)';
+        const preservedText = result.preserved > 0 ? `, ${result.preserved} preserved` : '';
+        const companionText = (companion.blocked || 0) > 0 ? `, ${companion.blocked} missing 6 PM Short proof` : '';
+        progressEl.innerHTML = `<span style="color:${color};">Prepared ${result.prepared} YouTube Community companion${result.prepared === 1 ? '' : 's'}: ${result.ready} ready${preservedText}${result.blocked > 0 ? `, ${result.blocked} blocked` : ''}${companionText}.</span>`;
         socialYoutubeCommunityJobs = result.jobs || [];
         renderSocialPosts(result.posts || socialCurrentPosts);
         await refreshSocialPosts();
@@ -3861,7 +3864,7 @@
       }
 
       btn.disabled = false;
-      btn.textContent = 'Prepare YouTube';
+      btn.textContent = 'Prepare YT Companions';
       updateSocialActionButtons();
     }
 
@@ -3909,7 +3912,7 @@
       }
 
       btn.disabled = false;
-      btn.textContent = 'Schedule YouTube';
+      btn.textContent = 'Schedule YT Companions';
       updateSocialActionButtons();
     }
 

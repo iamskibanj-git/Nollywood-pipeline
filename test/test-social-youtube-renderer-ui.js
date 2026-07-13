@@ -24,6 +24,9 @@ function testRendererContainsYouTubeCommunityControls() {
     'window.api.scheduleAllYouTubeCommunityPosts',
     'confirmSchedule: true',
     'YouTube Community',
+    'Prepare YT Companions',
+    'Schedule YT Companions',
+    'missing 6 PM Short proof',
   ].forEach(needle => {
     assert(html.includes(needle), `renderer missing ${needle}`);
   });

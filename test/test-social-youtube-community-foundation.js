@@ -175,6 +175,177 @@ function testPreparePreservesScheduledCommunityJob() {
   assert.strictEqual(result.job.remote_post_id, 'already-remote');
   assert.strictEqual(upsertCalled, false);
 }
+function testPrepareClearsStaleScheduledCompanionError() {
+  let updated = null;
+  const existing = {
+    id: 52,
+    social_post_id: 12,
+    platform: YOUTUBE_COMMUNITY_PLATFORM,
+    status: 'scheduled',
+    scheduled_date: '2026-07-20',
+    scheduled_time: '21:00',
+    body: 'Already scheduled. #Nollywood',
+    media_path: null,
+    metadata_json: JSON.stringify({
+      mediaPaths: [],
+      companionErrors: ['Matching scheduled YouTube Short job not found for short 7'],
+    }),
+    validation_json: JSON.stringify({
+      ok: false,
+      errors: ['Matching scheduled YouTube Short job not found for short 7'],
+      warnings: [],
+      hashtags: ['#Nollywood'],
+      mediaCount: 0,
+    }),
+    remote_post_id: 'already-remote',
+    remote_url: 'https://studio.youtube.com/post/already-remote/edit',
+    error_message: 'Matching scheduled YouTube Short job not found for short 7',
+  };
+  const store = {
+    getForPost: () => existing,
+    update: (_id, fields) => {
+      updated = { ...existing, ...fields };
+      return updated;
+    },
+    upsert: () => {
+      throw new Error('scheduled job should not be upserted');
+    },
+  };
+  const result = prepareYouTubeCommunityPostJob(store, {
+    id: 12,
+    project_id: 'project-1',
+    title: 'Already scheduled source',
+    body: 'Source copy.',
+    scheduled_date: '2026-07-20',
+    scheduled_time: '21:00',
+    status: 'scheduled',
+  }, { id: 'project-1', title: 'Project' }, {
+    companionProof: {
+      companionOfPlatform: 'youtube_shorts',
+      shortId: 7,
+      shortPublishJobId: 88,
+      shortRemotePostId: 'yt-short-123',
+      shortScheduledDate: '2026-07-20',
+      shortScheduledTime: '18:00',
+      communityScheduledTime: '21:00',
+      offsetMinutes: 180,
+    },
+  });
+
+  assert.strictEqual(result.preserved, true);
+  assert(updated, 'scheduled job should be annotated with cleared companion proof');
+  assert.strictEqual(updated.error_message, null);
+  const validation = typeof updated.validation_json === 'string' ? JSON.parse(updated.validation_json) : updated.validation_json;
+  const metadata = typeof updated.metadata_json === 'string' ? JSON.parse(updated.metadata_json) : updated.metadata_json;
+  assert.strictEqual(validation.ok, true);
+  assert.deepStrictEqual(validation.errors, []);
+  assert.strictEqual(validation.companionProof.shortRemotePostId, 'yt-short-123');
+  assert.strictEqual(metadata.companion.shortRemotePostId, 'yt-short-123');
+  assert.strictEqual(metadata.companionErrors, undefined);
+}
+function testPrepareBlocksWithoutScheduledYouTubeShortCompanion() {
+  const image = makeImageFixture();
+  const jobs = [];
+  const socialPublishJobs = {
+    listForProject: () => jobs,
+    getForPost: () => null,
+    upsert: job => {
+      const row = { id: jobs.length + 1, ...job };
+      jobs.push(row);
+      return row;
+    },
+  };
+  const controller = new SocialPostsController({
+    backup: () => {},
+    getProject: () => ({ id: 'project-1', title: 'Project' }),
+    getSocialPostsForProject: () => [{
+      id: 21,
+      project_id: 'project-1',
+      short_id: 7,
+      post_type: 'post_short_recap',
+      title: 'Post recap',
+      body: 'What did you think of the Short?',
+      hashtags: '["#Nollywood"]',
+      media_path: image,
+      scheduled_date: '2026-07-20',
+      scheduled_time: '21:00',
+      status: 'content_done',
+    }],
+    getShortPublishJob: () => null,
+  }, {
+    log: () => {},
+    socialPublishJobs,
+  });
+
+  try {
+    const result = controller.prepareYouTubeCommunityPosts('project-1');
+    assert.strictEqual(result.ready, 0);
+    assert.strictEqual(result.blocked, 1);
+    assert.strictEqual(result.companionSummary.blocked, 1);
+    assert.strictEqual(jobs[0].status, 'blocked');
+    assert.match(jobs[0].error_message, /Matching scheduled YouTube Short job not found/);
+  } finally {
+    fs.unlinkSync(image);
+  }
+}
+
+function testPrepareAllowsScheduledYouTubeShortCompanion() {
+  const image = makeImageFixture();
+  const jobs = [];
+  const socialPublishJobs = {
+    listForProject: () => jobs,
+    getForPost: () => null,
+    upsert: job => {
+      const row = { id: jobs.length + 1, ...job };
+      jobs.push(row);
+      return row;
+    },
+  };
+  const controller = new SocialPostsController({
+    backup: () => {},
+    getProject: () => ({ id: 'project-1', title: 'Project' }),
+    getSocialPostsForProject: () => [{
+      id: 22,
+      project_id: 'project-1',
+      short_id: 7,
+      post_type: 'post_short_recap',
+      title: 'Post recap',
+      body: 'What did you think of the Short?',
+      hashtags: '["#Nollywood"]',
+      media_path: image,
+      scheduled_date: '2026-07-20',
+      scheduled_time: '21:00',
+      status: 'content_done',
+    }],
+    getShortPublishJob: () => ({
+      id: 88,
+      short_id: 7,
+      platform: 'youtube_shorts',
+      status: 'scheduled',
+      scheduled_date: '2026-07-20',
+      scheduled_time: '18:00',
+      remote_post_id: 'yt-short-123',
+      remote_url: 'https://youtube.com/shorts/yt-short-123',
+    }),
+  }, {
+    log: () => {},
+    socialPublishJobs,
+  });
+
+  try {
+    const result = controller.prepareYouTubeCommunityPosts('project-1');
+    assert.strictEqual(result.ready, 1);
+    assert.strictEqual(result.blocked, 0);
+    assert.strictEqual(result.companionSummary.ready, 1);
+    assert.strictEqual(jobs[0].status, 'ready');
+    const metadata = typeof jobs[0].metadata_json === 'string' ? JSON.parse(jobs[0].metadata_json) : jobs[0].metadata_json;
+    assert.strictEqual(metadata.companion.shortPublishJobId, 88);
+    assert.strictEqual(metadata.companion.shortRemotePostId, 'yt-short-123');
+    assert.strictEqual(metadata.companion.offsetMinutes, 180);
+  } finally {
+    fs.unlinkSync(image);
+  }
+}
 async function testPublisherRequiresScheduleConfirmation() {
   const image = makeImageFixture();
   let scheduleCalled = false;
@@ -230,7 +401,17 @@ async function testControllerSchedulesCommunityJobThroughPublisher() {
     status: 'ready',
     body: 'A prepared caption. #Nollywood',
     media_path: null,
-    metadata_json: JSON.stringify({ mediaPaths: [] }),
+    metadata_json: JSON.stringify({
+      mediaPaths: [],
+      companion: {
+        companionOfPlatform: 'youtube_shorts',
+        shortId: 7,
+        shortPublishJobId: 88,
+        shortRemotePostId: 'yt-short-123',
+        shortScheduledDate: '2026-07-20',
+        shortScheduledTime: '18:00',
+      },
+    }),
     scheduled_date: '2026-07-20',
     scheduled_time: '12:00',
   }];
@@ -287,14 +468,65 @@ async function testControllerSchedulesCommunityJobThroughPublisher() {
   assert.strictEqual(payloadSeen.payload.scheduledDate, '2026-07-20');
 }
 
+async function testControllerBlocksOrphanCommunityJobBeforePublisher() {
+  const jobs = [{
+    id: 78,
+    social_post_id: 12,
+    platform: YOUTUBE_COMMUNITY_PLATFORM,
+    status: 'ready',
+    body: 'A prepared caption. #Nollywood',
+    media_path: null,
+    metadata_json: JSON.stringify({ mediaPaths: [] }),
+    scheduled_date: '2026-07-20',
+    scheduled_time: '21:00',
+  }];
+  let publisherCalled = false;
+  const socialPublishJobs = {
+    listForProject: () => jobs,
+    getById: id => jobs.find(job => Number(job.id) === Number(id)),
+    getPending: () => jobs,
+    update: (id, fields) => Object.assign(jobs[0], fields),
+    markScheduled: () => {
+      throw new Error('orphan job must not be scheduled');
+    },
+    markFailed: (id, errorMessage) => Object.assign(jobs[0], { status: 'upload_failed', error_message: errorMessage }),
+  };
+  const controller = new SocialPostsController({
+    backup: () => {},
+    queryOne: () => null,
+    getProject: () => ({ id: 'project-1', title: 'Project' }),
+    getSocialPostsForProject: () => [],
+  }, {
+    log: () => {},
+    socialPublishJobs,
+    youtubeCommunityPublisherFactory: () => ({
+      schedulePost: async () => {
+        publisherCalled = true;
+        return { success: true };
+      },
+      close: async () => {},
+    }),
+  });
+
+  const result = await controller.scheduleYouTubeCommunityPostJob(78, { confirmSchedule: true });
+  assert.strictEqual(result.success, false);
+  assert.strictEqual(result.blocked, true);
+  assert.strictEqual(publisherCalled, false);
+  assert.strictEqual(jobs[0].status, 'blocked');
+  assert.match(jobs[0].error_message, /YOUTUBE_COMMUNITY_COMPANION_SHORT_NOT_READY/);
+}
 async function main() {
   testCaptionRewriteForYouTube();
   testValidationRequiresScheduleAndImageProof();
   testPrepareUpsertsCommunityJob();
   testOversizedCommunityImageIsExported();
   testPreparePreservesScheduledCommunityJob();
+  testPrepareClearsStaleScheduledCompanionError();
+  testPrepareBlocksWithoutScheduledYouTubeShortCompanion();
+  testPrepareAllowsScheduledYouTubeShortCompanion();
   await testPublisherRequiresScheduleConfirmation();
   await testControllerSchedulesCommunityJobThroughPublisher();
+  await testControllerBlocksOrphanCommunityJobBeforePublisher();
   testImageUploaderHardeningIsPresent();
   console.log('test-social-youtube-community-foundation passed');
 }

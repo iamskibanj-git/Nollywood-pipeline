@@ -10,6 +10,8 @@ const {
 } = require('./youtube-community-posts');
 
 const ENGAGEMENT_POST_TYPES = new Set(['character_intro', 'pre_short_teaser', 'post_short_recap']);
+const YOUTUBE_SHORTS_PLATFORM = 'youtube_shorts';
+const DEFAULT_YOUTUBE_COMPANION_SHORT_TIME = '18:00';
 
 class SocialPostsController {
   constructor(db, options = {}) {
@@ -249,7 +251,7 @@ class SocialPostsController {
     const targetDate = this._normalizeDate(options.targetDate);
     this.db.backup('pre-youtube-community-post-prep');
     const project = this.db.getProject(projectId);
-    if (!project) throw new Error(`Project not found: ${projectId}`);
+    if (!project) throw new Error('Project not found: ' + projectId);
 
     const posts = this.db.getSocialPostsForProject(projectId)
       .filter(p => ENGAGEMENT_POST_TYPES.has(p.post_type))
@@ -259,13 +261,33 @@ class SocialPostsController {
     let ready = 0;
     let blocked = 0;
     let preserved = 0;
+    let companionReady = 0;
+    let companionBlocked = 0;
+    const companionDetails = [];
     const jobs = [];
     for (const post of posts) {
+      const companion = this._resolveYouTubeShortCompanion(post, options);
+      if (companion.ok) companionReady++;
+      else companionBlocked++;
+      companionDetails.push({
+        socialPostId: post.id,
+        shortId: post.short_id || null,
+        postType: post.post_type,
+        scheduledDate: post.scheduled_date,
+        scheduledTime: post.scheduled_time,
+        ok: companion.ok,
+        errors: companion.errors,
+        proof: companion.proof,
+      });
+
       const prepared = prepareYouTubeCommunityPostJob(this.socialPublishJobs, post, project, {
         scheduledDate: options.scheduledDate || post.scheduled_date,
         scheduledTime: options.scheduledTime || post.scheduled_time,
         validationOptions: options.validationOptions || {},
         mediaOptions: options.mediaOptions || {},
+        companionProof: companion.proof,
+        companionErrors: companion.errors,
+        companionWarnings: companion.warnings,
       });
       jobs.push(prepared.job);
       if (prepared.status === 'ready') ready++;
@@ -279,6 +301,13 @@ class SocialPostsController {
       ready,
       blocked,
       preserved,
+      companionSummary: {
+        total: posts.length,
+        ready: companionReady,
+        blocked: companionBlocked,
+        expectedShortTime: options.youtubeShortScheduledTime || options.expectedShortTime || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME,
+        details: companionDetails,
+      },
       jobs: status.youtubeCommunityJobs,
       youtubeCommunitySummary: status.youtubeCommunitySummary,
       posts: status.posts,
@@ -313,6 +342,26 @@ class SocialPostsController {
     const scheduledDate = options.scheduledDate || job.scheduled_date;
     const scheduledTime = options.scheduledTime || job.scheduled_time || '12:00';
     if (!scheduledDate) throw new Error('YOUTUBE_COMMUNITY_SCHEDULE_DATE_REQUIRED');
+
+    const companion = this._resolveYouTubeCommunityJobCompanion(job, options);
+    if (!companion.ok) {
+      const message = 'YOUTUBE_COMMUNITY_COMPANION_SHORT_NOT_READY: ' + companion.errors.join('; ');
+      const validation = this._mergeJobValidation(job.validation_json, {
+        ok: false,
+        errors: companion.errors,
+        companionProof: companion.proof,
+      });
+      const blockedJob = this.socialPublishJobs.update(job.id, {
+        status: 'blocked',
+        validation_json: validation,
+        metadata_json: this._mergeJobMetadata(job.metadata_json, {
+          companion: companion.proof,
+          companionErrors: companion.errors,
+        }),
+        error_message: message,
+      });
+      return { success: false, blocked: true, job: blockedJob, error: message, companion };
+    }
 
     this.db.backup('pre-youtube-community-post-schedule');
     this.socialPublishJobs.update(job.id, {
@@ -436,6 +485,156 @@ class SocialPostsController {
   _normalizeDate(value) {
     const text = String(value || '').trim();
     return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+  }
+
+  _resolveYouTubeCommunityJobCompanion(job, options = {}) {
+    const post = this._getSocialPostById(job.social_post_id);
+    if (post) return this._resolveYouTubeShortCompanion(post, options);
+    return this._validateYouTubeCompanionMetadata(this._parseJson(job.metadata_json, {}), options);
+  }
+
+  _getSocialPostById(id) {
+    if (!id || typeof this.db.queryOne !== 'function') return null;
+    return this.db.queryOne('SELECT * FROM social_posts WHERE id = ?', [id]);
+  }
+
+  _resolveYouTubeShortCompanion(post = {}, options = {}) {
+    if (options.requireYouTubeShortCompanion === false) {
+      return { ok: true, errors: [], warnings: ['YouTube Short companion gate disabled by caller'], proof: null };
+    }
+
+    const errors = [];
+    const warnings = [];
+    const shortId = Number(post.short_id);
+    if (!Number.isFinite(shortId) || shortId <= 0) {
+      return {
+        ok: false,
+        errors: ['YouTube Community companion requires a source short_id'],
+        warnings,
+        proof: null,
+      };
+    }
+
+    const shortJob = this._getYouTubeShortPublishJob(shortId);
+    if (!shortJob) {
+      return {
+        ok: false,
+        errors: ['Matching scheduled YouTube Short job not found for short ' + shortId],
+        warnings,
+        proof: null,
+      };
+    }
+
+    const proof = this._buildYouTubeCompanionProof(post, shortJob, options);
+    if (shortJob.status !== 'scheduled') {
+      errors.push('Matching YouTube Short job ' + shortJob.id + ' is ' + (shortJob.status || 'unknown') + ', not scheduled');
+    }
+    if (!shortJob.remote_post_id && !shortJob.remote_url) {
+      errors.push('Matching YouTube Short job ' + shortJob.id + ' has no remote proof');
+    }
+    if (post.scheduled_date && shortJob.scheduled_date && post.scheduled_date !== shortJob.scheduled_date) {
+      errors.push('Community post date ' + post.scheduled_date + ' does not match YouTube Short date ' + shortJob.scheduled_date);
+    }
+
+    const expectedShortTime = this._normalizeTime(options.youtubeShortScheduledTime || options.expectedShortTime || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME);
+    const actualShortTime = this._normalizeTime(shortJob.scheduled_time || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME);
+    if (expectedShortTime && actualShortTime !== expectedShortTime) {
+      errors.push('Matching YouTube Short job ' + shortJob.id + ' is scheduled at ' + (actualShortTime || shortJob.scheduled_time || '(missing)') + ', expected ' + expectedShortTime);
+    }
+
+    return { ok: errors.length === 0, errors, warnings, proof };
+  }
+
+  _getYouTubeShortPublishJob(shortId) {
+    if (!shortId) return null;
+    if (typeof this.db.getShortPublishJob === 'function') {
+      return this.db.getShortPublishJob(shortId, YOUTUBE_SHORTS_PLATFORM);
+    }
+    if (typeof this.db.queryOne === 'function') {
+      return this.db.queryOne('SELECT * FROM short_publish_jobs WHERE short_id = ? AND platform = ?', [shortId, YOUTUBE_SHORTS_PLATFORM]);
+    }
+    return null;
+  }
+
+  _validateYouTubeCompanionMetadata(metadata = {}, options = {}) {
+    if (options.requireYouTubeShortCompanion === false) {
+      return { ok: true, errors: [], warnings: ['YouTube Short companion gate disabled by caller'], proof: null };
+    }
+    const companion = metadata.companion || metadata.youtubeShortCompanion || null;
+    const errors = [];
+    if (!companion) errors.push('YouTube Community companion proof is missing');
+    if (companion && companion.companionOfPlatform && companion.companionOfPlatform !== YOUTUBE_SHORTS_PLATFORM) {
+      errors.push('YouTube Community companion platform is ' + companion.companionOfPlatform + ', expected ' + YOUTUBE_SHORTS_PLATFORM);
+    }
+    if (companion && !companion.shortRemotePostId && !companion.shortRemoteUrl) {
+      errors.push('YouTube Community companion proof has no YouTube Short remote id or URL');
+    }
+    const expectedShortTime = this._normalizeTime(options.youtubeShortScheduledTime || options.expectedShortTime || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME);
+    const actualShortTime = this._normalizeTime(companion?.shortScheduledTime || '');
+    if (companion && expectedShortTime && actualShortTime && actualShortTime !== expectedShortTime) {
+      errors.push('YouTube Community companion Short time is ' + actualShortTime + ', expected ' + expectedShortTime);
+    }
+    return { ok: errors.length === 0, errors, warnings: [], proof: companion };
+  }
+
+  _buildYouTubeCompanionProof(post = {}, shortJob = {}, options = {}) {
+    return {
+      companionOfPlatform: YOUTUBE_SHORTS_PLATFORM,
+      shortId: Number(post.short_id) || null,
+      shortPublishJobId: shortJob.id || null,
+      shortRemotePostId: shortJob.remote_post_id || null,
+      shortRemoteUrl: shortJob.remote_url || null,
+      shortScheduledDate: shortJob.scheduled_date || null,
+      shortScheduledTime: this._normalizeTime(shortJob.scheduled_time || options.youtubeShortScheduledTime || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME),
+      communityPostType: post.post_type || null,
+      communityScheduledDate: post.scheduled_date || null,
+      communityScheduledTime: this._normalizeTime(post.scheduled_time || ''),
+      offsetMinutes: this._computeScheduleOffsetMinutes(
+        shortJob.scheduled_date,
+        shortJob.scheduled_time || DEFAULT_YOUTUBE_COMPANION_SHORT_TIME,
+        post.scheduled_date,
+        post.scheduled_time
+      ),
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  _computeScheduleOffsetMinutes(shortDate, shortTime, communityDate, communityTime) {
+    if (!shortDate || !shortTime || !communityDate || !communityTime) return null;
+    const shortAt = new Date(shortDate + 'T' + (this._normalizeTime(shortTime) || shortTime) + ':00');
+    const communityAt = new Date(communityDate + 'T' + (this._normalizeTime(communityTime) || communityTime) + ':00');
+    if (Number.isNaN(shortAt.getTime()) || Number.isNaN(communityAt.getTime())) return null;
+    return Math.round((communityAt.getTime() - shortAt.getTime()) / 60000);
+  }
+
+  _normalizeTime(value) {
+    const text = String(value || '').trim();
+    const match = text.match(/^(\d{1,2}):(\d{2})/);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+    return String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
+  }
+
+  _mergeJobValidation(value, patch = {}) {
+    const validation = this._parseJson(value, {}) || {};
+    const errors = this._uniqueStrings([...(validation.errors || []), ...(patch.errors || [])]);
+    return {
+      ...validation,
+      ...patch,
+      errors,
+      ok: patch.ok === false ? false : validation.ok !== false,
+    };
+  }
+
+  _mergeJobMetadata(value, patch = {}) {
+    const metadata = this._parseJson(value, {}) || {};
+    return { ...metadata, ...patch };
+  }
+
+  _uniqueStrings(values = []) {
+    return [...new Set((values || []).map(value => String(value || '').trim()).filter(Boolean))];
   }
 
   _summarizePublishJobs(jobs = []) {
