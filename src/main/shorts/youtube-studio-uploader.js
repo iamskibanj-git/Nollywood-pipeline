@@ -21,6 +21,8 @@ const DESCRIPTION_SELECTORS = [
 const DATE_SELECTORS = [
   'input[aria-label*="Date" i]',
   'input[placeholder*="Date" i]',
+  'ytcp-datetime-picker input[aria-label*="Date" i]',
+  'ytcp-datetime-picker input[placeholder*="Date" i]',
 ];
 
 const TIME_SELECTORS = [
@@ -493,33 +495,66 @@ class YouTubeStudioUploader {
     if (beforeDateProof.visibleDate === targetLong) {
       return { attempted: true, skipped: true, reason: 'already-selected', targetDate: targetLong };
     }
+
+    const directBefore = await this._fillScheduleDateInput(dateValue, targetLong, { phase: 'before-picker' });
+    if (directBefore.selected) return directBefore;
+
     if (!beforeDateProof.visibleDate) {
-      throw new Error(`YOUTUBE_SCHEDULE_DATE_PICKER_CURRENT_DATE_NOT_FOUND: ${JSON.stringify(beforeDateProof)}`);
+      throw new Error(`YOUTUBE_SCHEDULE_DATE_PICKER_CURRENT_DATE_NOT_FOUND: ${JSON.stringify({ beforeDateProof, directBefore })}`);
     }
     if (!sameMonthYear(beforeDateProof.visibleDate, targetLong)) {
-      throw new Error(`YOUTUBE_SCHEDULE_DATE_PICKER_MONTH_NAV_NOT_IMPLEMENTED: ${JSON.stringify({ current: beforeDateProof.visibleDate, target: targetLong })}`);
+      throw new Error(`YOUTUBE_SCHEDULE_DATE_PICKER_MONTH_NAV_NOT_IMPLEMENTED: ${JSON.stringify({ current: beforeDateProof.visibleDate, target: targetLong, directBefore })}`);
     }
 
     const opened = await clickText(this.page, new RegExp(escapeRegExp(beforeDateProof.visibleDate)), 10000)
       || await clickFirstLocator(this.page, ['ytcp-datetime-picker button', 'ytcp-datetime-picker ytcp-dropdown-trigger', 'ytcp-datetime-picker [role="button"]'], 'schedule-date-picker').then(result => result.clicked);
     if (!opened) {
-      throw new Error(`YOUTUBE_SCHEDULE_DATE_PICKER_OPEN_FAILED: ${JSON.stringify(beforeDateProof)}`);
+      throw new Error(`YOUTUBE_SCHEDULE_DATE_PICKER_OPEN_FAILED: ${JSON.stringify({ beforeDateProof, directBefore })}`);
     }
     await safeWait(this.page, 1000);
 
     const day = String(Number(String(scheduledDate || '').split('-')[2] || ''));
     if (!day) throw new Error(`YOUTUBE_SCHEDULE_DATE_INVALID: ${scheduledDate}`);
-    const dayClicked = await clickRole(this.page, 'button', new RegExp(`^${day}$`), 10000)
+    const roleDayClicked = await clickRole(this.page, 'button', new RegExp(`^${day}$`), 10000)
       || await clickText(this.page, new RegExp(`^${day}$`), 10000);
-    if (!dayClicked) {
-      throw new Error(`YOUTUBE_SCHEDULE_DATE_DAY_NOT_CLICKED: ${JSON.stringify({ day, targetDate: targetLong })}`);
+    const domDayClick = roleDayClicked ? null : await clickDatePickerDay(this.page, day);
+    if (!roleDayClicked && !domDayClick.clicked) {
+      const directAfterOpen = await this._fillScheduleDateInput(dateValue, targetLong, { phase: 'after-picker-open', dayClickFailed: true, domDayClick });
+      if (directAfterOpen.selected) return directAfterOpen;
+      throw new Error(`YOUTUBE_SCHEDULE_DATE_DAY_NOT_CLICKED: ${JSON.stringify({ day, targetDate: targetLong, directBefore, domDayClick, directAfterOpen })}`);
     }
     await safeWait(this.page, 1000);
     const after = await this._readScheduleDateTimeProof();
     if (after.visibleDate !== targetLong) {
-      throw new Error(`YOUTUBE_SCHEDULE_DATE_NOT_SET: ${JSON.stringify({ targetDate: targetLong, after })}`);
+      const directAfterMismatch = await this._fillScheduleDateInput(dateValue, targetLong, { phase: 'after-day-click-mismatch', dayClicked: true, previousAfter: after });
+      if (directAfterMismatch.selected) return directAfterMismatch;
+      throw new Error(`YOUTUBE_SCHEDULE_DATE_NOT_SET: ${JSON.stringify({ targetDate: targetLong, after, directBefore, directAfterMismatch })}`);
     }
     return { attempted: true, selected: true, targetDate: targetLong, studioDate: dateValue, after };
+  }
+
+  async _fillScheduleDateInput(dateValue, targetLong, extra = {}) {
+    let fillProof;
+    try {
+      fillProof = await fillFirstInput(this.page, DATE_SELECTORS, dateValue, 'schedule-date');
+    } catch (error) {
+      fillProof = await setFirstInputValue(this.page, DATE_SELECTORS, dateValue, 'schedule-date-dom', error);
+    }
+    if (!fillProof.filled) {
+      return { attempted: true, selected: false, directInput: true, targetDate: targetLong, studioDate: dateValue, fillProof, ...extra };
+    }
+    await safeWait(this.page, 1000);
+    const after = await this._readScheduleDateTimeProof();
+    return {
+      attempted: true,
+      selected: after.visibleDate === targetLong,
+      directInput: true,
+      targetDate: targetLong,
+      studioDate: dateValue,
+      fillProof,
+      after,
+      ...extra,
+    };
   }
   async _readScheduleDateTimeProof() {
     const bodyText = await readBodyText(this.page);
@@ -1065,6 +1100,53 @@ async function countRole(page, role, name) {
   }
 }
 
+async function clickDatePickerDay(page, day) {
+  try {
+    if (!page || !page.evaluate) return { clicked: false, reason: 'no-page' };
+    return await page.evaluate(dayText => {
+      const visible = el => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const disabled = el => el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true' || el.disabled === true;
+      const textOf = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const roots = Array.from(document.querySelectorAll('ytcp-date-picker, tp-yt-paper-dialog, tp-yt-iron-dropdown, ytcp-dialog, [role="dialog"], ytcp-popup-container'))
+        .filter(visible);
+      const scopes = roots.length ? roots : [document.body];
+      const selector = 'button, [role="button"], tp-yt-paper-item, ytcp-ve, td, div, span';
+      const candidates = [];
+      for (const root of scopes) {
+        for (const el of Array.from(root.querySelectorAll(selector))) {
+          if (!visible(el) || disabled(el)) continue;
+          const text = textOf(el);
+          const aria = (el.getAttribute('aria-label') || '').trim();
+          if (text === dayText || aria === dayText || new RegExp('\\b' + dayText + '\\b').test(aria)) {
+            const rect = el.getBoundingClientRect();
+            candidates.push({ el, text, aria, tag: el.tagName, role: el.getAttribute('role'), area: rect.width * rect.height });
+          }
+        }
+      }
+      candidates.sort((a, b) => a.area - b.area);
+      const target = candidates[0];
+      if (!target) {
+        return {
+          clicked: false,
+          reason: 'day-not-found',
+          day: dayText,
+          rootCount: roots.length,
+          sample: scopes.flatMap(root => Array.from(root.querySelectorAll(selector)).slice(0, 60).map(textOf)).filter(Boolean).slice(0, 80),
+        };
+      }
+      target.el.scrollIntoView({ block: 'center', inline: 'center' });
+      target.el.click();
+      return { clicked: true, day: dayText, text: target.text, aria: target.aria, tag: target.tag, role: target.role, rootCount: roots.length };
+    }, String(day || ''));
+  } catch (error) {
+    return { clicked: false, reason: error.message || String(error) };
+  }
+}
 async function clickRole(page, role, name, timeout = 5000) {
   try {
     if (!page || !page.getByRole) return false;
@@ -1190,6 +1272,37 @@ async function fillFirstInput(page, selectors, value, label) {
     await page.keyboard.press('Tab').catch(() => {});
   }
   return { attempted: true, filled: true, label, selector: match.selector, matchedCount: match.count, value: String(value || '') };
+}
+
+async function setFirstInputValue(page, selectors, value, label, previousError = null) {
+  const match = await firstMatchingLocator(page, selectors);
+  if (!match) {
+    return { attempted: true, filled: false, label, reason: 'not-found', previousError: previousError ? String(previousError.message || previousError) : null };
+  }
+  await match.locator.evaluate((node, nextValue) => {
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    node.focus();
+    if (valueSetter) valueSetter.call(node, nextValue);
+    else node.value = nextValue;
+    node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue }));
+    node.dispatchEvent(new Event('change', { bubbles: true }));
+    node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+    node.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+  }, String(value || ''));
+  if (page.keyboard && typeof page.keyboard.press === 'function') {
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.keyboard.press('Tab').catch(() => {});
+  }
+  return {
+    attempted: true,
+    filled: true,
+    label,
+    selector: match.selector,
+    matchedCount: match.count,
+    value: String(value || ''),
+    method: 'dom-value',
+    previousError: previousError ? String(previousError.message || previousError).slice(0, 500) : null,
+  };
 }
 async function safeWait(page, ms) {
   if (page && typeof page.waitForTimeout === 'function') {

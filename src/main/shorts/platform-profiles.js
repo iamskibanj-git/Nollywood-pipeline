@@ -17,7 +17,6 @@ const SHORT_PLATFORM_PROFILES = Object.freeze({
     label: 'YouTube Shorts',
     minDurationSeconds: 1,
     maxDurationSeconds: 180,
-    initialProofMaxDurationSeconds: 60,
     defaultScheduleTime: '18:00',
     titleMaxChars: 100,
     descriptionMaxChars: 5000,

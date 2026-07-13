@@ -110,7 +110,7 @@ function testScheduledVisibilityRequiresExplicitDate() {
   assert.strictEqual(db.calls[0].scheduled_time, null);
 }
 
-function testLongInitialProofShortIsBlocked() {
+function testCurrentThreeMinuteShortsDurationIsAllowed() {
   const db = makeDb();
   const result = prepareYouTubeShortPublishJob(db, SHORT, PROJECT, {
     videoInfo: {
@@ -121,11 +121,29 @@ function testLongInitialProofShortIsBlocked() {
     },
   });
 
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.status, 'ready');
+  assert.deepStrictEqual(result.errors, []);
+  assert.strictEqual(db.calls[0].status, 'ready');
+  assert.strictEqual(db.calls[0].error_message, null);
+}
+
+function testOverThreeMinuteShortIsBlocked() {
+  const db = makeDb();
+  const result = prepareYouTubeShortPublishJob(db, SHORT, PROJECT, {
+    videoInfo: {
+      fileExists: true,
+      durationSeconds: 181,
+      width: 1080,
+      height: 1920,
+    },
+  });
+
   assert.strictEqual(result.ok, false);
   assert.strictEqual(result.status, 'blocked');
-  assert(result.errors.some(error => /initial live proof/.test(error)));
+  assert(result.errors.some(error => /exceeds 180 seconds/.test(error)));
   assert.strictEqual(db.calls[0].status, 'blocked');
-  assert.match(db.calls[0].error_message, /initial live proof/);
+  assert.match(db.calls[0].error_message, /exceeds 180 seconds/);
 }
 
 function testLandscapeVideoIsBlocked() {
@@ -165,7 +183,8 @@ function main() {
   testMetadataIsYouTubeShaped();
   testReadyJobPersistsMetadataAndValidation();
   testScheduledVisibilityRequiresExplicitDate();
-  testLongInitialProofShortIsBlocked();
+  testCurrentThreeMinuteShortsDurationIsAllowed();
+  testOverThreeMinuteShortIsBlocked();
   testLandscapeVideoIsBlocked();
   testMissingVideoIsBlocked();
   console.log('test-shorts-youtube-job-prep passed');

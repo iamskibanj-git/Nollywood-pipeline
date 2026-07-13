@@ -86,6 +86,33 @@ async function testInvalidTimeBlocksFinalScheduleClick() {
   );
 }
 
+async function testScheduleDateUsesVerifiedDirectInput() {
+  const uploader = makeUploader();
+  const calls = [];
+  uploader._fillScheduleDateInput = async (dateValue, targetLong, extra) => {
+    calls.push({ dateValue, targetLong, extra });
+    return {
+      attempted: true,
+      selected: true,
+      directInput: true,
+      targetDate: targetLong,
+      studioDate: dateValue,
+      after: { visibleDate: targetLong },
+      ...extra,
+    };
+  };
+
+  const result = await uploader._setScheduleDate('2026-07-31', '7/31/2026', {
+    visibleDate: 'Jul 12, 2026',
+  });
+
+  assert.strictEqual(result.directInput, true);
+  assert.strictEqual(result.selected, true);
+  assert.strictEqual(result.phase, 'before-picker');
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].dateValue, '7/31/2026');
+  assert.strictEqual(calls[0].targetLong, 'Jul 31, 2026');
+}
 
 async function testDeleteRequiresConfirmation() {
   const uploader = makeUploader();
@@ -231,6 +258,7 @@ async function main() {
   await testDuplicateDraftResumeRequiresSingleMatch();
   await testSingleDuplicateDraftCanResume();
   await testInvalidTimeBlocksFinalScheduleClick();
+  await testScheduleDateUsesVerifiedDirectInput();
   await testUploadSurfaceConfirmationDoesNotWriteProofByDefault();
   await testShortsContentRowIsRequiredForScheduleProof();
   await testDeleteRequiresConfirmation();

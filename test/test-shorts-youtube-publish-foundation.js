@@ -104,7 +104,7 @@ function testYouTubeValidationRejectsRiskyMetadata() {
   assert(validation.errors.some(error => /AI altered\/generated disclosure/.test(error)));
 }
 
-function testYouTubeInitialProofWarningForLongShorts() {
+function testYouTubeValidationAcceptsCurrentThreeMinuteShorts() {
   const validation = validateShortMetadataForPlatform({
     title: 'The Secret Meeting',
     description: 'A dramatic turning point. #shorts #nollywood',
@@ -115,7 +115,8 @@ function testYouTubeInitialProofWarningForLongShorts() {
   }, 'youtube_shorts');
 
   assert.strictEqual(validation.ok, true);
-  assert(validation.warnings.some(warning => /initial live proof/.test(warning)));
+  assert.deepStrictEqual(validation.errors, []);
+  assert.deepStrictEqual(validation.warnings, []);
 }
 
 async function testYouTubeDryRunAdapterBlocksScheduling() {
@@ -395,7 +396,7 @@ async function main() {
   testYouTubeProfileAliasesAndLimits();
   testYouTubeValidationAcceptsSafeInitialProofShape();
   testYouTubeValidationRejectsRiskyMetadata();
-  testYouTubeInitialProofWarningForLongShorts();
+  testYouTubeValidationAcceptsCurrentThreeMinuteShorts();
   await testYouTubeDryRunAdapterBlocksScheduling();
   await testYouTubeStudioChannelProofPassesWithExpectedDashboard();
   await testYouTubeStudioUploadEntryInspectionIsNoFileDryRun();
