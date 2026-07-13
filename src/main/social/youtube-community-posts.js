@@ -342,18 +342,91 @@ class YouTubeCommunityStudioUploader extends YouTubeStudioUploader {
       if (!fs.existsSync(mediaPath)) throw new Error(`YOUTUBE_COMMUNITY_MEDIA_FILE_NOT_FOUND: ${mediaPath}`);
     }
 
-    let input = this.page.locator('input[type="file"][accept*="image"], input[type="file"]').first();
-    if (!(await input.count().catch(() => 0))) {
-      await this._clickCommunityControl(/(Image|Photo|Add image|Upload)/i, { preferRole: 'button' }).catch(() => false);
-      await waitPage(this.page, 800);
-      input = this.page.locator('input[type="file"][accept*="image"], input[type="file"]').first();
+    const chooserPromise = this.page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+    const imageButtonProof = await this._clickCommunityExactControl({
+      text: 'Image',
+      selector: 'button, [role="button"], yt-formatted-string, div[aria-label], span[aria-label]',
+    }).catch(() => null);
+    const chooser = await chooserPromise;
+    let setBy = null;
+    if (chooser) {
+      await chooser.setFiles(paths);
+      setBy = 'filechooser';
+    } else {
+      await waitPage(this.page, 500);
+      const inputs = this.page.locator('input[type="file"][accept*="image"], input[type="file"]');
+      const count = await inputs.count().catch(() => 0);
+      if (count < 1) throw new Error('YOUTUBE_COMMUNITY_IMAGE_FILE_INPUT_NOT_FOUND');
+      await inputs.nth(count - 1).setInputFiles(paths);
+      setBy = `input-${count - 1}`;
     }
-    if (!(await input.count().catch(() => 0))) throw new Error('YOUTUBE_COMMUNITY_IMAGE_FILE_INPUT_NOT_FOUND');
-    await input.setInputFiles(paths);
-    await waitPage(this.page, 2500);
-    return { uploaded: true, mediaCount: paths.length, proof: await this._readCommunityComposerProof() };
+    await waitPage(this.page, 7000);
+    const attachmentProof = await this._readCommunityImageAttachmentProof(paths.length);
+    if (!attachmentProof.hasAttachment) {
+      throw new Error(`YOUTUBE_COMMUNITY_IMAGE_ATTACHMENT_PROOF_NOT_FOUND: ${JSON.stringify(attachmentProof)}`);
+    }
+    return {
+      uploaded: true,
+      mediaCount: paths.length,
+      setBy,
+      imageButtonProof,
+      attachmentProof,
+      proof: await this._readCommunityComposerProof(),
+    };
   }
 
+  async _readCommunityImageAttachmentProof(expectedCount = 1) {
+    return await this.page.evaluate(expected => {
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const imagePreviews = [...document.querySelectorAll('img')]
+        .filter(visible)
+        .map(el => {
+          const rect = el.getBoundingClientRect();
+          return {
+            alt: el.getAttribute('alt') || '',
+            src: el.currentSrc || el.src || '',
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          };
+        })
+        .filter(item => {
+          if (/(avatar|fayebaba)/i.test(item.alt)) return false;
+          if (item.width < 40 || item.height < 40) return false;
+          return /^data:image/i.test(item.src)
+            || /^blob:/i.test(item.src)
+            || /googleusercontent|ggpht|ytimg/i.test(item.src);
+        });
+      const buttons = [...document.querySelectorAll('button, [role="button"], [aria-label]')]
+        .filter(visible)
+        .map(el => textOf(el) || el.getAttribute('aria-label') || '')
+        .filter(Boolean);
+      const attachmentButtons = buttons.filter(label => /Cancel image post|Edit preview|Delete/i.test(label));
+      return {
+        hasAttachment: imagePreviews.length >= Math.min(Number(expected) || 1, 1)
+          || attachmentButtons.some(label => /Cancel image post|Edit preview/i.test(label)),
+        expectedCount: Number(expected) || 1,
+        imagePreviewCount: imagePreviews.length,
+        attachmentButtons,
+        imagePreviews: imagePreviews.map(item => ({
+          ...item,
+          src: item.src.slice(0, 120),
+        })).slice(0, 10),
+        sampledText: (document.body?.innerText || '').slice(0, 1000),
+      };
+    }).catch(error => ({
+      hasAttachment: false,
+      expectedCount,
+      imagePreviewCount: 0,
+      attachmentButtons: [],
+      imagePreviews: [],
+      sampledText: String(error?.message || error || '').slice(0, 1000),
+    }));
+  }
   async _openCommunityScheduleMenu() {
     const clickedScheduleDirect = await this._clickCommunityControl(/^(Schedule post|Schedule)$/i, { preferRole: 'button' });
     if (clickedScheduleDirect) {
@@ -550,18 +623,22 @@ class YouTubeCommunityStudioUploader extends YouTubeStudioUploader {
           if (el.tagName === 'YT-FORMATTED-STRING') score += 40;
           if (el.tagName === 'DIV') score -= 30;
           if (rect.width > 700) score -= 20;
-          return {
-            x: Math.round(rect.x + rect.width / 2),
-            y: Math.round(rect.y + rect.height / 2),
-            tag: el.tagName,
-            role: actualRole,
-            text: textOf(el),
-            aria: el.getAttribute('aria-label') || '',
-            score,
-          };
+          return { el, tag: el.tagName, role: actualRole, text: textOf(el), aria: el.getAttribute('aria-label') || '', score };
         })
         .sort((a, b) => b.score - a.score);
-      return ranked[0] || null;
+      const picked = ranked[0] || null;
+      if (!picked) return null;
+      picked.el.scrollIntoView({ block: 'center', inline: 'center' });
+      const rect = picked.el.getBoundingClientRect();
+      return {
+        x: Math.round(rect.x + rect.width / 2),
+        y: Math.round(rect.y + rect.height / 2),
+        tag: picked.tag,
+        role: picked.role,
+        text: picked.text,
+        aria: picked.aria,
+        score: picked.score,
+      };
     }, {
       text: target.text || '',
       aria: target.aria || '',

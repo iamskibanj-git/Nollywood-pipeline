@@ -147,6 +147,13 @@ async function testPublisherRequiresScheduleConfirmation() {
   }
 }
 
+function testImageUploaderHardeningIsPresent() {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'social', 'youtube-community-posts.js'), 'utf8');
+  assert(source.includes("waitForEvent('filechooser'"), 'image upload should use the Image button/filechooser path');
+  assert(source.includes('_readCommunityImageAttachmentProof'), 'image upload should require attachment proof');
+  assert(source.includes('YOUTUBE_COMMUNITY_IMAGE_ATTACHMENT_PROOF_NOT_FOUND'), 'missing image attachment proof should be a hard failure');
+  assert(source.includes("scrollIntoView({ block: 'center'"), 'offscreen Community controls should be scrolled into view before clicking');
+}
 async function testControllerSchedulesCommunityJobThroughPublisher() {
   const jobs = [{
     id: 77,
@@ -218,6 +225,7 @@ async function main() {
   testPrepareUpsertsCommunityJob();
   await testPublisherRequiresScheduleConfirmation();
   await testControllerSchedulesCommunityJobThroughPublisher();
+  testImageUploaderHardeningIsPresent();
   console.log('test-social-youtube-community-foundation passed');
 }
 
